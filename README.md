@@ -1,215 +1,134 @@
 # @brglng/pi-session-sync
 
-Bidirectional session synchronization for the [Pi coding agent](https://github.com/earendil-works/pi-mono).
+Bidirectional session synchronization extension for the [Pi coding agent](https://github.com/earendil-works/pi-mono). It synchronizes only Pi’s `.jsonl` and `.md` files between Pi’s effective local session root and one portable target directory.
 
-The extension keeps Pi's local session directories in Pi's normal
-`--<encoded-cwd>--` layout and mirrors their `.jsonl` and `.md` files into one
-portable target directory. Windows is not actively supported by this project;
-pull requests are welcome. Session metadata is rewritten while it is mirrored:
+Local paths become `pi-session-sync://` URIs in the target and return to machine-local paths during reverse sync.
 
-- local absolute `cwd` values become `pi-session-sync://<label><encoded-remainder>`
-  using configured naming labels;
-- target `cwd` URIs become the current machine's absolute paths;
-- absolute `parentSession` paths become portable file URIs and are restored on
-  the local machine. Flat references keep the referenced path's own mapping;
-  they are not assigned the current file's mapping when unresolved.
+## User guide
 
-## Installation
+### Install
 
 ```bash
 pi install npm:@brglng/pi-session-sync
 ```
 
-Pi loads the package extension from its `pi.extensions` entry. The extension
-requires `@earendil-works/pi-coding-agent` 0.84.0 or newer for its public
-session-root and refresh APIs.
+- Requires Pi `@earendil-works/pi-coding-agent >=0.84.0` for public session-root, idle, and refresh APIs.
 
-## Configuration
+### Configure
 
-Create the global configuration file
-`~/.pi/agent/extensions/pi-session-sync/config.json`:
+Create global file `~/.pi/agent/extensions/pi-session-sync/config.json`:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/brglng/pi-session-sync/main/schemas/config.schema.json",
-  "targetDir": "~/sync/pi-sessions",
-  "homeLabel": "HOME",
-  "rootLabel": "ROOT",
-  "extraPrefixes": {}
+  "targetDir": "~/sync/pi-sessions"
 }
 ```
 
-`targetDir` is required and must already exist as a real directory. Schema
-path forms are a cross-platform superset: they accept absolute spellings and
-paths beginning with `~`; runtime expands and validates paths using native
-platform rules. `homeLabel` and `rootLabel`
-default to `HOME` and `ROOT`; `extraPrefixes` defaults to `{}`. Each
-`extraPrefixes` key must be an absolute path and each value must be a non-empty cross-platform-safe
-Unicode label segment. Labels must not contain `/`, `\\`, `%`, `:`, `?`, `*`, `"`, `<`, `>`, or `|`,
-NUL, or control characters. Labels must not end in a dot or space, use a reserved Windows device
-name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, or `LPT1`–`LPT9`, case-insensitively, including
-extensions), equal `.pi-session-sync-state.json` (case-insensitively), or equal `.` or `..`.
-Prefixes and labels may overlap. Schema accepts cross-platform absolute
-prefix spellings; runtime validates each prefix with native platform rules.
-Windows-shaped `extraPrefixes` keys (for example `C:/work` or `//server/share`)
-are intentionally supported on every platform so a target directory written on
-another machine can be decoded cross-machine. Decoding returns the configured
-prefix spelling; matching and naming-config fingerprints compare case-insensitively
-only on native Windows. A Windows-shaped name decoded on POSIX is never treated
-as a native local absolute path: such target trees are file errors, not local
-sessions.
-Matching uses path-segment boundaries, chooses the longest prefix, and rejects
-distinct equal-length prefixes. An extra prefix equal to HOME or
-ROOT is allowed and overrides that built-in mapping. Decoding chooses the
-longest label, but rejects labels that map to more than one configured prefix.
-Labels must never equal the reserved state filename
-`.pi-session-sync-state.json` (case-insensitively); that basename is reserved
-for the sync state manifest at the target root and is never synchronized as a
-session file. Project configuration is not supported.
+- Project-level configuration is not supported.
+- `targetDir` is required: use an absolute or `~` path to an existing real, non-symlink directory.
+- `homeLabel` defaults to `HOME`; `rootLabel` defaults to `ROOT`; `extraPrefixes` defaults to `{}`.
+- `extraPrefixes` maps absolute path prefixes to portable labels.
 
-The command captures Pi's process cwd, `ctx.sessionManager.getSessionDir()`, and CLI
-`--session-dir` provenance before its idle wait, so Pi's actual effective
-session root is used. The public `usesDefaultSessionDir()` method reports path
-equality, not override provenance. When an explicit CLI, environment,
-global-settings, or project-settings `sessionDir` happens to equal Pi's
-computed default child and that provenance is observable, captured provenance
-keeps that root's custom flat semantics instead of trusting path equality.
-When no explicit override is observable and the reported path equals Pi's
-default child, default nested semantics take priority even if argv provenance
-is unavailable. An embedded host that passes that same path as a custom flat
-root without provenance cannot be distinguished and may be treated as nested;
-ordinary default launches are not rejected for missing argv provenance.
+### Run
 
-If an older host does not expose the actual session directory, the extension
-uses observable CLI arguments and settings in Pi's precedence order:
-
-1. `--session-dir <dir>` in `process.argv`;
-2. `PI_CODING_AGENT_SESSION_DIR`;
-3. `sessionDir` from the Pi startup project's `.pi/settings.json`, merged over
-   `~/.pi/agent/settings.json`;
-4. `<agentDir>/sessions`.
-
-Relative fallback `sessionDir` values resolve from Pi's process cwd, not a
-resumed session cwd. An explicitly configured `sessionDir` is treated as Pi's
-flat session root: root and nested `.jsonl`/`.md` files are grouped by their
-`cwd` values and written under target portable directories. Files without a
-`cwd` inherit the nearest unambiguous containing-directory mapping; files with
-no mapping are errors. With no explicit setting, `<agentDir>/sessions` uses
-Pi's nested `--<encoded-cwd>--` layout.
-
-A launcher that hides or rewrites `--session-dir` or makes effective
-session-directory provenance unreadable cannot be distinguished through Pi
-0.84's public APIs when the reported path equals the computed default child.
-The extension gives default nested semantics priority for that ambiguous
-equal-path launch; preserve provenance or use a distinct custom session root
-when flat semantics are required. It still captures `getSessionDir()` itself
-and never substitutes a configured fallback when that public value exists.
-
-Portable directory names use configured labels with URL percent encoding.
-Defaults are `HOME` and `ROOT`; extra prefixes can assign labels to paths such
-as shared workspaces. Native Windows CWD casing differences share one mapping
-identity, while POSIX paths remain case-sensitive. Labels remain semantic when
-decoded: a `ROOT`-labeled path that happens to be under a machine's current home
-directory remains `ROOT`, and round trips preserve its original label. The
-extension does not read or depend on `@brglng/pi-portable-sessions`.
-
-## Synchronize
-
-Run the command in Pi:
+Start Pi, then run:
 
 ```text
 /session-sync
 ```
 
-The command waits for Pi to become idle. A command context reporting an
-in-memory/`--no-session` session is refused before config fallback, machine-id,
-or state access. During synchronization, session switching, forking, tree
-navigation, compaction, new input, tool calls, and user bash commands are
-guarded in the current Pi process. The runtime-shared lock survives extension
-reloads in the same Pi process. Pi may still append a synthetic record for a
-blocked operation; these public guards do not promise a record-free transcript.
+- Sync is manual. There is no automatic background sync.
 
-When target data replaces the current active session file, the command calls
-public `ctx.switchSession(currentSessionFile)` after commit to refresh Pi's
-in-memory session manager and treats that switch as terminal. A target JSONL
-used for this refresh must have a valid first entry that is a Pi session header
-with `type: "session"`, string `id`, and string `cwd`; its decoded cwd must
-still exist as a directory. Missing or invalid headers, missing cwds, and
-non-directory cwds are rejected before commit because Pi would fall back to
-process cwd or reject the switch. Ordinary
-non-active cwd-less files remain valid. The captured active session directory
-itself must be inside effective `sessionsRoot`: flat layout requires it to equal
-the root, while nested layout requires one direct child. The active file dirname
-must equal that directory using native path semantics (case-sensitive on POSIX).
-Nested files under custom flat roots or default nested session trees are rejected
-before commit, because switching them would drift Pi's session root. During the
-intentional refresh switch, only the matching `session_before_switch` target is
-allowed; unrelated switches and all fork/tree/compact operations remain blocked.
-If synchronization would delete the active local session file, it fails before
-commit and leaves both sides unchanged.
+### What happens
 
-Pi has no public cancellable hook around direct SessionManager persistence for
-metadata commands such as `/name`, model changes, thinking-level changes, or
-RPC metadata writes. The extension cannot safely monkey-patch private
-persistence paths; such direct or synthetic records remain a host API
-limitation after the idle barrier.
+- An in-memory or `--no-session` session without an actual session directory is refused before fallback, machine-id, or state access.
 
-Before writing either side, the extension parses and validates every selected
-file and stages rewritten copies in a temporary directory. A parse error,
-malformed URI, ownership mismatch, invalid target, or other file error stops the
-sync before staged files are committed.
+## Technical reference
 
-Only `.jsonl` and `.md` files are synchronized. JSONL is parsed line by line;
-all recursive `cwd` and `parentSession` string fields are handled. Only one
-empty split element from a terminal newline is allowed; internal or extra
-whitespace-only lines are errors. Cwd and parent-session sync URIs accept the
-scheme case-insensitively; parent-session URIs also require canonical
-percent-encoded relative segments. Windows drive- and UNC-shaped absolute
-`parentSession` values are rejected even when running on POSIX.
-Markdown rewrites only recursive `cwd` fields inside standard YAML frontmatter
-at the start of the file; Markdown body text and frontmatter `parentSession`
-fields are unchanged. Frontmatter is mutated as a YAML AST, so unrelated
-standard tags, anchors, aliases, comments, and values are preserved. Scalar
-anchors used by `cwd` fields are isolated at every `cwd` use-site, even when no
-unrelated alias exists; unrelated anchors and aliases retain their original
-value and graph. Rendering
-removes only the serializer-added document line break; comment-only frontmatter
-and significant scalar trailing whitespace/newlines are retained.
+### Naming
 
-A `.pi-session-sync-state.json` file at the target root records scopes keyed
-by effective sessions root/layout, portable logical file baselines, hashes,
-mtimes, directory mappings, deletion tombstones, per-machine local snapshots,
-and each scope's normalized naming configuration. Changing labels or prefixes
-causes synchronization to stop rather than migrating existing target trees. Scope identity retains case-sensitive root distinctions, while
-filesystem destination checks remain conservative. Each machine keeps its stable identity in
-`~/.pi/agent/extensions/pi-session-sync/machine-id`. A machine without a local
-snapshot restores target files first; an already-known machine can propagate
-its own deletions. Tombstoned flat-path mappings are retired only after their
-old logical entry is absent, so a later portable tree may reuse that relative
-path. If a complete initial local scan is unavailable, persisted nested and
-flat mappings remain available through the retry; they are retired only after
-a successful local rescan and its decisions. Nested semantic-label migration
-moves live entries only; stale tombstoned old-label files are processed under
-their old key before a same-cwd target label is adopted. The first run creates
-a baseline without inferring deletions. Later one-sided deletions propagate
-and are kept from reappearing unless a recreated file has an mtime strictly
-later than its tombstone and a content hash change relative to the current
-machine snapshot or common baseline. For a known machine, the current machine
-snapshot is used when available; otherwise the common baseline is used. A
-merely touched unchanged file does not revive a deletion. When both sides
-changed, the newer mtime wins; equal mtimes are reported as conflicts.
+- Portable names combine labels with URL percent encoding; no dependency on `@brglng/pi-portable-sessions`.
+- Labels are non-empty, cross-platform-safe Unicode path/URI segments.
+- Labels reject `/`, `\\`, `%`, `:`, `?`, `*`, `"`, `<`, `>`, `|`, NUL, controls, `.`, `..`, and trailing `.` or spaces.
+- Labels also reject `.pi-session-sync-state.json` and case-insensitive Windows device names `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, and `LPT1`–`LPT9`, including extensions.
+- Prefixes and labels may overlap. Prefix matching uses path-segment boundaries and the longest match; distinct equal-length matches are configuration errors.
+- An extra prefix equal to built-in `HOME` or `ROOT` overrides that built-in mapping.
+- Decoding uses the longest label. One label mapping to multiple prefixes is ambiguous and fails.
+- Labels retain semantics: `ROOT` remains `ROOT` even when its decoded path falls under the current machine’s home.
+- POSIX identity is case-sensitive and treats `\\` literally; native Windows identity is case-insensitive and treats it as a separator.
+- Windows-shaped absolute keys such as `C:/work` and `//server/share` decode on every platform using configured prefix spelling.
+- On POSIX, decoded drive and UNC paths are file errors, not local session paths. Schema paths are cross-platform; runtime checks use native rules.
 
-The source `sessionsRoot` itself must already exist as a real directory;
-a missing, symlinked, or non-directory source root is a fatal configuration error, not an ignored child.
-`targetDir` itself must already be an existing real non-symlink directory; a
-symlinked target root, missing target, or non-directory target is fatal. Target
-ancestors are allowed to be symlinks and are not inspected, including macOS
-`/var` and `/tmp` system aliases. Symlinked files and directories below either
-root are ignored with warnings and never followed; child symlink safety checks
-block only affected logical paths. Unknown root/tree entries are likewise
-ignored with warnings. Root and target validation happens before creating
-machine-id, state, or session files. Empty session directories are removed
-after propagated deletions. The extension makes no cross-process race or full atomicity promise. Rollback is
-not part of the current acceptance scope; the guarantee is correct staged files
-and no synchronization commit when parsing, validation, staging, or preflight
-fails.
+### Root and layout
+
+- Before idle, capture startup cwd, CLI provenance, active-file values, and public `ctx.sessionManager.getSessionDir()`.
+- On Pi `>=0.84`, the actual public session directory wins when available; there is no source-root configuration setting.
+- If unavailable, fallback precedence is CLI `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, project `.pi/settings.json` over global `~/.pi/agent/settings.json`, then `<agentDir>/sessions`.
+- Relative fallback `sessionDir` values resolve from Pi’s process cwd.
+- Explicit CLI, environment, and settings roots are flat; the implicit `<agentDir>/sessions` root uses nested `--<encoded-cwd>--` directories.
+- `usesDefaultSessionDir()` reports path equality, not provenance; observable equal-path overrides remain flat.
+- Without explicit override, nested semantics win if argv provenance is unavailable; equal-path custom embedded roots may be treated as nested.
+- Missing argv provenance alone does not reject ordinary defaults; preserve provenance or use a distinct root for flat semantics.
+
+### Lifecycle
+
+- `/session-sync` reserves a runtime lock before waiting for full idle; the lock survives extension reloads in the same Pi process.
+- During sync, the process guards switching, forking, tree navigation, compaction, new input, tool calls, and user bash.
+- Target replacement commits, then calls public `ctx.switchSession(currentSessionFile)` to refresh Pi’s manager and session tree.
+- Only the matching refresh switch is allowed; unrelated lifecycle operations remain blocked, and canceled refresh is failure.
+- Refresh target `.jsonl` must begin with header `type: "session"`, string `id`, and string `cwd`; decoded cwd must exist as a directory.
+- Missing or invalid headers, missing cwds, and non-directories fail before commit.
+- Deleting the active local file or logical target counterpart fails before commit and leaves both sides unchanged.
+- The active session directory must be inside `sessionsRoot`: flat equals root; nested is one direct child. The active file dirname must equal it.
+- Nested files under custom flat roots or default nested trees are rejected because refresh could move Pi’s session root.
+
+### Transforms
+
+- Only `.jsonl` and `.md` synchronize. JSONL parses line by line and recursively transforms string `cwd` and `parentSession` fields; local `cwd` becomes `pi-session-sync://<portableName>`, and target URI becomes local absolute path.
+- Only one terminal newline is allowed; internal or extra blank lines fail.
+- Any `pi-session-sync:` prefix must be a valid case-insensitive `pi-session-sync://` URI.
+- Local absolute JSONL `parentSession` paths inside `sessionsRoot` become `pi-session-sync://<portableName>/<relativePath>` relative to the referenced session directory; relative values remain unchanged and reverse URIs restore locally.
+- Parent URI relative paths use `/`, canonical percent-encoded cross-platform-safe segments, and no traversal. Existing references must be regular files; not-yet-created references may be valid.
+- POSIX rejects Windows drive and UNC-shaped absolute parents. Flat absolute parents use their own exact or containing mapping, never the current file’s mapping.
+- Markdown reads only standard YAML frontmatter at file start, recursively rewrites `cwd`, and leaves the body unchanged. No frontmatter means no `cwd` mapping.
+- Frontmatter `parentSession` gets JSONL-equivalent type, URI, range, and Windows-shaped-path validation, but its bytes remain unchanged.
+- Valid Markdown absolute and sync references are canonicalized separately for mapping and content hashes.
+- YAML AST mutation preserves standard tags, anchors, aliases, comments, scalar values, delimiter whitespace, and significant trailing whitespace/newlines.
+- Shared scalar anchors are cloned at `cwd` use sites when needed, protecting non-`cwd` values and the remaining anchor/alias graph.
+- JSON and YAML numbers JavaScript cannot preserve losslessly are rejected before staging, never rounded or converted to `null`.
+
+### Mappings, state, and tombstones
+
+- Target trees use `<targetDir>/<portableName>/...`; nested local children retain relative paths. Every file’s logical cwd must match its directory mapping.
+- Nested children keep the top-level session cwd. Cwd-less files inherit the nearest unambiguous containing mapping; no mapping is an error.
+- Flat roots group each file by its `cwd`. Valid parent references from JSONL or Markdown may establish parent-only mappings without live files.
+- Live mapping wins over parent-only evidence, but different semantic labels for one decoded cwd fail, including live versus parent-only references.
+- Target-root `.pi-session-sync-state.json` is real version-1 JSON with scopes by effective `sessionsRoot` and layout.
+- State records logical baselines, canonical hashes and mtimes, directory mappings, deletion tombstones, per-machine snapshots, and normalized naming configuration.
+- Scope roots stay case-sensitive; destination checks are conservative. Stable machine id: `~/.pi/agent/extensions/pi-session-sync/machine-id`.
+- No local snapshot restores target first; known machines can propagate local deletions.
+- Naming changes stop sync instead of migrating existing target trees.
+- The first run establishes a common baseline and infers no one-sided deletions. Later missing sides record discovery-time tombstones and can propagate deletion.
+- Recovery requires mtime strictly later than the tombstone and changed hash against the current-machine snapshot or common baseline; touching unchanged content does not revive it.
+- Newer mtime wins when both sides change; equal mtimes conflict.
+- Deletion versus modification uses deletion and modification times.
+- Flat tombstoned mappings retire only after their old logical entry is absent. Nested migration moves live entries only; old tombstones stay under their old key before new labels are adopted.
+- Tombstone-only old-label trees never become new-label first-seen trees.
+- Canonical hashes normalize local paths and sync URIs to one portable representation; native Windows case-folds parent-relative segments, and copies preserve source mtimes.
+
+### Validation and commit boundary
+
+- `sessionsRoot` and `targetDir` must be existing real, non-symlink directories and must not overlap.
+- Target ancestors are not inspected for symlinks, including macOS `/var` and `/tmp` aliases.
+- Symlinked files and directories below either root are never followed; they are ignored with warnings.
+- Unknown entries, default-root files, and unsupported types are ignored with warnings; unsafe relative segments are errors.
+- Root, type, containment, symlink, cross-platform segment, and state checks run before session writes.
+- State file must be real regular version-1 JSON at target root.
+- All selected files are parsed and validated, then rewritten copies are staged in a temporary directory.
+- Parse, validation, preflight, or staging failure stops the entire sync before session/state commit; no staged result commits.
+
+### Limitations
+
+- No cross-process race protection or full atomicity guarantee; rollback is outside acceptance scope.
+- Pi exposes no cancellable public hook around direct `SessionManager` metadata persistence; public lifecycle guards may still permit synthetic records.
+- Windows is not actively supported by this project; pull requests are welcome. Cross-platform naming and foreign-prefix compatibility are implemented.
