@@ -1,5 +1,7 @@
 # @brglng/pi-session-sync
 
+[Chinese](README.zh-CN.md)
+
 Bidirectional session synchronization extension for the [Pi coding agent](https://github.com/earendil-works/pi-mono). It synchronizes only Pi’s `.jsonl` and `.md` files between Pi’s effective local session root and one portable target directory.
 
 Local paths become `pi-session-sync://` URIs in the target and return to machine-local paths during reverse sync.
