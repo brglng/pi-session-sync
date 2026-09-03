@@ -1,0 +1,74 @@
+{
+  "name": "@brglng/pi-session-sync",
+  "version": "0.3.0",
+  "description": "Bidirectional session synchronization for the Pi coding agent",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/public.d.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src",
+    "dist",
+    "config/config.example.json",
+    "schemas/config.schema.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build:types": "rollup -c rollup.dts.config.mjs",
+    "prepack": "pnpm run build:types",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check ."
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "coding-agent",
+    "sessions",
+    "sync"
+  ],
+  "author": {
+    "name": "brglng"
+  },
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brglng/pi-session-sync.git"
+  },
+  "homepage": "https://github.com/brglng/pi-session-sync#readme",
+  "bugs": {
+    "url": "https://github.com/brglng/pi-session-sync/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "^22.15.0",
+    "rollup": "^4.52.5",
+    "rollup-plugin-dts": "^6.2.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/brglng/pi-session-sync/main/schemas/config.schema.json",
+  "title": "Pi session sync configuration",
+  "type": "object",
+  "required": ["targetDir"],
+  "$defs": {
+    "safeLabel": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!\\.[pP][iI]-[sS][eE][sS][sS][iI][oO][nN]-[sS][yY][nN][cC]-[sS][tT][aA][tT][eE]\\.[jJ][sS][oO][nN]$)(?!\\.{1,2}$)(?![\\s\\S]*[/\\\\%:])(?![\\s\\S]*[?*\\\"<>|])(?![\\s\\S]*[. ]$)(?!(?:[cC][oO][nN]|[pP][rR][nN]|[aA][uU][xX]|[nN][uU][lL]|[cC][oO][mM][1-9]|[lL][pP][tT][1-9])(?:\\..*)?$)(?![\\s\\S]*[\\u0000-\\u001F\\u007F-\\u009F])[\\s\\S]+$"
+    }
+  },
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "targetDir": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:~(?:[/\\\\].*|$)|/.*|[A-Za-z]:[/\\\\].*|\\\\\\\\.*)$",
+      "description": "Cross-platform path-form superset: absolute target path or path beginning with ~. Runtime accepts only native-platform absolute/path forms after expansion."
+    },
+    "homeLabel": {
+      "$ref": "#/$defs/safeLabel",
+      "default": "HOME",
+      "description": "Label for paths below current machine home directory; native Windows CWD case differences share mapping identity, while POSIX paths remain case-sensitive."
+    },
+    "rootLabel": {
+      "$ref": "#/$defs/safeLabel",
+      "default": "ROOT",
+      "description": "Label for absolute paths not covered by homeLabel or extraPrefixes; labels remain semantic after decoding."
+    },
+    "extraPrefixes": {
+      "type": "object",
+      "default": {},
+      "propertyNames": {
+        "pattern": "^(?:/.*|[A-Za-z]:[/\\\\].*|\\\\\\\\.*)$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/safeLabel"
+      },
+      "description": "Cross-platform path-form superset of absolute path prefixes mapped to non-empty portable labels; runtime applies native-platform path validation. Foreign Windows-shaped keys are accepted intentionally for cross-machine target decoding; on Windows, decoding returns the configured prefix spelling while identity comparisons fold case."
+    }
+  },
+  "additionalProperties": true
+}

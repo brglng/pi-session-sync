@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/brglng/pi-session-sync/main/schemas/config.schema.json",
+  "targetDir": "~/sync/pi-sessions",
+  "homeLabel": "HOME",
+  "rootLabel": "ROOT",
+  "extraPrefixes": {
+    "/shared/workspace": "SHARED",
+    "C:/work": "WIN"
+  }
+}
