@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { lstat, stat } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { SessionLayout } from "./config.ts";
 import {
@@ -29,7 +29,6 @@ import {
   pathHasSymlink,
   targetPathForKey,
 } from "./sync-paths-keys.ts";
-import { errorMessage } from "./sync-snapshots.ts";
 import { parseLogicalKey } from "./sync-state-core.ts";
 import { canonicalStatePortableName } from "./sync-state-normalize.ts";
 import type { CopyAction, DecisionContext, DeleteAction, FileDecision } from "./sync-types.ts";
@@ -721,17 +720,5 @@ export async function validateActiveRefreshSource(
   const decoded = decodePortableSessionDirName(portableName, ctx.namingOptions);
   if (decoded === null) {
     throw new Error(`Cannot decode active session cwd: ${source.key}`);
-  }
-  let cwdInfo: Awaited<ReturnType<typeof stat>>;
-  try {
-    cwdInfo = await stat(decoded.cwd);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`Cannot refresh active session with missing cwd: ${decoded.cwd}`);
-    }
-    throw new Error(`Cannot verify active session cwd ${decoded.cwd}: ${errorMessage(error)}`);
-  }
-  if (!cwdInfo.isDirectory()) {
-    throw new Error(`Cannot refresh active session with non-directory cwd: ${decoded.cwd}`);
   }
 }

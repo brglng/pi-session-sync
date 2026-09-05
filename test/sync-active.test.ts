@@ -445,13 +445,12 @@ describe("bidirectional session sync active sessions", () => {
     }
   });
 
-  it("rejects active refresh when target session cwd does not exist", async () => {
+  it("refreshes active session when target session cwd does not exist", async () => {
     const fixture = await makeFixture();
     const missingCwd = join(fixture.root, "missing-active-project");
     const missingName = portableSessionDirName(missingCwd);
     const source = join(fixture.sessionsRoot, defaultSessionDirName(missingCwd), "session.jsonl");
     const targetFile = join(fixture.targetDir, missingName, "session.jsonl");
-    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
     try {
       await mkdir(dirname(source), { recursive: true });
       await writeFile(source, `${JSON.stringify({ cwd: missingCwd, value: "local" })}\n`);
@@ -462,33 +461,29 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "active-missing-project-machine",
         now: 75_500,
       });
-      const before = await readFile(statePath, "utf8");
       await writeFile(
         targetFile,
         `${JSON.stringify({ type: "session", id: "missing-cwd", cwd: `pi-session-sync://${missingName}`, value: "target" })}\n`,
       );
       await utimes(targetFile, 2, 2);
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          machineId: "active-missing-project-machine",
-          activeSessionFile: source,
-          now: 76_500,
-        }),
-      ).rejects.toThrow(/missing cwd/);
-      expect(JSON.parse(await readFile(source, "utf8")).value).toBe("local");
-      expect(await readFile(statePath, "utf8")).toBe(before);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "active-missing-project-machine",
+        activeSessionFile: source,
+        now: 76_500,
+      });
+      expect(summary.refreshSessionFile).toBe(source);
+      expect(JSON.parse(await readFile(source, "utf8")).value).toBe("target");
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects active refresh when decoded session cwd is not a directory", async () => {
+  it("refreshes active session when decoded session cwd is not a directory", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "session.jsonl");
     const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
-    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
     try {
       await writeFile(fixture.cwd, "not a directory\n");
       await writeFile(
@@ -502,24 +497,20 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "active-non-directory-machine",
         now: 77_000,
       });
-      const before = await readFile(statePath, "utf8");
       await writeFile(
         targetFile,
         `${JSON.stringify({ type: "session", id: "active", cwd: `pi-session-sync://${fixture.portableName}`, value: "target" })}\n`,
       );
       await utimes(targetFile, 2, 2);
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          machineId: "active-non-directory-machine",
-          activeSessionFile: source,
-          now: 77_500,
-        }),
-      ).rejects.toThrow(/non-directory cwd/);
-      expect(JSON.parse(await readFile(source, "utf8")).value).toBe("local");
-      expect(JSON.parse(await readFile(targetFile, "utf8")).value).toBe("target");
-      expect(await readFile(statePath, "utf8")).toBe(before);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "active-non-directory-machine",
+        activeSessionFile: source,
+        now: 77_500,
+      });
+      expect(summary.refreshSessionFile).toBe(source);
+      expect(JSON.parse(await readFile(source, "utf8")).value).toBe("target");
     } finally {
       await cleanup(fixture.root);
     }
