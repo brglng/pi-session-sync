@@ -828,7 +828,15 @@ export function nestedReplacementDecision(
   if (!isMarkdownSource && sourceParentReferenceIndex !== sourceParentReplays.length) {
     throw new Error("Replacement parentSession references were not preserved");
   }
+  const replacementGroup = canonicalStatePortableName(portableName, ctx.namingOptions);
   for (const mapping of sourceParentMappings) {
+    const localIdentity = nativeNameIdentity(mapping.localName);
+    const groups = ctx.nestedReplacementParentMappingGroups.get(localIdentity);
+    if (groups === undefined) {
+      ctx.nestedReplacementParentMappingGroups.set(localIdentity, new Set([replacementGroup]));
+    } else {
+      groups.add(replacementGroup);
+    }
     const existing = mappingForNativeName(ctx.nestedReplacementParentMappings, mapping.localName);
     if (existing === undefined) {
       ctx.nestedReplacementParentMappings.set(mapping.localName, mapping.portableName);

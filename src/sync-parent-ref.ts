@@ -18,7 +18,7 @@ import {
   splitRelativePath,
   targetParentReferenceRelativePath,
 } from "./sync-paths-keys.ts";
-import { stateEntryForKey } from "./sync-state-core.ts";
+import { parseLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
 import { canonicalStatePortableName } from "./sync-state-normalize.ts";
 import { type DecisionContext, type FileDecision, SyncFailure } from "./sync-types.ts";
 
@@ -302,7 +302,14 @@ export function liveTargetParentDirectoryMappings(
   warnings: string[] = targetScan.warnings,
 ): Map<string, string> {
   const mappings = new Map<string, string>();
-  const candidates = new Map<string, { localName: string; portableName: string }>();
+  const candidates = new Map<
+    string,
+    {
+      localName: string;
+      portableName: string;
+      introducingGroups: Set<string>;
+    }
+  >();
   for (const target of targetScan.files.values()) {
     if (
       (ctx.layout === "nested" &&
@@ -311,19 +318,32 @@ export function liveTargetParentDirectoryMappings(
       flatTargetKeyIdentityIsStale(target.key, ctx)
     )
       continue;
+    const targetGroup =
+      ctx.layout === "nested"
+        ? canonicalStatePortableName(
+            parseLogicalKey(target.key, ctx.namingOptions).portableName,
+            ctx.namingOptions,
+          )
+        : undefined;
     for (const reference of target.parentSessionReferences) {
       const mapping =
         parentMappingFromReference(reference, ctx) ??
         parentMappingFromAbsoluteReference(reference, ctx);
-      if (mapping !== undefined) {
-        candidates.set(
-          `${nativeNameIdentity(mapping.localName)}\0${canonicalStatePortableName(mapping.portableName, ctx.namingOptions)}`,
-          mapping,
-        );
+      if (mapping === undefined) continue;
+      const candidateKey = `${nativeNameIdentity(mapping.localName)}\0${canonicalStatePortableName(mapping.portableName, ctx.namingOptions)}`;
+      const candidate = candidates.get(candidateKey);
+      if (candidate === undefined) {
+        candidates.set(candidateKey, {
+          ...mapping,
+          introducingGroups: targetGroup === undefined ? new Set() : new Set([targetGroup]),
+        });
+      } else if (targetGroup !== undefined) {
+        candidate.introducingGroups.add(targetGroup);
       }
     }
   }
-  for (const mapping of candidates.values()) {
+  for (const candidate of candidates.values()) {
+    const mapping = candidate;
     if (!targetParentMappingIsLive(mapping, targetScan, localScan, state, hadState, ctx)) {
       continue;
     }
@@ -336,6 +356,18 @@ export function liveTargetParentDirectoryMappings(
         `Conflicting live parentSession directory mapping for ${mapping.localName}: ${existing} and ${mapping.portableName}`,
         warnings,
       );
+    }
+    if (ctx.layout === "nested" && candidate.introducingGroups.size > 0) {
+      const localIdentity = nativeNameIdentity(mapping.localName);
+      const groups = ctx.nestedTargetParentMappingGroups.get(localIdentity);
+      if (groups === undefined) {
+        ctx.nestedTargetParentMappingGroups.set(
+          localIdentity,
+          new Set(candidate.introducingGroups),
+        );
+      } else {
+        for (const group of candidate.introducingGroups) groups.add(group);
+      }
     }
     if (existing === undefined) mappings.set(mapping.localName, mapping.portableName);
   }

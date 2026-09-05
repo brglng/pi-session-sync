@@ -28,6 +28,8 @@ import { scanSessions } from "../src/scan.ts";
 import { emptyState } from "../src/state.ts";
 import { STATE_FILE_NAME, syncSessions } from "../src/sync.ts";
 import { reclassifyStaleNestedLocalFiles } from "../src/sync-nested-core.ts";
+import { preflightDecisions } from "../src/sync-preflight.ts";
+import { migrateNestedStateEntries } from "../src/sync-retirement-nested.ts";
 import { hashText } from "../src/sync-snapshots.ts";
 import type { DecisionContext } from "../src/sync-types.ts";
 import { createParentPathResolver, transformFileText } from "../src/transform.ts";
@@ -687,8 +689,10 @@ describe("p1 regressions nested labels", () => {
     const sessionsRoot = join(root, "sessions");
     const targetDir = join(root, "target");
     const cwd = join(homedir(), `pi-sync-repl-firstseen-${Date.now()}`);
+    const parentCwd = join(homedir(), `pi-sync-repl-firstseen-parent-${Date.now()}`);
     const localName = defaultSessionDirName(cwd);
     const oldName = portableSessionDirName(cwd);
+    const parentName = portableSessionDirName(parentCwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const localTree = join(sessionsRoot, localName);
     const oldTargetTree = join(targetDir, oldName);
@@ -744,7 +748,13 @@ describe("p1 regressions nested labels", () => {
       // the logical replacement group.
       await writeFile(
         join(newTargetTree, "fresh.jsonl"),
-        `${JSON.stringify({ type: "session", id: "s3", cwd: `pi-session-sync://${newName}`, value: "fresh" })}\n`,
+        `${JSON.stringify({
+          type: "session",
+          id: "s3",
+          cwd: `pi-session-sync://${newName}`,
+          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          value: "fresh",
+        })}\n`,
       );
       await utimes(join(newTargetTree, "fresh.jsonl"), 500, 500);
 
@@ -791,6 +801,11 @@ describe("p1 regressions nested labels", () => {
       expect(
         Object.keys(stateAfter.entries).filter((key) => key.startsWith(`${newName}/`)),
       ).toEqual([]);
+      expect(
+        stateAfter.scopes[Object.keys(stateAfter.scopes)[0] ?? ""]?.directories[
+          defaultSessionDirName(parentCwd)
+        ],
+      ).toBeUndefined();
       // Old-label content stays on both sides.
       expect(JSON.parse(await readFile(join(localTree, "session.jsonl"), "utf8")).value).toBe(
         "base",
@@ -1930,6 +1945,7 @@ describe("p1 regressions nested labels", () => {
         nestedReplacementSources: new Map(),
         nestedReplacementConflicts: new Set(),
         nestedReplacementParentMappings: new Map(),
+        nestedReplacementParentMappingGroups: new Map(),
         nestedKeyMigrations: new Map(),
         nestedSymlinkSkippedLabels: new Set(),
         nestedTombstoneConflicts: new Set(),
@@ -2012,6 +2028,7 @@ describe("p1 regressions nested labels", () => {
         nestedReplacementSources: new Map(),
         nestedReplacementConflicts: new Set(),
         nestedReplacementParentMappings: new Map(),
+        nestedReplacementParentMappingGroups: new Map(),
         nestedKeyMigrations: new Map(),
         nestedSymlinkSkippedLabels: new Set(),
         nestedTombstoneConflicts: new Set(),
@@ -2097,6 +2114,7 @@ describe("p1 regressions nested labels", () => {
         nestedReplacementSources: new Map(),
         nestedReplacementConflicts: new Set(),
         nestedReplacementParentMappings: new Map(),
+        nestedReplacementParentMappingGroups: new Map(),
         nestedKeyMigrations: new Map(),
         nestedSymlinkSkippedLabels: new Set(),
         nestedTombstoneConflicts: new Set(),
@@ -2185,6 +2203,7 @@ describe("p1 regressions nested labels", () => {
         nestedReplacementSources: new Map(),
         nestedReplacementConflicts: new Set(),
         nestedReplacementParentMappings: new Map(),
+        nestedReplacementParentMappingGroups: new Map(),
         nestedKeyMigrations: new Map(),
         nestedSymlinkSkippedLabels: new Set(),
         nestedTombstoneConflicts: new Set(),
@@ -2325,6 +2344,7 @@ describe("p1 regressions nested labels", () => {
         nestedReplacementSources: new Map(),
         nestedReplacementConflicts: new Set(),
         nestedReplacementParentMappings: new Map(),
+        nestedReplacementParentMappingGroups: new Map(),
         nestedKeyMigrations: new Map(),
         nestedOriginalReplacementEntries: new Map(),
         nestedSymlinkSkippedLabels: new Set(),
@@ -2485,6 +2505,103 @@ describe("p1 regressions nested labels", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("restores converging nested migration entries after a blocked replacement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "p1reg-converging-migration-"));
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const cwd = join(homedir(), `pi-sync-converging-${Date.now()}`);
+    const localName = defaultSessionDirName(cwd);
+    const homeName = portableSessionDirName(cwd);
+    const rootName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
+    const replacementName = `ALT${encodeURIComponent(toPosixAbsolute(cwd))}`;
+    const options = normalizePortableNameOptions({
+      extraPrefixes: { [cwd]: "ALT" },
+    });
+    const oldAKey = `${homeName}/session.jsonl`;
+    const oldBKey = `${rootName}/session.jsonl`;
+    const replacementKey = `${replacementName}/session.jsonl`;
+    const entryFor = (hash: string) => ({
+      baselineHash: "baseline",
+      localSnapshots: { unit: { hash, mtimeMs: 1 } },
+      target: { hash: "baseline", mtimeMs: 1 },
+      tombstone: null,
+    });
+    const state = emptyState();
+    const oldAEntry = entryFor("old-a");
+    const oldBEntry = entryFor("old-b");
+    state.entries[oldAKey] = oldAEntry;
+    state.entries[oldBKey] = oldBEntry;
+    const scanned = (key: string, value: string): ScannedFile => ({
+      side: "local",
+      key,
+      absolutePath: join(sessionsRoot, localName, "session.jsonl"),
+      rootPath: join(sessionsRoot, localName),
+      relativePath: "session.jsonl",
+      mtimeMs: 1,
+      hash: value,
+      outputText: value,
+      canonicalText: value,
+      cwdValues: [cwd],
+      sessionCwdPresent: false,
+      sessionHeaderValid: false,
+      parentSessionReferences: [],
+    });
+    const localScan = {
+      files: new Map([
+        [oldAKey, scanned(oldAKey, "changed-a")],
+        [oldBKey, scanned(oldBKey, "changed-b")],
+      ]),
+    } as unknown as ScanResult;
+    const targetScan = { files: new Map() } as unknown as ScanResult;
+    const ctx = {
+      sessionsRoot,
+      targetDir,
+      layout: "nested",
+      namingOptions: options,
+      machineId: "unit",
+      activeSessionFile: undefined,
+      activeSessionDir: undefined,
+      now: 0,
+      staleFlatExactIdentities: new Set(),
+      staleNestedTargetKeys: new Set(),
+      excludedNestedTargetKeys: new Set(),
+      nestedReplacementSources: new Map(),
+      nestedReplacementConflicts: new Set(),
+      nestedReplacementParentMappings: new Map(),
+      nestedReplacementParentMappingGroups: new Map(),
+      nestedTargetParentMappingGroups: new Map(),
+      nestedKeyMigrations: new Map(),
+      nestedOriginalMigratedEntries: new Map(),
+      nestedMigrationTargets: new Map(),
+      nestedOriginalReplacementEntries: new Map(),
+      nestedReplacementSymlinkLabels: new Set(),
+      nestedReplacementSymlinkKeys: new Map(),
+      nestedHistoricalMappings: new Map(),
+      nestedCurrentMappings: new Map(),
+      nestedSymlinkSkippedLabels: new Set([replacementName]),
+      nestedTombstoneConflicts: new Set(),
+      targetPhysicalPortableNames: new Map(),
+    } as unknown as DecisionContext;
+    try {
+      migrateNestedStateEntries(
+        state,
+        new Map([[localName, replacementName]]),
+        options,
+        undefined,
+        localScan,
+        targetScan,
+        true,
+        ctx,
+      );
+      await preflightDecisions([], ctx, new Map(), new Map(), state.entries, []);
+      expect(state.entries[oldAKey]).toEqual(oldAEntry);
+      expect(state.entries[oldBKey]).toEqual(oldBEntry);
+      expect(state.entries[replacementKey]).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

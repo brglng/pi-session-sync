@@ -6,7 +6,7 @@ import {
   type PortableNameOptions,
 } from "./portable-name.ts";
 import type { ScanResult } from "./scan.ts";
-import type { StateScope, SyncState } from "./state.ts";
+import type { StateEntry, StateScope, SyncState } from "./state.ts";
 import {
   mappingForNativeName,
   nativeCompatiblePortableMappings,
@@ -115,6 +115,10 @@ export function migrateNestedStateEntries(
   hadState: boolean,
   ctx: DecisionContext,
 ): void {
+  const originalEntries = new Map<string, StateEntry>();
+  for (const [rawKey, entry] of Object.entries(state.entries)) {
+    originalEntries.set(canonicalStateLogicalKey(rawKey, namingOptions), entry);
+  }
   const migrations: Array<{ oldKey: string; newKey: string }> = [];
   for (const rawKey of Object.keys(state.entries)) {
     const key = canonicalStateLogicalKey(rawKey, namingOptions);
@@ -161,9 +165,9 @@ export function migrateNestedStateEntries(
   for (const { oldKey, newKey } of migrations) {
     const canonicalOldKey = canonicalStateLogicalKey(oldKey, namingOptions);
     const canonicalNewKey = canonicalStateLogicalKey(newKey, namingOptions);
-    const oldEntry = stateEntryForKey(state, canonicalOldKey, namingOptions);
+    const oldEntry = originalEntries.get(canonicalOldKey);
     if (oldEntry === undefined) continue;
-    const currentEntry = stateEntryForKey(state, canonicalNewKey, namingOptions);
+    const currentEntry = originalEntries.get(canonicalNewKey);
     // Keep original values on both sides of migration. Decisions may update
     // the merged/new entry before preflight discovers a blocked group; rollback
     // must restore the exact old entry rather than that post-decision value.

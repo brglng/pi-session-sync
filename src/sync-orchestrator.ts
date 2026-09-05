@@ -156,6 +156,8 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     nestedReplacementSources: new Map(),
     nestedReplacementConflicts: new Set(),
     nestedReplacementParentMappings: new Map(),
+    nestedReplacementParentMappingGroups: new Map(),
+    nestedTargetParentMappingGroups: new Map(),
     nestedKeyMigrations: new Map(),
     nestedOriginalMigratedEntries: new Map(),
     nestedMigrationTargets: new Map(),
@@ -1980,16 +1982,52 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           }
         }
       }
+      if (ctx.layout === "nested") {
+        for (const [localIdentity, introducingGroups] of ctx.nestedTargetParentMappingGroups) {
+          if (
+            ![...introducingGroups].every((group) => blockedReplacementPortableNames.has(group))
+          ) {
+            continue;
+          }
+          const localName = Object.keys(directories).find(
+            (candidate) => nativeNameIdentity(candidate) === localIdentity,
+          );
+          if (localName === undefined) continue;
+          const localMapping = mappingForNativeName(localScan.localMappings, localName);
+          const persisted = recordValueForNativeName(stateScope.directories, localName);
+          const targetTreeMapping = mappingForNativeName(targetTreeMappingsForState, localName);
+          if (localMapping !== undefined) {
+            setRecordValueForNativeName(directories, localName, localMapping.portableName);
+          } else if (persisted !== undefined) {
+            setRecordValueForNativeName(directories, localName, persisted);
+          } else if (
+            targetTreeMapping !== undefined &&
+            !blockedGroupLocalNames.has(localIdentity)
+          ) {
+            setRecordValueForNativeName(directories, localName, targetTreeMapping);
+          } else {
+            deleteRecordValueForNativeName(directories, localName);
+          }
+        }
+      }
       for (const [localName, portableName] of ctx.nestedReplacementParentMappings) {
         // A blocked logical replacement group writes nothing and changes no
-        // state, including the directory mapping this group would have added.
-        if (
-          blockedReplacementPortableNames.has(
-            canonicalStatePortableName(portableName, ctx.namingOptions),
-          )
-        ) {
-          continue;
-        }
+        // state, including parent-only mappings derived from its files. A
+        // parent mapping may belong to a different label than the replacement
+        // group that introduced it, so use provenance rather than its own
+        // portable label. Keep it when an unblocked replacement group also
+        // proves the same mapping; existing local/state evidence is handled
+        // by the directory lookup below.
+        const introducingGroups = ctx.nestedReplacementParentMappingGroups.get(
+          nativeNameIdentity(localName),
+        );
+        const mappingBlocked =
+          introducingGroups === undefined || introducingGroups.size === 0
+            ? blockedReplacementPortableNames.has(
+                canonicalStatePortableName(portableName, ctx.namingOptions),
+              )
+            : [...introducingGroups].every((group) => blockedReplacementPortableNames.has(group));
+        if (mappingBlocked) continue;
         const existing = recordValueForNativeName(directories, localName);
         if (
           existing !== undefined &&

@@ -1020,6 +1020,89 @@ describe("bidirectional session sync labels", () => {
     }
   });
 
+  it("does not persist a cross-session parent mapping from a blocked replacement", async () => {
+    const fixture = await makeFixture();
+    const cwd = join(homedir(), `pi-sync-blocked-parent-replacement-${Date.now()}`);
+    const parentCwd = join(homedir(), `pi-sync-blocked-parent-${Date.now()}`);
+    const sourceTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
+    const sourceLocal = join(sourceTree, "session.jsonl");
+    const sourceExtra = join(sourceTree, "extra.jsonl");
+    const oldName = portableSessionDirName(cwd);
+    const replacementName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
+    const parentName = portableSessionDirName(parentCwd);
+    const oldTree = join(fixture.targetDir, oldName);
+    const replacementTree = join(fixture.targetDir, replacementName);
+    const oldTarget = join(oldTree, "session.jsonl");
+    const oldExtraTarget = join(oldTree, "extra.jsonl");
+    const replacementTarget = join(replacementTree, "session.jsonl");
+    const replacementExtra = join(replacementTree, "extra.jsonl");
+    const options = {
+      sessionsRoot: fixture.sessionsRoot,
+      targetDir: fixture.targetDir,
+      machineId: "blocked-parent-replacement-machine",
+    };
+    try {
+      await mkdir(sourceTree, { recursive: true });
+      await writeFile(sourceLocal, `${JSON.stringify({ cwd, value: "base" })}\n`);
+      await writeFile(sourceExtra, `${JSON.stringify({ cwd, value: "extra-base" })}\n`);
+      await utimes(sourceLocal, 1, 1);
+      await utimes(sourceExtra, 1, 1);
+      await syncSessions({ ...options, now: 100_000 });
+
+      const stateBeforeBlocked = await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8");
+
+      await writeFile(
+        oldTarget,
+        `${JSON.stringify({
+          cwd: `pi-session-sync://${oldName}`,
+          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          value: "old-label-session",
+        })}\n`,
+      );
+      await writeFile(
+        oldExtraTarget,
+        `${JSON.stringify({
+          cwd: `pi-session-sync://${oldName}`,
+          value: "old-label-extra",
+        })}\n`,
+      );
+      await utimes(oldTarget, 500, 500);
+      await utimes(oldExtraTarget, 500, 500);
+      await mkdir(replacementTree, { recursive: true });
+      await writeFile(
+        replacementTarget,
+        `${JSON.stringify({
+          cwd: `pi-session-sync://${replacementName}`,
+          value: "replacement-session",
+        })}\n`,
+      );
+      await utimes(replacementTarget, 400, 400);
+      await symlink(join(fixture.root, "outside-target"), replacementExtra);
+
+      const summary = await syncSessions({ ...options, now: 600_000 });
+      expect(summary.copied).toBe(0);
+      expect(summary.deleted).toBe(0);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.startsWith("Blocked nested label replacement through symlink:"),
+        ),
+      ).toBe(true);
+      expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe(
+        stateBeforeBlocked,
+      );
+      expect((await lstat(replacementExtra)).isSymbolicLink()).toBe(true);
+      const state = JSON.parse(stateBeforeBlocked) as {
+        scopes: Record<string, { directories: Record<string, string> }>;
+      };
+      const scope = Object.values(state.scopes)[0];
+      expect(scope?.directories[defaultSessionDirName(parentCwd)]).toBeUndefined();
+    } finally {
+      await cleanup(fixture.root);
+      await rm(cwd, { recursive: true, force: true });
+      await rm(parentCwd, { recursive: true, force: true });
+    }
+  });
+
   it("uses mtime when changed old nested label content is newer", async () => {
     const fixture = await makeFixture();
     const cwd = join(homedir(), `pi-sync-newer-old-semantic-label-${Date.now()}`);

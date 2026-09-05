@@ -62,6 +62,17 @@ export interface DecisionContext {
   nestedReplacementConflicts: Set<string>;
   nestedReplacementParentMappings: Map<string, string>;
   /**
+   * Replacement labels that introduced each parent-only directory mapping.
+   * A mapping may be retained when at least one introducing replacement group
+   * is not blocked by preflight.
+   */
+  nestedReplacementParentMappingGroups: Map<string, Set<string>>;
+  /**
+   * Replacement labels that introduced each accepted target parent-only mapping,
+   * keyed by native local-directory identity.
+   */
+  nestedTargetParentMappingGroups: Map<string, Set<string>>;
+  /**
    * State-entry key migrations applied for the current nested label adoption
    * (new key -> old key), recorded by migrateNestedStateEntries. A blocked
    * migration-only replacement group must un-migrate these so no key
