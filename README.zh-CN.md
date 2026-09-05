@@ -78,8 +78,8 @@ pi install npm:@brglng/pi-session-sync
 - 同步期间，进程会阻止 session 切换、fork、树导航、compaction、新输入、工具调用和用户执行的 bash 命令。
 - 目标替换提交后，会调用公开的 `ctx.switchSession(currentSessionFile)`，刷新 Pi 的管理器和 session 树。
 - 只允许与当前 session 匹配的刷新切换；其他生命周期操作仍会被阻止；refresh 被取消则视为失败。
-- refresh 目标 `.jsonl` 必须以 header 开头：`type` 必须是 `"session"`，`id` 和 `cwd` 必须是字符串；解码后的 cwd 必须是已存在的目录。
-- 缺少或无效的 header、缺少 cwd、cwd 不存在或不是目录，都会在提交前失败。
+- refresh 目标 `.jsonl` 必须以 header 开头：`type` 必须是 `"session"`，`id` 和 `cwd` 必须是字符串；cwd 值必须可解码，但同步时不校验解码后的本机路径是否存在或是否为目录。
+- 缺少或无效的 header、缺少 cwd 或无法解码的 cwd 值，都会在提交前失败。
 - 删除活动本地文件或逻辑上对应的目标文件，会在提交前失败，并保持两侧不变。
 - 活动 session 目录必须位于 `sessionsRoot` 内：flat 布局中必须等于根目录，nested 布局中必须是根目录的直接子目录。活动文件的 dirname 必须等于该目录。
 - 自定义 flat 根目录下的嵌套文件，或默认 nested 树中的嵌套文件，都会被拒绝，因为 refresh 可能移动 Pi 的 session 根目录。
@@ -126,11 +126,11 @@ pi install npm:@brglng/pi-session-sync
 - 未知条目、默认根目录文件和不支持的类型会被忽略并发出警告；不安全的相对路径段会报错。
 - 根目录、类型、包含关系、符号链接、跨平台路径段和状态检查都会在写入 session 前完成。
 - 状态文件必须位于 target root 下，且是实际存在的普通 version-1 JSON 文件。
-- 所有选中文件都会先解析和验证，再将重写后的副本暂存到临时目录。
+- 所有选中文件都会先解析和验证，再将重写后的副本暂存到临时目录；序列化后的 next state 也必须在任何本机、target 或 state 目标发生写入前完整暂存到该目录。
 - 解析、验证、预检或暂存失败，会在提交 session/state 前停止整个同步；不会提交任何暂存结果。
 
 ### 限制
 
-- 不提供跨进程竞争保护，也不保证完整原子性；回滚不在验收范围内。
+- 不提供跨进程竞争保护，也不保证完整原子性。正式提交阶段不执行 rollback，提交中途失败时不恢复已经写入本机、target 或 state 的结果；preflight 为阻止不安全写入而进行的内存状态恢复仍属于同步安全机制。
 - Pi 没有围绕直接 `SessionManager` 元数据持久化提供可取消的公开钩子（hook）；公开的生命周期防护仍可能允许生成合成记录（synthetic records）。
 - Windows 目前不是本项目积极支持的平台；欢迎提交 PR。跨平台命名和外来前缀兼容性已实现。

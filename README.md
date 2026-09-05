@@ -78,8 +78,8 @@ Start Pi, then run:
 - During sync, the process guards switching, forking, tree navigation, compaction, new input, tool calls, and user bash.
 - Target replacement commits, then calls public `ctx.switchSession(currentSessionFile)` to refresh Pi’s manager and session tree.
 - Only the matching refresh switch is allowed; unrelated lifecycle operations remain blocked, and canceled refresh is failure.
-- Refresh target `.jsonl` must begin with header `type: "session"`, string `id`, and string `cwd`; decoded cwd must exist as a directory.
-- Missing or invalid headers, missing cwds, and non-directories fail before commit.
+- Refresh target `.jsonl` must begin with a header containing `type: "session"`, string `id`, and string `cwd`; the cwd value must be decodable, but its decoded local path need not exist or be a directory during synchronization.
+- Missing or invalid headers, missing `cwd` fields, or undecodable cwd values fail before commit.
 - Deleting the active local file or logical target counterpart fails before commit and leaves both sides unchanged.
 - The active session directory must be inside `sessionsRoot`: flat equals root; nested is one direct child. The active file dirname must equal it.
 - Nested files under custom flat roots or default nested trees are rejected because refresh could move Pi’s session root.
@@ -126,11 +126,11 @@ Start Pi, then run:
 - Unknown entries, default-root files, and unsupported types are ignored with warnings; unsafe relative segments are errors.
 - Root, type, containment, symlink, cross-platform segment, and state checks run before session writes.
 - State file must be real regular version-1 JSON at target root.
-- All selected files are parsed and validated, then rewritten copies are staged in a temporary directory.
+- All selected files are parsed and validated, then rewritten copies are staged in a temporary directory; the serialized next state is staged there too before any local, target, or state destination is mutated.
 - Parse, validation, preflight, or staging failure stops the entire sync before session/state commit; no staged result commits.
 
 ### Limitations
 
-- No cross-process race protection or full atomicity guarantee; rollback is outside acceptance scope.
+- No cross-process race protection or full atomicity guarantee. The commit phase performs no rollback and does not restore local, target, or state results after a mid-commit failure; preflight in-memory restoration for blocked decisions remains part of synchronization safety.
 - Pi exposes no cancellable public hook around direct `SessionManager` metadata persistence; public lifecycle guards may still permit synthetic records.
 - Windows is not actively supported by this project; pull requests are welcome. Cross-platform naming and foreign-prefix compatibility are implemented.
