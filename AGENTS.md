@@ -89,12 +89,12 @@
 - 状态文件只接受 targetDir 根部的真实普通 `version=1` JSON 文件；符号链接、目录、非法 JSON 或不支持版本均视为错误并停止同步
 - `version=1` 状态清单允许按本机身份保存 local 快照：本机扩展目录持久化 machineId，target 状态保存各机器的 local 快照；没有当前机器快照时按 target 优先恢复，有当前机器快照时才传播本机删除
 - 命名配置写入状态 scope；命名配置变化或不同机器命名配置不一致时，视为配置错误并停止同步，不自动迁移旧 target 子目录
+- 提交阶段不执行 rollback，也不要求提交中途失败后恢复已经写入本机、target 或 state 的结果。必须保证临时目录内生成的每个改写文件完整、正确；解析、校验、staging 或 preflight 出现错误时不执行提交。preflight 为保证安全而进行的 blocked decision／nested replacement 状态恢复不属于提交阶段 rollback，继续保留
 
 ## 开发时要求
 
 - 不要参考任何历史版本
-- 后续 review 不检查 Windows 相关问题；Windows 行为不作为本项目当前验收阻塞条件
-- 后续 review 不把提交阶段 rollback 作为验收条件；提交阶段不执行 rollback，也不要求提交中途失败后恢复已经写入本机、target 或 state 的结果。必须保证临时目录内生成的每个改写文件完整、正确；解析、校验、staging 或 preflight 出现错误时不执行提交。preflight 为保证安全而进行的 blocked decision／nested replacement 状态恢复不属于提交阶段 rollback，继续保留
+- review 不检查 Windows 相关问题；Windows 行为不作为本项目当前验收阻塞条件
 
 ## 已确认的宿主边界
 
