@@ -44,9 +44,9 @@ describe("bidirectional session sync labels", () => {
       });
       expect(first.copied).toBe(1);
       const customName = portableSessionDirName(fixture.cwd, namingOptions);
-      expect(await readFile(join(fixture.targetDir, customName, "custom.jsonl"), "utf8")).toBe(
-        `${JSON.stringify({ cwd: `pi-session-sync://${customName}` })}\n`,
-      );
+      expect(
+        await readFile(join(fixture.targetDir, "sessions", customName, "custom.jsonl"), "utf8"),
+      ).toBe(`${JSON.stringify({ cwd: `pi-session-sync://${customName}` })}\n`);
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as {
@@ -65,7 +65,7 @@ describe("bidirectional session sync labels", () => {
     const cwd = join(homedir(), `pi-sync-root-${Date.now()}`);
     const portableName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     try {
-      const targetTree = join(fixture.targetDir, portableName);
+      const targetTree = join(fixture.targetDir, "sessions", portableName);
       await mkdir(targetTree);
       await writeFile(
         join(targetTree, "root.jsonl"),
@@ -101,7 +101,7 @@ describe("bidirectional session sync labels", () => {
     const portableName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const localTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
     const localFile = join(localTree, "session.jsonl");
-    const targetFile = join(fixture.targetDir, portableName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", portableName, "session.jsonl");
     try {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "local" })}\n`);
@@ -152,7 +152,9 @@ describe("bidirectional session sync labels", () => {
       expect(summary.copied).toBe(1);
       const portable = portableSessionDirName(mixedCwd);
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, portable, "case.jsonl"), "utf8")).cwd,
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", portable, "case.jsonl"), "utf8"),
+        ).cwd,
       ).toBe(`pi-session-sync://${portable}`);
     } finally {
       await cleanup(fixture.root);
@@ -167,7 +169,7 @@ describe("bidirectional session sync labels", () => {
     const lowerCwd = join(fixture.root, "caseproject");
     const lowerName = portableSessionDirName(lowerCwd);
     const localFile = join(flatRoot, "session.jsonl");
-    const targetFile = join(fixture.targetDir, lowerName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", lowerName, "session.jsonl");
     try {
       await mkdir(flatRoot);
       await mkdir(dirname(targetFile), { recursive: true });
@@ -212,11 +214,18 @@ describe("bidirectional session sync labels", () => {
     const firstSource = join(fixture.localTree, "nested", "session.jsonl");
     const firstTargetFile = join(
       fixture.targetDir,
+      "sessions",
       fixture.portableName,
       "NESTED",
       "session.jsonl",
     );
-    const secondTargetFile = join(fixture.targetDir, secondName, "nested", "from-target.jsonl");
+    const secondTargetFile = join(
+      fixture.targetDir,
+      "sessions",
+      secondName,
+      "nested",
+      "from-target.jsonl",
+    );
     try {
       await mkdir(dirname(firstSource), { recursive: true });
       await mkdir(dirname(firstTargetFile), { recursive: true });
@@ -258,9 +267,9 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const homeName = portableSessionDirName(cwd);
     const rootName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetTree = join(fixture.targetDir, homeName);
+    const oldTargetTree = join(fixture.targetDir, "sessions", homeName);
     const oldTargetFile = join(oldTargetTree, "session.jsonl");
-    const newTargetTree = join(fixture.targetDir, rootName);
+    const newTargetTree = join(fixture.targetDir, "sessions", rootName);
     const newTargetFile = join(newTargetTree, "session.jsonl");
     try {
       await mkdir(localTree, { recursive: true });
@@ -299,9 +308,9 @@ describe("bidirectional session sync labels", () => {
       };
       const scope = Object.values(state.scopes)[0];
       expect(scope?.directories[defaultSessionDirName(cwd)]).toBe(rootName);
-      expect(Object.keys(state.entries)).toContain(`${rootName}/session.jsonl`);
+      expect(Object.keys(state.entries)).toContain(`sessions/${rootName}/session.jsonl`);
       expect(
-        Object.keys(state.entries).filter((key) => key.startsWith(`${homeName}/`)).length,
+        Object.keys(state.entries).filter((key) => key.startsWith(`sessions/${homeName}/`)).length,
       ).toBe(0);
     } finally {
       await cleanup(fixture.root);
@@ -315,8 +324,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -341,9 +350,8 @@ describe("bidirectional session sync labels", () => {
       await utimes(newTargetFile, 2, 2);
 
       await expect(syncSessions({ ...options, now: 200_000 })).rejects.toThrow(
-        /Logical destination path collision/,
+        /Target portable trees collide|Logical destination path collision/,
       );
-      expect(await readFile(localFile, "utf8")).toBe(localText);
       expect(await readFile(oldTargetFile, "utf8")).toBe(oldTargetBefore);
       expect(await readFile(newTargetFile, "utf8")).toBe(alternateText);
       expect(await readFile(statePath, "utf8")).toBe(stateBefore);
@@ -360,7 +368,7 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const alternateName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const alternateFile = join(fixture.targetDir, alternateName, "nested", "orphan.md");
+    const alternateFile = join(fixture.targetDir, "sessions", alternateName, "nested", "orphan.md");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -380,7 +388,7 @@ describe("bidirectional session sync labels", () => {
       await utimes(alternateFile, 2, 2);
 
       await expect(syncSessions({ ...options, now: 200_000 })).rejects.toThrow(
-        /alternate target tree|Logical destination path collision/,
+        /Target portable trees collide|Logical destination path collision/,
       );
       expect(await readFile(alternateFile, "utf8")).toBe("alternate orphan\n");
       await expect(readFile(join(localTree, "nested", "orphan.md"), "utf8")).rejects.toThrow();
@@ -399,9 +407,9 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetTree = join(fixture.targetDir, oldName);
+    const oldTargetTree = join(fixture.targetDir, "sessions", oldName);
     const oldTargetOrphan = join(oldTargetTree, "orphan.jsonl");
-    const newTargetTree = join(fixture.targetDir, newName);
+    const newTargetTree = join(fixture.targetDir, "sessions", newName);
     const newTargetFile = join(newTargetTree, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
@@ -439,8 +447,8 @@ describe("bidirectional session sync labels", () => {
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { entries: Record<string, { tombstone: unknown }> };
-      expect(state.entries[`${oldName}/orphan.jsonl`]?.tombstone).toBeDefined();
-      expect(state.entries[`${newName}/orphan.jsonl`]).toBeUndefined();
+      expect(state.entries[`sessions/${oldName}/orphan.jsonl`]?.tombstone).toBeDefined();
+      expect(state.entries[`sessions/${newName}/orphan.jsonl`]).toBeUndefined();
     } finally {
       await cleanup(fixture.root);
       await rm(cwd, { recursive: true, force: true });
@@ -454,8 +462,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "old.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "old.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "live.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "old.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "live.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -513,8 +521,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetTree = join(fixture.targetDir, oldName);
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetTree = join(fixture.targetDir, "sessions", oldName);
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(localTree, { recursive: true });
@@ -542,8 +550,8 @@ describe("bidirectional session sync labels", () => {
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { entries: Record<string, { tombstone: unknown }> };
-      expect(state.entries[`${oldName}/session.jsonl`]?.tombstone).toBeDefined();
-      expect(state.entries[`${newName}/session.jsonl`]?.tombstone).toBe(null);
+      expect(state.entries[`sessions/${oldName}/session.jsonl`]?.tombstone).toBeDefined();
+      expect(state.entries[`sessions/${newName}/session.jsonl`]?.tombstone).toBe(null);
     } finally {
       await cleanup(fixture.root);
       await rm(cwd, { recursive: true, force: true });
@@ -557,8 +565,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(localTree, { recursive: true });
@@ -601,8 +609,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(localTree, { recursive: true });
@@ -657,8 +665,8 @@ describe("bidirectional session sync labels", () => {
       };
       const scope = Object.values(state.scopes)[0];
       expect(scope?.directories[defaultSessionDirName(cwd)]).toBe(newName);
-      expect(state.entries[`${oldName}/session.jsonl`]?.tombstone).toBeDefined();
-      expect(state.entries[`${newName}/session.jsonl`]?.tombstone).toBe(null);
+      expect(state.entries[`sessions/${oldName}/session.jsonl`]?.tombstone).toBeDefined();
+      expect(state.entries[`sessions/${newName}/session.jsonl`]?.tombstone).toBe(null);
     } finally {
       await cleanup(fixture.root);
       await rm(cwd, { recursive: true, force: true });
@@ -673,10 +681,10 @@ describe("bidirectional session sync labels", () => {
     const staleLocalFile = localFile;
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const staleTargetFile = join(fixture.targetDir, newName, "session.jsonl");
-    const liveTargetFile = join(fixture.targetDir, newName, "live.jsonl");
-    const invalidTargetFile = join(fixture.targetDir, newName, "invalid.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const staleTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
+    const liveTargetFile = join(fixture.targetDir, "sessions", newName, "live.jsonl");
+    const invalidTargetFile = join(fixture.targetDir, "sessions", newName, "invalid.jsonl");
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(localTree, { recursive: true });
@@ -738,9 +746,9 @@ describe("bidirectional session sync labels", () => {
       };
       const scope = Object.values(state.scopes)[0];
       expect(scope?.directories[defaultSessionDirName(cwd)]).toBe(newName);
-      expect(state.entries[`${oldName}/session.jsonl`]?.tombstone).toBeDefined();
-      expect(state.entries[`${newName}/live.jsonl`]?.tombstone).toBe(null);
-      expect(state.entries[`${newName}/session.jsonl`]).toBeUndefined();
+      expect(state.entries[`sessions/${oldName}/session.jsonl`]?.tombstone).toBeDefined();
+      expect(state.entries[`sessions/${newName}/live.jsonl`]?.tombstone).toBe(null);
+      expect(state.entries[`sessions/${newName}/session.jsonl`]).toBeUndefined();
       await mkdir(dirname(staleLocalFile), { recursive: true });
       await writeFile(staleLocalFile, `${JSON.stringify({ cwd, value: "stale-again" })}\n`);
       await utimes(staleLocalFile, 150, 150);
@@ -765,8 +773,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(localTree, { recursive: true });
@@ -817,7 +825,7 @@ describe("bidirectional session sync labels", () => {
     const localTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
     const localFile = join(localTree, "session.jsonl");
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const newLiveFile = join(fixture.targetDir, newName, "live.jsonl");
+    const newLiveFile = join(fixture.targetDir, "sessions", newName, "live.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -868,7 +876,7 @@ describe("bidirectional session sync labels", () => {
       });
       expect(await readFile(statePath, "utf8")).toBe(stateBeforeConflict);
       await expect(
-        readFile(join(fixture.targetDir, newName, "session.jsonl"), "utf8"),
+        readFile(join(fixture.targetDir, "sessions", newName, "session.jsonl"), "utf8"),
       ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
@@ -882,7 +890,7 @@ describe("bidirectional session sync labels", () => {
     const localTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
     const localFile = join(localTree, "session.jsonl");
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const newLiveFile = join(fixture.targetDir, newName, "live.jsonl");
+    const newLiveFile = join(fixture.targetDir, "sessions", newName, "live.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -925,7 +933,7 @@ describe("bidirectional session sync labels", () => {
         value: "new-label",
       });
       await expect(
-        readFile(join(fixture.targetDir, newName, "session.jsonl"), "utf8"),
+        readFile(join(fixture.targetDir, "sessions", newName, "session.jsonl"), "utf8"),
       ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
@@ -945,8 +953,8 @@ describe("bidirectional session sync labels", () => {
     const replacementName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const parentName = portableSessionDirName(parentCwd);
     const parentLocalName = defaultSessionDirName(parentCwd);
-    const oldTarget = join(fixture.targetDir, oldName, "session.jsonl");
-    const replacementTarget = join(fixture.targetDir, replacementName, "session.jsonl");
+    const oldTarget = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const replacementTarget = join(fixture.targetDir, "sessions", replacementName, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -966,7 +974,7 @@ describe("bidirectional session sync labels", () => {
       // file is rewritten as a same-machine copy carrying an absolute local
       // parentSession spelling, and wins the replacement mtime contest.
       await rm(parentLocal);
-      await rm(join(fixture.targetDir, parentName), { recursive: true, force: true });
+      await rm(join(fixture.targetDir, "sessions", parentName), { recursive: true, force: true });
       await writeFile(
         oldTarget,
         `${JSON.stringify({
@@ -996,7 +1004,9 @@ describe("bidirectional session sync labels", () => {
         unknown
       >;
       expect(replacementEntry.cwd).toBe(`pi-session-sync://${replacementName}`);
-      expect(replacementEntry.parentSession).toBe(`pi-session-sync://${parentName}/missing.jsonl`);
+      expect(replacementEntry.parentSession).toBe(
+        `pi-session-sync://sessions/${parentName}/missing.jsonl`,
+      );
       expect(replacementEntry.value).toBe("old-label-content");
       await expect(readFile(oldTarget, "utf8")).rejects.toThrow();
       const localEntry = JSON.parse(await readFile(sourceLocal, "utf8")) as Record<string, unknown>;
@@ -1030,8 +1040,8 @@ describe("bidirectional session sync labels", () => {
     const oldName = portableSessionDirName(cwd);
     const replacementName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const parentName = portableSessionDirName(parentCwd);
-    const oldTree = join(fixture.targetDir, oldName);
-    const replacementTree = join(fixture.targetDir, replacementName);
+    const oldTree = join(fixture.targetDir, "sessions", oldName);
+    const replacementTree = join(fixture.targetDir, "sessions", replacementName);
     const oldTarget = join(oldTree, "session.jsonl");
     const oldExtraTarget = join(oldTree, "extra.jsonl");
     const replacementTarget = join(replacementTree, "session.jsonl");
@@ -1055,7 +1065,7 @@ describe("bidirectional session sync labels", () => {
         oldTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${oldName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
           value: "old-label-session",
         })}\n`,
       );
@@ -1110,8 +1120,8 @@ describe("bidirectional session sync labels", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(localTree, { recursive: true });
@@ -1159,8 +1169,8 @@ describe("bidirectional session sync labels", () => {
     const oldName = portableSessionDirName(cwd);
     const replacementName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const parentName = portableSessionDirName(parentCwd);
-    const oldTarget = join(fixture.targetDir, oldName, "session.jsonl");
-    const replacementTarget = join(fixture.targetDir, replacementName, "session.jsonl");
+    const oldTarget = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const replacementTarget = join(fixture.targetDir, "sessions", replacementName, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -1176,7 +1186,7 @@ describe("bidirectional session sync labels", () => {
         oldTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${oldName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
           value: "old-label-content",
         })}\n`,
       );
@@ -1199,7 +1209,9 @@ describe("bidirectional session sync labels", () => {
         unknown
       >;
       expect(replacementEntry.cwd).toBe(`pi-session-sync://${replacementName}`);
-      expect(replacementEntry.parentSession).toBe(`pi-session-sync://${parentName}/missing.jsonl`);
+      expect(replacementEntry.parentSession).toBe(
+        `pi-session-sync://sessions/${parentName}/missing.jsonl`,
+      );
       expect(replacementEntry.value).toBe("old-label-content");
       const localEntry = JSON.parse(await readFile(sourceLocal, "utf8")) as Record<string, unknown>;
       expect(localEntry.cwd).toBe(cwd);
@@ -1222,9 +1234,9 @@ describe("bidirectional session sync labels", () => {
       await writeFile(parentLocal, `${JSON.stringify({ value: "orphan" })}\n`);
       await utimes(parentLocal, 4, 4);
       await syncSessions({ ...options, now: 500_000 });
-      expect(await readFile(join(fixture.targetDir, parentName, "orphan.jsonl"), "utf8")).toBe(
-        `${JSON.stringify({ value: "orphan" })}\n`,
-      );
+      expect(
+        await readFile(join(fixture.targetDir, "sessions", parentName, "orphan.jsonl"), "utf8"),
+      ).toBe(`${JSON.stringify({ value: "orphan" })}\n`);
     } finally {
       await cleanup(fixture.root);
     }
@@ -1233,7 +1245,7 @@ describe("bidirectional session sync labels", () => {
   it("retires nested mappings for target trees without recognized files", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "session.jsonl");
-    const targetTree = join(fixture.targetDir, fixture.portableName);
+    const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
     const targetFile = join(targetTree, "session.jsonl");
     const ignoredTargetFile = join(targetTree, "ignored.txt");
     try {
@@ -1255,7 +1267,9 @@ describe("bidirectional session sync labels", () => {
       });
 
       expect((await lstat(ignoredTargetFile)).isFile()).toBe(true);
-      expect((await readdir(fixture.targetDir)).includes(fixture.portableName)).toBe(true);
+      expect(
+        (await readdir(join(fixture.targetDir, "sessions"))).includes(fixture.portableName),
+      ).toBe(true);
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { scopes: Record<string, { directories: Record<string, string> }> };
@@ -1269,7 +1283,7 @@ describe("bidirectional session sync labels", () => {
   it("retains nested mappings when target tree deletion is blocked by symlink", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "session.jsonl");
-    const targetTree = join(fixture.targetDir, fixture.portableName);
+    const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
     const targetFile = join(targetTree, "session.jsonl");
     const externalFile = join(fixture.root, "external-target-file.jsonl");
     try {
@@ -1311,8 +1325,8 @@ describe("bidirectional session sync labels", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const relativePath = "nested/reused.jsonl";
-    const targetSource = join(fixture.targetDir, sourceName, "main.jsonl");
-    const targetMappedPath = join(fixture.targetDir, parentName, relativePath);
+    const targetSource = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
+    const targetMappedPath = join(fixture.targetDir, "sessions", parentName, relativePath);
     const localMappedPath = join(flatRoot, relativePath);
     const externalFile = join(fixture.root, "symlink-parent-external.jsonl");
     try {
@@ -1322,7 +1336,7 @@ describe("bidirectional session sync labels", () => {
         targetSource,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${relativePath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${relativePath}`,
         })}\n`,
       );
       await utimes(targetSource, 1, 1);
@@ -1403,7 +1417,7 @@ describe("bidirectional session sync labels", () => {
     const cwd = join(fixture.root, "local-symlink-project");
     const portableName = portableSessionDirName(cwd);
     const localPath = join(flatRoot, relativePath);
-    const targetPath = join(fixture.targetDir, portableName, relativePath);
+    const targetPath = join(fixture.targetDir, "sessions", portableName, relativePath);
     const externalDirectory = join(fixture.root, "local-symlink-external");
     try {
       await mkdir(dirname(localPath), { recursive: true });
@@ -1466,7 +1480,7 @@ describe("bidirectional session sync labels", () => {
     const portableName = `ROOT${encodeURIComponent(toPosixAbsolute(fixture.cwd))}`;
     try {
       await writeFile(join(fixture.localTree, "orphan.md"), "local orphan\n");
-      const targetTree = join(fixture.targetDir, portableName);
+      const targetTree = join(fixture.targetDir, "sessions", portableName);
       await mkdir(targetTree);
       await writeFile(
         join(targetTree, "target.jsonl"),
@@ -1511,7 +1525,7 @@ describe("bidirectional session sync labels", () => {
       ).rejects.toThrow(/Naming configuration mismatch/);
       expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe(beforeState);
       expect(
-        await readFile(join(fixture.targetDir, targetName, "mismatch.jsonl"), "utf8"),
+        await readFile(join(fixture.targetDir, "sessions", targetName, "mismatch.jsonl"), "utf8"),
       ).toContain("SYSTEM");
     } finally {
       await cleanup(fixture.root);

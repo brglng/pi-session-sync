@@ -53,11 +53,12 @@ describe("latest P1 symlink scope", () => {
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const localTree = join(sessionsRoot, localName);
-    const oldTree = join(targetDir, oldName);
-    const newTree = join(targetDir, newName);
+    const oldTree = join(targetDir, "sessions", oldName);
+    const newTree = join(targetDir, "sessions", newName);
     try {
       await mkdir(localTree, { recursive: true });
       await mkdir(targetDir, { recursive: true });
+      await mkdir(join(targetDir, "sessions"), { recursive: true });
       await mkdir(cwd, { recursive: true });
       for (const [name, value] of [
         ["a.jsonl", "a"],
@@ -124,6 +125,7 @@ describe("latest P1 symlink scope", () => {
       await mkdir(parentTree, { recursive: true });
       await mkdir(childTree, { recursive: true });
       await mkdir(targetDir, { recursive: true });
+      await mkdir(join(targetDir, "sessions"), { recursive: true });
       await mkdir(parentCwd, { recursive: true });
       await mkdir(childCwd, { recursive: true });
       await writeFile(
@@ -140,8 +142,11 @@ describe("latest P1 symlink scope", () => {
 
       await rm(childFile);
       await sync(200_000);
-      await rename(join(targetDir, parentOldName), join(targetDir, parentNewName));
-      const movedParent = join(targetDir, parentNewName, "parent.jsonl");
+      await rename(
+        join(targetDir, "sessions", parentOldName),
+        join(targetDir, "sessions", parentNewName),
+      );
+      const movedParent = join(targetDir, "sessions", parentNewName, "parent.jsonl");
       await writeFile(
         movedParent,
         `${JSON.stringify({ type: "session", id: "p", cwd: `pi-session-sync://${parentNewName}` })}\n`,
@@ -161,8 +166,8 @@ describe("latest P1 symlink scope", () => {
       const state = JSON.parse(await readFile(join(targetDir, STATE_FILE_NAME), "utf8")) as {
         entries: Record<string, { tombstone: unknown }>;
       };
-      expect(state.entries[`${childOldName}/child.jsonl`]?.tombstone).not.toBeNull();
-      expect(state.entries[`${parentNewName}/parent.jsonl`]?.tombstone).toBeNull();
+      expect(state.entries[`sessions/${childOldName}/child.jsonl`]?.tombstone).not.toBeNull();
+      expect(state.entries[`sessions/${parentNewName}/parent.jsonl`]?.tombstone).toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(parentCwd, { recursive: true, force: true });
@@ -182,6 +187,7 @@ describe("latest P1 symlink scope", () => {
     try {
       await mkdir(localTree, { recursive: true });
       await mkdir(targetDir, { recursive: true });
+      await mkdir(join(targetDir, "sessions"), { recursive: true });
       await mkdir(cwd, { recursive: true });
       for (const name of ["a.jsonl", "b.jsonl"]) {
         const path = join(localTree, name);
@@ -206,10 +212,10 @@ describe("latest P1 symlink scope", () => {
         entries: Record<string, unknown>;
       };
       const scope = Object.values(stateBeforeMigration.scopes)[0];
-      const oldA = `${oldName}/a.jsonl`;
-      const oldB = `${oldName}/b.jsonl`;
-      const newA = `${newName}/a.jsonl`;
-      const newB = `${newName}/b.jsonl`;
+      const oldA = `sessions/${oldName}/a.jsonl`;
+      const oldB = `sessions/${oldName}/b.jsonl`;
+      const newA = `sessions/${newName}/a.jsonl`;
+      const newB = `sessions/${newName}/b.jsonl`;
       stateBeforeMigration.entries[newA] = JSON.parse(
         JSON.stringify(stateBeforeMigration.entries[oldA]),
       );
@@ -231,9 +237,9 @@ describe("latest P1 symlink scope", () => {
       await writeFile(statePath, `${JSON.stringify(stateBeforeMigration, null, 2)}\n`);
       const stateBeforeBlocked = await readFile(statePath, "utf8");
 
-      await rename(join(targetDir, oldName), join(targetDir, newName));
+      await rename(join(targetDir, "sessions", oldName), join(targetDir, "sessions", newName));
       for (const name of ["a.jsonl", "b.jsonl"]) {
-        const path = join(targetDir, newName, name);
+        const path = join(targetDir, "sessions", newName, name);
         if (name === "b.jsonl") {
           await rm(path);
           await symlink(join(root, "outside"), path);
@@ -255,7 +261,9 @@ describe("latest P1 symlink scope", () => {
       expect(summary.deleted).toBe(0);
       expect(await readFile(statePath, "utf8")).toBe(stateBeforeBlocked);
       expect(JSON.parse(await readFile(join(localTree, "a.jsonl"), "utf8")).value).toBe("a.jsonl");
-      expect((await lstat(join(targetDir, newName, "b.jsonl"))).isSymbolicLink()).toBe(true);
+      expect((await lstat(join(targetDir, "sessions", newName, "b.jsonl"))).isSymbolicLink()).toBe(
+        true,
+      );
       expect(scope?.directories[localName]).toBe(oldName);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -272,6 +280,7 @@ describe("latest P1 symlink scope", () => {
     try {
       await mkdir(localTree, { recursive: true });
       await mkdir(targetDir, { recursive: true });
+      await mkdir(join(targetDir, "sessions"), { recursive: true });
       await mkdir(cwd, { recursive: true });
       for (const [name, value] of [
         ["a.jsonl", "a"],
@@ -299,13 +308,21 @@ describe("latest P1 symlink scope", () => {
       expect(summary.copied).toBe(1);
       expect(summary.deleted).toBe(0);
       expect(
-        JSON.parse(await readFile(join(targetDir, portableSessionDirName(cwd), "a.jsonl"), "utf8"))
-          .value,
+        JSON.parse(
+          await readFile(
+            join(targetDir, "sessions", portableSessionDirName(cwd), "a.jsonl"),
+            "utf8",
+          ),
+        ).value,
       ).toBe("changed");
       expect((await lstat(join(localTree, "b.jsonl"))).isSymbolicLink()).toBe(true);
       expect(
-        JSON.parse(await readFile(join(targetDir, portableSessionDirName(cwd), "b.jsonl"), "utf8"))
-          .value,
+        JSON.parse(
+          await readFile(
+            join(targetDir, "sessions", portableSessionDirName(cwd), "b.jsonl"),
+            "utf8",
+          ),
+        ).value,
       ).toBe("b");
     } finally {
       await rm(root, { recursive: true, force: true });

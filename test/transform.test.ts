@@ -2,14 +2,18 @@
 /// <reference path="./vitest-shim.d.ts" />
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   defaultSessionDirName,
   portableSessionDirName,
   toPosixAbsolute,
 } from "../src/portable-name.ts";
-import { createParentPathResolver, transformFileText } from "../src/transform.ts";
+import {
+  createGenericPathResolver,
+  createParentPathResolver,
+  transformFileText,
+} from "../src/transform.ts";
 
 const sessionsRoot = process.cwd();
 const cwd = process.platform === "win32" ? "C:\\var\\www\\project" : "/var/www/project";
@@ -59,7 +63,7 @@ describe("session file transformation", () => {
     const transformed = transformFileText("session.jsonl", input, "to-target", resolver);
     const entry = JSON.parse(transformed.outputText.trim()) as Record<string, unknown>;
     expect(entry.cwd).toBe(`pi-session-sync://${portableName}`);
-    expect(entry.parentSession).toBe(`pi-session-sync://${portableName}/parent.jsonl`);
+    expect(entry.parentSession).toBe(`pi-session-sync://sessions/${portableName}/parent.jsonl`);
     expect((entry.nested as Array<Record<string, unknown>>)[0]?.cwd).toBe(
       `pi-session-sync://${portableName}`,
     );
@@ -76,26 +80,41 @@ describe("session file transformation", () => {
     expect(restoredEntry.parentSession).toBe(`${sessionsRoot}/${localName}/parent.jsonl`);
   });
 
-  it("rewrites only YAML cwd fields and leaves Markdown parentSession untouched", () => {
+  it("keeps Markdown parentSession bytes in output while rewriting generic paths", () => {
     const inRootParent = join(sessionsRoot, localName, "parent.jsonl");
+    const inRootRecord = join(sessionsRoot, localName, "record.json");
+    const syncParent = `pi-session-sync://sessions/${portableName}/parent.jsonl`;
+    const syncRecord = `pi-session-sync://sessions/${portableName}/record.json`;
     const input = [
       "---",
       `cwd: pi-session-sync://${portableName}`,
       `parentSession: ${inRootParent}`,
+      `sessionPath: ${syncRecord}`,
       "relativeParent: keep-relative",
-      `nested:\n  parentSession: pi-session-sync://${portableName}/parent.jsonl\n  metadata:\n    cwd: pi-session-sync://${portableName}`,
+      `nested:\n  parentSession: ${syncParent}\n  metadata:\n    cwd: pi-session-sync://${portableName}`,
       "---",
       "body",
     ].join("\n");
     const transformed = transformFileText("note.md", input, "to-local", resolver);
+    // Legal Markdown parentSession bytes remain unchanged in output in both
+    // directions: the local absolute spelling and the sync URI spelling both
+    // survive verbatim, and only canonicalText normalizes them together.
     expect(transformed.outputText).toContain(`parentSession: ${inRootParent}`);
-    expect(transformed.outputText).toContain(
-      `parentSession: pi-session-sync://${portableName}/parent.jsonl`,
-    );
+    expect(transformed.outputText).toContain(`parentSession: ${syncParent}`);
+    expect(transformed.canonicalText).toContain(`parentSession: ${syncParent}`);
+    // Generic non-parentSession path fields in the same file still rewrite.
+    expect(transformed.outputText).toContain(`sessionPath: ${inRootRecord}`);
     expect(transformed.cwdValues).toEqual([cwd, cwd]);
+
+    // The same contract holds in the to-target direction.
+    const target = transformFileText("note.md", transformed.outputText, "to-target", resolver);
+    expect(target.outputText).toContain(`parentSession: ${inRootParent}`);
+    expect(target.outputText).toContain(`parentSession: ${syncParent}`);
+    expect(target.outputText).toContain(`sessionPath: ${syncRecord}`);
+    expect(target.cwdValues).toEqual([cwd, cwd]);
   });
 
-  it("rejects out-of-root and non-string Markdown parentSession before writing", () => {
+  it("preserves out-of-root Markdown values without error but keeps parentSession strict", () => {
     const outOfRootInput = [
       "---",
       `cwd: pi-session-sync://${portableName}`,
@@ -103,9 +122,12 @@ describe("session file transformation", () => {
       "---",
       "body",
     ].join("\n");
-    expect(() => transformFileText("note.md", outOfRootInput, "to-local", resolver)).toThrow(
-      /outside sessions root/,
+    expect(transformFileText("note.md", outOfRootInput, "to-local", resolver).outputText).toContain(
+      "parentSession: /machine-specific/session.jsonl",
     );
+    // parentSession must be a string in every direction: the target-to-local
+    // leniency rules cover nonportable string values only, never non-string
+    // values (missing key value, ~ null, sequences).
     const nonStringInput = [
       "---",
       `cwd: pi-session-sync://${portableName}`,
@@ -147,28 +169,21 @@ describe("session file transformation", () => {
     expect(() =>
       transformFileText("note.md", nestedUnresolvedAliasInput, "to-target", resolver),
     ).toThrow(/parentSession|Unresolved YAML alias/);
-    const sequenceInput = ["---", `cwd: ${cwd}`, "parentSession: [one, two]", "---", "body"].join(
-      "\n",
-    );
-    expect(() => transformFileText("note.md", sequenceInput, "to-target", resolver)).toThrow(
-      /parentSession field must be a string/,
-    );
-    if (process.platform !== "win32") {
-      const foreignWindowsInput = [
-        "---",
-        `cwd: pi-session-sync://${portableName}`,
-        "parentSession: C:\\machine\\session.jsonl",
-        "---",
-        "body",
-      ].join("\n");
-      expect(() =>
-        transformFileText("note.md", foreignWindowsInput, "to-target", resolver),
-      ).toThrow(/not valid on POSIX/);
-    }
+    // A YAML sequence value is not a string parentSession even in target
+    // sources: strict in every direction.
+    expect(() =>
+      transformFileText(
+        "note.md",
+        ["---", `cwd: ${cwd}`, "parentSession: [one, two]", "---", "body"].join("\n"),
+        "to-target",
+        resolver,
+      ),
+    ).toThrow(/parentSession field must be a string/);
   });
 
   it("normalizes valid Markdown parentSession paths only in canonical hashes", () => {
     const parentPath = join(sessionsRoot, localName, "parent.jsonl");
+    const syncParent = `pi-session-sync://sessions/${portableName}/parent.jsonl`;
     const localInput = [
       "---",
       `cwd: ${cwd}`,
@@ -180,7 +195,7 @@ describe("session file transformation", () => {
     const targetInput = [
       "---",
       `cwd: pi-session-sync://${portableName}`,
-      `parentSession: pi-session-sync://${portableName}/parent.jsonl`,
+      `parentSession: ${syncParent}`,
       "description: keep-target-text",
       "---",
       "body",
@@ -188,23 +203,22 @@ describe("session file transformation", () => {
     const local = transformFileText("hash-local.md", localInput, "to-target", resolver);
     const target = transformFileText("hash-target.md", targetInput, "to-local", resolver);
 
+    // Output bytes stay unchanged in both directions: the local absolute
+    // spelling and the sync URI spelling are both preserved verbatim.
     expect(local.outputText).toContain(`parentSession: ${parentPath}`);
-    expect(target.outputText).toContain(
-      `parentSession: pi-session-sync://${portableName}/parent.jsonl`,
-    );
-    expect(local.canonicalText).toContain(
-      `parentSession: pi-session-sync://${portableName}/parent.jsonl`,
-    );
-    expect(target.canonicalText).toContain(
-      `parentSession: pi-session-sync://${portableName}/parent.jsonl`,
-    );
+    expect(local.outputText).not.toContain(`parentSession: ${syncParent}`);
+    expect(target.outputText).toContain(`parentSession: ${syncParent}`);
+    expect(target.outputText).not.toContain(`parentSession: ${parentPath}`);
+    // Only canonicalText normalizes both representations to the same URI.
+    expect(local.canonicalText).toContain(`parentSession: ${syncParent}`);
+    expect(target.canonicalText).toContain(`parentSession: ${syncParent}`);
     expect(local.canonicalText).toBe(
       target.canonicalText.replace("keep-target-text", "keep-local-text"),
     );
   });
 
   it("accepts legal pi-session-sync Markdown parentSession in local inspect and to-target passes", () => {
-    const syncParent = `pi-session-sync://${portableName}/parent.jsonl`;
+    const syncParent = `pi-session-sync://sessions/${portableName}/parent.jsonl`;
     const input = [
       "---",
       `cwd: ${cwd}`,
@@ -242,37 +256,27 @@ describe("session file transformation", () => {
 
     // Malformed pi-session-sync URIs still fail the to-target pass before any
     // write; the output must never carry an unvalidated value.
-    const badInput = input.replace(syncParent, `pi-session-sync://${portableName}/bad%ZZ.jsonl`);
+    const badInput = input.replace(
+      syncParent,
+      `pi-session-sync://sessions/${portableName}/bad%ZZ.jsonl`,
+    );
     expect(() =>
       transformFileText("local-uri.md", badInput, "to-target", resolver, { portableName }),
     ).toThrow(/Invalid percent encoding|Invalid pi-session-sync/);
   });
 
-  it("rejects JSON numbers that cannot round-trip losslessly", () => {
+  it("accepts JSON numbers with ordinary JS round-tripping", () => {
     const row = (value: string): string =>
       `${JSON.stringify({ cwd: `pi-session-sync://${portableName}` })}`.replace(
         "}",
         `,"count":${value}}`,
       );
-    expect(() => transformFileText("num.jsonl", row("1e999"), "to-local", resolver)).toThrow(
-      /cannot be preserved/,
-    );
-    expect(() =>
-      transformFileText("num.jsonl", row("9007199254740993"), "to-local", resolver),
-    ).toThrow(/cannot be preserved/);
-    expect(() => transformFileText("num.jsonl", row("1e-999"), "to-local", resolver)).toThrow(
-      /cannot be preserved/,
-    );
-    // -0 would silently round-trip to 0 through JS parse/stringify.
-    expect(() => transformFileText("num.jsonl", row("-0"), "to-local", resolver)).toThrow(
-      /cannot be preserved/,
-    );
-    // Decimal precision loss must not silently round non-cwd data.
-    expect(() =>
-      transformFileText("num.jsonl", row("0.1000000000000000000001"), "to-local", resolver),
-    ).toThrow(/cannot be preserved/);
-    // Equivalent spellings that denote the same value are accepted; only
-    // value loss is rejected, never the lexical spelling.
+    // Numeric losslessness is no longer required; every numeric spelling is
+    // accepted and normal JS parse/stringify semantics apply.
+    for (const value of ["1e999", "9007199254740993", "1e-999", "-0", "0.1000000000000000000001"]) {
+      transformFileText("num.jsonl", row(value), "to-local", resolver);
+    }
+    // Equivalent spellings that denote the same value are accepted.
     for (const equivalent of ["1.0", "1e3", "1e-6", "0.1", "1000", "1e0"]) {
       const transformed = transformFileText("num.jsonl", row(equivalent), "to-local", resolver);
       expect((JSON.parse(transformed.outputText) as { count: number }).count).toBe(
@@ -291,7 +295,7 @@ describe("session file transformation", () => {
     expect((JSON.parse(precise.outputText) as { count: number }).count).toBe(0.1);
   });
 
-  it("rejects non-cwd YAML numbers that cannot round-trip losslessly", () => {
+  it("accepts non-cwd YAML numbers with ordinary JS rounding", () => {
     const doc = (value: string): string =>
       ["---", `count: ${value}`, `cwd: pi-session-sync://${portableName}`, "---", "body"].join(
         "\n",
@@ -302,18 +306,11 @@ describe("session file transformation", () => {
     // Hex/octal integers are preserved exactly as bigint too.
     const hex = transformFileText("note.md", doc("0x10"), "to-local", resolver);
     expect(hex.outputText).toContain("count: 0x10");
-    // Overflow to infinity is rejected before staging.
-    expect(() => transformFileText("note.md", doc("1e999"), "to-local", resolver)).toThrow(
-      /cannot be preserved/,
-    );
-    // Underflow to zero is rejected before staging.
-    expect(() => transformFileText("note.md", doc("1e-999"), "to-local", resolver)).toThrow(
-      /cannot be preserved/,
-    );
-    // Decimal precision loss is rejected before staging.
-    expect(() =>
-      transformFileText("note.md", doc("0.1000000000000000000001"), "to-local", resolver),
-    ).toThrow(/cannot be preserved/);
+    // Overflow, underflow, and decimal precision loss are accepted through
+    // ordinary YAML parsing and rendering.
+    transformFileText("note.md", doc("1e999"), "to-local", resolver);
+    transformFileText("note.md", doc("1e-999"), "to-local", resolver);
+    transformFileText("note.md", doc("0.1000000000000000000001"), "to-local", resolver);
     // YAML integer -0 parses to bigint 0: the numeric value is preserved and
     // the canonical integer spelling drops the sign.
     const minusZero = transformFileText("note.md", doc("-0"), "to-local", resolver);
@@ -341,14 +338,12 @@ describe("session file transformation", () => {
     const noCwd = ["---", "count: 9007199254740993", "---", "body"].join("\n");
     const noCwdTransformed = transformFileText("note.md", noCwd, "to-target", resolver);
     expect(noCwdTransformed.outputText).toContain("count: 9007199254740993");
-    expect(() =>
-      transformFileText(
-        "note.md",
-        ["---", "count: 1e999", "---", "body"].join("\n"),
-        "to-target",
-        resolver,
-      ),
-    ).toThrow(/cannot be preserved/);
+    transformFileText(
+      "note.md",
+      ["---", "count: 1e999", "---", "body"].join("\n"),
+      "to-target",
+      resolver,
+    );
   });
 
   it("rewrites recursive YAML frontmatter but not Markdown body", () => {
@@ -694,21 +689,351 @@ describe("session file transformation", () => {
     expect(() =>
       transformFileText("bad.md", "---\ncwd: /var/www/project\n", "to-target", resolver),
     ).toThrow(/missing closing/);
-    expect(() =>
-      transformFileText(
-        "windows-drive.jsonl",
-        `${JSON.stringify({ parentSession: "C:\\sessions\\parent.jsonl" })}\n`,
-        "to-target",
-        resolver,
+    for (const windowsValue of [
+      JSON.stringify({ parentSession: "C:\\sessions\\parent.jsonl" }),
+      JSON.stringify({ parentSession: "\\\\server\\share\\parent.jsonl" }),
+    ]) {
+      // Local source: a Windows-shaped/UNC parentSession is not a sessions-root
+      // reference and is a strict file error before any write.
+      expect(() =>
+        transformFileText("windows.jsonl", `${windowsValue}\n`, "to-target", resolver),
+      ).toThrow(/parentSession must reference a session file/);
+    }
+  });
+
+  it("preserves invalid JSONL values with warnings in target-to-local only", () => {
+    const input = `${JSON.stringify({
+      cwd: "garbage",
+      parentSession: "pi-session-sync:not-a-uri",
+      missionPath: "pi-session-sync://sessions/HOME%2Fx/../escape.json",
+    })}\n`;
+    const local = transformFileText("bad.jsonl", input, "to-local", resolver);
+    // Invalid cwd and generic URIs are preserved verbatim (no decode/rewrite).
+    expect(local.outputText).toBe(input);
+    expect(local.canonicalText).toBe(input);
+    expect(local.cwdValues).toEqual([]);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes("Invalid target cwd value preserved verbatim: garbage"),
       ),
-    ).toThrow(/parentSession/);
-    expect(() =>
-      transformFileText(
-        "windows-unc.jsonl",
-        `${JSON.stringify({ parentSession: "\\\\server\\share\\parent.jsonl" })}\n`,
-        "to-target",
-        resolver,
+    ).toBe(true);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes(
+          "Invalid pi-session-sync URI preserved verbatim in target content: pi-session-sync:not-a-uri",
+        ),
       ),
-    ).toThrow(/parentSession/);
+    ).toBe(true);
+    expect(
+      local.warnings?.some((warning) => warning.includes("Invalid target path preserved verbatim")),
+    ).toBe(false);
+    // Local -> target remains strict for the very same content.
+    expect(() => transformFileText("bad.jsonl", input, "to-target", resolver)).toThrow(
+      /garbage|pi-session-sync/,
+    );
+    expect(() => transformFileText("bad.jsonl", input, "inspect-local", resolver)).toThrow();
+  });
+
+  it("preserves invalid JSON values with warnings and identical canonical hash", () => {
+    const unmappedInRoot = join(sessionsRoot, "unmapped", "record.json");
+    const input = `${JSON.stringify(
+      { recordPath: "pi-session-sync:broken", sessionPath: unmappedInRoot },
+      null,
+      2,
+    )}\n`;
+    const local = transformFileText("bad.json", input, "to-local", resolver);
+    expect(local.outputText).toContain("pi-session-sync:broken");
+    expect(local.outputText).toContain(unmappedInRoot);
+    // Canonical hashing keeps invalid values byte-identical so content
+    // equality and conflicts compare the original values.
+    expect(local.canonicalText).toContain("pi-session-sync:broken");
+    expect(local.canonicalText).toContain(unmappedInRoot);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes(
+          "Invalid pi-session-sync URI preserved verbatim in target content: pi-session-sync:broken",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes(`Invalid target path preserved verbatim: ${unmappedInRoot}`),
+      ),
+    ).toBe(true);
+    // Two identical invalid values hash to the same canonical text; distinct
+    // invalid values stay distinct.
+    const again = transformFileText("bad.json", input, "to-local", resolver);
+    expect(again.canonicalText).toBe(local.canonicalText);
+    // Local -> target is still strict on the same content.
+    expect(() => transformFileText("bad.json", input, "to-target", resolver)).toThrow();
+  });
+
+  it("preserves invalid Markdown cwd and generic URI values in target-to-local only", () => {
+    const unmappedInRoot = join(sessionsRoot, "unmapped", "session.jsonl");
+    const input = [
+      "---",
+      "cwd: pi-session-sync://garbage",
+      "parentSession: pi-session-sync:bad",
+      "meta:",
+      "  cwd: /absolute/not-portable",
+      `  sessionPath: ${unmappedInRoot}`,
+      "  mission: pi-session-sync://missions/../escape.json",
+      "---",
+      "body",
+    ].join("\n");
+    const local = transformFileText("bad.md", input, "to-local", resolver);
+    expect(local.outputText).toContain("pi-session-sync://garbage");
+    expect(local.outputText).toContain("pi-session-sync:bad");
+    expect(local.outputText).toContain("/absolute/not-portable");
+    expect(local.cwdValues).toEqual([]);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes("Invalid target cwd value preserved verbatim"),
+      ),
+    ).toBe(true);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes(
+          "Invalid pi-session-sync URI preserved verbatim in target content: pi-session-sync:bad",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      local.warnings?.some((warning) =>
+        warning.includes(`Invalid target path preserved verbatim: ${unmappedInRoot}`),
+      ),
+    ).toBe(true);
+    // Canonical hashing keeps invalid values verbatim.
+    expect(local.canonicalText).toContain("pi-session-sync://garbage");
+    expect(local.canonicalText).toContain(unmappedInRoot);
+    // Same content converted to target must fail strict local-to-target.
+    expect(() => transformFileText("bad.md", input, "to-target", resolver)).toThrow();
+  });
+
+  it("rewrites only generic path values, never YAML mapping keys", () => {
+    const sessionDirPath = join(sessionsRoot, localName);
+    const uriKey = `pi-session-sync://sessions/${portableName}/parent.jsonl`;
+    const input = [
+      "---",
+      `cwd: pi-session-sync://${portableName}`,
+      // Mapping keys are never path-rewritten, even when they look like
+      // absolute paths or sync URIs (generic traversal only rewrites values).
+      `${escapeYamlKey(sessionDirPath)}: key-value`,
+      `${escapeYamlKey(uriKey)}: key-value`,
+      `sessionPath: ${join(sessionDirPath, "child.jsonl")}`,
+      "---",
+      "body",
+    ].join("\n");
+    const transformed = transformFileText("keys.md", input, "to-local", resolver);
+    expect(transformed.outputText).toContain(`${escapeYamlKey(sessionDirPath)}: key-value`);
+    expect(transformed.outputText).toContain(`${escapeYamlKey(uriKey)}: key-value`);
+    // Only the value under sessionPath is preserved (out-of-root values stay
+    // verbatim in target-to-local) and the keys keep their exact spelling.
+    expect(transformed.outputText).toContain(`sessionPath: ${join(sessionDirPath, "child.jsonl")}`);
+  });
+
+  it("emits warnings for preserved out-of-root absolute generic values in target-to-local", () => {
+    const outOfRoot = join(sessionsRoot, "..", "machine-only", "x.jsonl");
+    const input = [
+      "---",
+      `cwd: pi-session-sync://${portableName}`,
+      "meta:",
+      `  sessionPath: ${outOfRoot}`,
+      "---",
+      "body",
+    ].join("\n");
+    const transformed = transformFileText("out-of-root.md", input, "to-local", resolver);
+    expect(transformed.outputText).toContain(outOfRoot);
+    expect(
+      transformed.warnings?.some((warning) =>
+        warning.includes("Invalid target path preserved verbatim"),
+      ),
+    ).toBe(true);
+
+    const jsonlInput = `${JSON.stringify({
+      cwd: `pi-session-sync://${portableName}`,
+      sessionPath: outOfRoot,
+    })}\n`;
+    const jsonl = transformFileText("out-of-root.jsonl", jsonlInput, "to-local", resolver);
+    expect(jsonl.outputText).toContain(outOfRoot);
+    expect(
+      jsonl.warnings?.some((warning) => warning.includes("Invalid target path preserved verbatim")),
+    ).toBe(true);
+  });
+
+  it("keeps generic sessions URIs out of parentSession reference evidence", () => {
+    // A generic field pointing at a sessions directory URI (or file URI) is an
+    // ordinary path rewrite, not parentSession mapping/replay/validation
+    // evidence. Only values under the literal `parentSession` key enter
+    // parentSessionReferences.
+    const directoryUri = `pi-session-sync://sessions/${portableName}`;
+    const fileUri = `pi-session-sync://sessions/${portableName}/meta.json`;
+    const jsonlInput = `${JSON.stringify({
+      cwd,
+      ownerSessionId: directoryUri,
+      recordPath: fileUri,
+      parentSession: fileUri,
+    })}\n`;
+    const jsonl = transformFileText("generic.jsonl", jsonlInput, "to-target", resolver);
+    // The generic directory URI stays a valid portable rewrite (never a
+    // parentSession path); only the real parentSession key contributes the
+    // parent reference.
+    expect(jsonl.parentSessionReferences?.length).toBe(1);
+    expect(jsonl.parentSessionReferences?.[0]?.value).toBe(fileUri);
+    expect(jsonl.genericPathReferences?.map((reference) => reference.value)).toEqual([
+      directoryUri,
+      fileUri,
+    ]);
+
+    const md = [
+      "---",
+      `cwd: ${cwd}`,
+      `ownerSessionId: ${directoryUri}`,
+      `recordPath: ${fileUri}`,
+      `parentSession: ${fileUri}`,
+      "---",
+      "body",
+    ].join("\n");
+    const markdown = transformFileText("generic.md", md, "to-target", resolver);
+    expect(markdown.parentSessionReferences?.length).toBe(1);
+    expect(markdown.parentSessionReferences?.[0]?.value).toBe(fileUri);
+    expect(markdown.genericPathReferences?.map((reference) => reference.value)).toEqual([
+      directoryUri,
+      fileUri,
+    ]);
+
+    const targetToLocal = transformFileText("generic.md", md, "to-local", resolver);
+    expect(targetToLocal.parentSessionReferences?.length).toBe(1);
+    // The generic directory URI decodes to the local session directory path.
+    expect(targetToLocal.genericPathReferences?.map((reference) => reference.value)).toEqual([
+      directoryUri,
+      fileUri,
+    ]);
+  });
+
+  it("is use-site aware for parentSession anchors regardless of field order", () => {
+    // A scalar anchor referenced by both a parentSession field and a generic
+    // field must keep parentSession semantics independent of field order and
+    // of the shared-scalar visited dedup: the parentSession use-site is cloned
+    // so its bytes/evidence are preserved while the generic use-site rewrites.
+    const localParent = join(sessionsRoot, localName, "parent.jsonl");
+    const build = (parentFirst: boolean): string =>
+      [
+        "---",
+        `base: &shared ${localParent}`,
+        "meta:",
+        ...(parentFirst
+          ? ["  parentSession: *shared", "  sessionPath: *shared"]
+          : ["  sessionPath: *shared", "  parentSession: *shared"]),
+        "---",
+        "body",
+      ].join("\n");
+    const parentFirst = transformFileText("order.md", build(true), "to-local", resolver);
+    const genericFirst = transformFileText("order.md", build(false), "to-local", resolver);
+    // ParentSession output bytes are preserved verbatim in every direction:
+    // the absolute local spelling stays.
+    expect(parentFirst.outputText).toContain(`parentSession: ${localParent}`);
+    expect(genericFirst.outputText).toContain(`parentSession: ${localParent}`);
+    // One parentSession reference, independent of field order, with identical
+    // resolver-validated mapping evidence.
+    expect(parentFirst.parentSessionReferences?.length).toBe(1);
+    expect(genericFirst.parentSessionReferences?.length).toBe(1);
+    expect(parentFirst.parentSessionReferences?.[0]?.mappedUri).toBe(
+      genericFirst.parentSessionReferences?.[0]?.mappedUri,
+    );
+    // The generic use-site still collects its own evidence in both orders.
+    expect((parentFirst.genericPathReferences?.length ?? 0) > 0).toBe(true);
+    expect((genericFirst.genericPathReferences?.length ?? 0) > 0).toBe(true);
+  });
+
+  it("protects output bytes when the anchor is declared directly under parentSession", () => {
+    // The anchored scalar itself IS the parentSession value and is aliased by
+    // generic and cwd fields. The parentSession output bytes must stay the
+    // absolute local spelling in to-target even though the shared scalar is
+    // also rewritten through the generic/cwd use-sites: those use-sites are
+    // isolated while the parent anchor declaration is treated as a protected
+    // parentSession use-site.
+    const localParent = join(sessionsRoot, localName, "parent.jsonl");
+    const build = (cwdAlias: boolean): string =>
+      [
+        "---",
+        `parentSession: &shared ${localParent}`,
+        "meta:",
+        "  sessionPath: *shared",
+        ...(cwdAlias ? ["  cwd: *shared"] : []),
+        "---",
+        "body",
+      ].join("\n");
+    for (const withCwd of [false, true]) {
+      const out = transformFileText("parent-anchor.md", build(withCwd), "to-target", resolver);
+      // ParentSession bytes are preserved verbatim, anchor declaration intact.
+      expect(out.outputText).toContain(`parentSession: &shared ${localParent}`);
+      // The generic use-site is isolated and rewritten to the portable URI.
+      expect(out.outputText).toContain(
+        `sessionPath: pi-session-sync://sessions/${portableName}/parent.jsonl`,
+      );
+      // The anchor is no longer shared by any rewritten use-site.
+      expect(out.outputText.includes("sessionPath: *shared")).toBe(false);
+      if (withCwd) {
+        expect(out.cwdValues).toEqual([localParent]);
+        expect(out.outputText).toContain(
+          `cwd: pi-session-sync://${portableSessionDirName(dirname(localParent))}`,
+        );
+      }
+    }
+  });
+
+  it("protects parentSession-declared anchors when the parent key follows unrelated generic fields", () => {
+    // Both field orders in the document: the parentSession anchor appears
+    // after unrelated generic content, and the alias use-sites come after the
+    // declaration. Field order of the DECLARATION within the document must
+    // not change the outcome.
+    const localParent = join(sessionsRoot, localName, "parent.jsonl");
+    const md = [
+      "---",
+      "meta:",
+      `  note: ${localParent}`,
+      `parentSession: &shared ${localParent}`,
+      "meta2:",
+      "  sessionPath: *shared",
+      "---",
+      "body",
+    ].join("\n");
+    const out = transformFileText("parent-anchor-order.md", md, "to-target", resolver);
+    expect(out.outputText).toContain(`parentSession: &shared ${localParent}`);
+    // The unrelated generic field is rewritten as a normal generic path while
+    // the parentSession anchor bytes stay intact.
+    expect(out.outputText).toContain(
+      `note: pi-session-sync://sessions/${portableName}/parent.jsonl`,
+    );
+    expect(out.outputText).toContain(
+      `meta2:\n  sessionPath: pi-session-sync://sessions/${portableName}/parent.jsonl`,
+    );
+  });
+
+  it("preserves missions URIs verbatim when no missions root exists", () => {
+    const genericResolver = createGenericPathResolver(
+      sessionsRoot,
+      undefined,
+      () => undefined,
+      "nested",
+    );
+    const target = transformFileText(
+      "mission-ref.json",
+      `${JSON.stringify({ p: "pi-session-sync://missions/index/x.json" })}\n`,
+      "to-local",
+      genericResolver,
+    );
+    // Without a missions root a mission URI cannot decode: target source
+    // leniency preserves it verbatim with a warning instead of guessing a
+    // process-cwd path.
+    expect(JSON.parse(target.outputText).p).toBe("pi-session-sync://missions/index/x.json");
+    expect((target.warnings ?? []).some((w) => w.includes("Invalid pi-session-sync URI"))).toBe(
+      true,
+    );
   });
 });
+
+function escapeYamlKey(value: string): string {
+  return JSON.stringify(value);
+}

@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
 import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import {
   type Alias,
   type Document,
@@ -18,16 +18,20 @@ import type { SessionLayout } from "./config.ts";
 import { type PortableNameOptions, strictPortableNameIdentity } from "./portable-name.ts";
 import {
   cwdToSyncUri,
+  isSessionsDirectorySyncUri,
   isSyncUri,
-  isWindowsShapedAbsolutePath,
-  localSessionPathToSyncUri,
+  MISSIONS_FILE_URI_PREFIX,
   normalizeCwd,
   SYNC_URI_PREFIX,
-  syncParentUriToCanonical,
-  syncParentUriToLocalPath,
   syncUriToCwd,
   syncUriToPortableName,
 } from "./session-paths.ts";
+import {
+  canonicalRootUri,
+  localPathToRootUri,
+  rootUriToLocalPath,
+  SESSIONS_FILE_URI_PREFIX,
+} from "./sync-paths.ts";
 
 export type TransformMode =
   | "to-target"
@@ -45,6 +49,25 @@ export interface ParentPathResolver {
 export interface TransformOptions extends Partial<PortableNameOptions> {
   namingOptions?: Partial<PortableNameOptions>;
   portableName?: string;
+  /**
+   * Per-file semantic-label evidence for `cwd` values (missions). Maps the
+   * normalized local cwd path (see `cwdEvidenceKey`) to the portable name
+   * that MUST be preserved across round-trips: a target-derived cwd that
+   * decodes under the current HOME must re-encode with its original ROOT
+   * label instead of being re-derived from naming options. Sessions keep
+   * using `portableName`; missions pass this evidence map instead.
+   */
+  cwdEvidence?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Native identity key for a local cwd path used by mission cwd label
+ * evidence lookups: resolved, and case-folded on Windows exactly like the
+ * path compares elsewhere.
+ */
+function cwdEvidenceKey(value: string): string {
+  const resolved = resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function namingOptionsForTransform(
@@ -79,8 +102,29 @@ export interface TransformedFile {
   cwdValues: string[];
   cwdPortableNames?: string[];
   parentSessionReferences?: ParentSessionReference[];
+  /**
+   * Sync-path references collected from generic (non-`parentSession`,
+   * non-`cwd`) fields. These are ordinary path rewrites, never mapping
+   * evidence for parent-only directories or nested replacement replay. They
+   * exist so missions content can derive session directory mappings from
+   * generic sessions URIs while parentSession semantics stay strictly tied to
+   * the `parentSession` key.
+   */
+  genericPathReferences?: ParentSessionReference[];
   sessionCwdPresent?: boolean;
   sessionHeaderValid?: boolean;
+  /**
+   * False when the target JSONL session header carries a string `cwd` that is
+   * not a decodable portable URI. Active-session refresh refuses undecodable
+   * cwd headers; ordinary non-active target files remain lenient.
+   */
+  sessionHeaderCwdDecodable?: boolean;
+  /**
+   * Non-fatal notices produced while transforming target content into local
+   * form (invalid portable paths/URIs preserved verbatim). Empty when the
+   * content was valid or when the mode is not a target-source pass.
+   */
+  warnings?: string[];
 }
 
 function createTransformedFile(
@@ -89,10 +133,17 @@ function createTransformedFile(
   cwdValues: string[],
   cwdPortableNames: string[],
   parentSessionReferences: ParentSessionReference[] = [],
+  genericPathReferences: ParentSessionReference[] = [],
   sessionCwdPresent = false,
   sessionHeaderValid = false,
+  warnings: string[] = [],
+  sessionHeaderCwdDecodable: boolean | undefined = undefined,
 ): TransformedFile {
   const result: TransformedFile = { outputText, canonicalText, cwdValues };
+  Object.defineProperty(result, "warnings", {
+    value: warnings,
+    enumerable: false,
+  });
   Object.defineProperty(result, "cwdPortableNames", {
     value: cwdPortableNames,
     enumerable: false,
@@ -101,12 +152,20 @@ function createTransformedFile(
     value: parentSessionReferences,
     enumerable: false,
   });
+  Object.defineProperty(result, "genericPathReferences", {
+    value: genericPathReferences,
+    enumerable: false,
+  });
   Object.defineProperty(result, "sessionCwdPresent", {
     value: sessionCwdPresent,
     enumerable: false,
   });
   Object.defineProperty(result, "sessionHeaderValid", {
     value: sessionHeaderValid,
+    enumerable: false,
+  });
+  Object.defineProperty(result, "sessionHeaderCwdDecodable", {
+    value: sessionHeaderCwdDecodable,
     enumerable: false,
   });
   return result;
@@ -141,16 +200,7 @@ function isValidSessionHeader(value: unknown): boolean {
 
 function asStructuredValue(value: unknown): StructuredValue {
   if (value === undefined || value === null) return null;
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    // JSON.parse can yield Infinity for overflows like 1e999 and silently
-    // round non-safe integers. Refuse both: they cannot round-trip losslessly.
-    if (!Number.isFinite(value)) {
-      throw new Error(`Unsupported number value: ${value}`);
-    }
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      throw new Error(`Unsafe integer value: ${value}`);
-    }
+  if (typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
     return value;
   }
   if (Array.isArray(value)) return value.map((entry) => asStructuredValue(entry));
@@ -170,289 +220,291 @@ function isAbsolutePath(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
 }
 
+function isSessionsFileUri(value: string): boolean {
+  return isSyncUri(value) && value.toLowerCase().startsWith(SESSIONS_FILE_URI_PREFIX);
+}
+
+function isMissionsFileUri(value: string): boolean {
+  return isSyncUri(value) && value.toLowerCase().startsWith(MISSIONS_FILE_URI_PREFIX);
+}
+
+/**
+ * True when the sync URI is a root-namespaced file/directory URI (sessions or
+ * missions). Every generic (non-cwd) path value that looks like a sync URI
+ * must be one of these; the rootless slashless `<portableName>` cwd form is
+ * legal only in the `cwd` field (P6).
+ */
+function isRootFileUri(value: string): boolean {
+  return isSessionsFileUri(value) || isMissionsFileUri(value);
+}
+
 interface VisitContext {
   mode: TransformMode;
   resolver: ParentPathResolver;
   cwdValues: string[];
   cwdPortableNames: string[];
   parentSessionReferences: ParentSessionReference[];
+  /**
+   * Sync-path references from generic (non-`parentSession`, non-`cwd`)
+   * fields. Separated from `parentSessionReferences` so generic sessions URIs
+   * never read as parentSession mapping, replay, or validation evidence.
+   */
+  genericPathReferences: ParentSessionReference[];
   namingOptions: Partial<PortableNameOptions> | undefined;
   portableName: string | undefined;
+  /**
+   * Per-file mission cwd label evidence (see `TransformOptions.cwdEvidence`).
+   * Only the user-facing to-target output pass consults it; canonical and
+   * target-source passes pass undefined.
+   */
+  cwdEvidence: Readonly<Record<string, string>> | undefined;
+  /**
+   * Warnings for values preserved verbatim because they are not valid
+   * portable paths/URIs. Collected only by the user-facing output pass of a
+   * target-source mode; canonical hash passes reuse a throwaway array.
+   */
+  warnings: string[];
 }
 
-function visitValue(
-  value: StructuredValue,
-  context: VisitContext,
-  key?: string,
-  rewriteParentSession = true,
-): StructuredValue {
-  const { mode, resolver, cwdValues, cwdPortableNames, namingOptions, portableName } = context;
-  if (key === "cwd") {
-    if (typeof value !== "string") {
-      throw new Error("cwd field must be a string");
-    }
-    if (mode === "to-target") {
-      const uri = cwdToSyncUri(value, namingOptions, portableName);
-      cwdValues.push(syncUriToCwd(uri, namingOptions));
-      cwdPortableNames.push(syncUriToPortableName(uri, namingOptions));
-      return uri;
-    }
-    if (mode === "inspect-local") {
-      const cwd = normalizeCwd(value);
-      cwdValues.push(cwd);
-      return value;
-    }
-    if (mode === "to-local" || mode === "inspect-target") {
-      const cwd = syncUriToCwd(value, namingOptions);
-      cwdValues.push(cwd);
-      const name = syncUriToPortableName(value, namingOptions);
-      cwdPortableNames.push(name);
-      return mode === "to-local" ? cwd : `${SYNC_URI_PREFIX}${name}`;
-    }
-    const cwd = syncUriToCwd(value, namingOptions);
-    cwdValues.push(cwd);
-    const name = syncUriToPortableName(value, namingOptions);
-    cwdPortableNames.push(name);
-    // Canonical hashing normalizes legacy loose spellings to the strict
-    // identity so equivalent labels hash identically on every platform.
-    return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(name, namingOptions) ?? name}`;
+function tryDecodeCwdValue(
+  value: string,
+  namingOptions: Partial<PortableNameOptions> | undefined,
+): { cwd: string; name: string } | undefined {
+  try {
+    return {
+      cwd: syncUriToCwd(value, namingOptions),
+      name: syncUriToPortableName(value, namingOptions),
+    };
+  } catch {
+    return undefined;
   }
+}
 
-  if (key === "parentSession" && !rewriteParentSession) {
-    return visitValue(value, context, undefined, false);
+/**
+ * Rewrite one generic (non-cwd) string value according to the generic path
+ * rule. From local source (to-target / inspect-local) every sync-URI value must
+ * be legal and in-root absolute paths must map under strict validation. From
+ * target source a malformed sync URI or an unmappable absolute path never
+ * fails the sync: the value is preserved verbatim with a warning so the file
+ * can still be copied back. Out-of-root absolutes and ordinary values always
+ * stay byte-identical. A `parentSession` value is sessions-only (never
+ * missions); on target source any nonportable absolute/URI spelling is
+ * preserved with a warning.
+ */
+function rewriteGenericPathValue(value: string, context: VisitContext, key?: string): string {
+  const { mode, resolver, parentSessionReferences, genericPathReferences } = context;
+  const isParentSession = key === "parentSession";
+  // A `pi-session-sync://sessions/<portableName>` URI names a session
+  // DIRECTORY, never a session file. parentSession must identify a parent
+  // session FILE, so local-source validation rejects the directory form even
+  // though the URI itself is otherwise legal.
+  if (
+    isParentSession &&
+    (mode === "inspect-local" || mode === "to-target") &&
+    isSessionsDirectorySyncUri(value)
+  ) {
+    throw new Error(
+      `parentSession must reference a session file, not a session directory: ${value}`,
+    );
   }
-
-  if (key === "parentSession") {
-    if (typeof value !== "string") {
-      throw new Error("parentSession field must be a string");
-    }
-    let rewritten: string;
-    let mappedUri: string | undefined;
-    if (mode === "to-target") {
-      if (isSyncUri(value)) {
-        throw new Error(`Local parentSession must not be a sync URI: ${value}`);
-      }
-      if (process.platform !== "win32" && isWindowsShapedAbsolutePath(value)) {
+  // The name of the field that carries the reference: `parentSession` enters
+  // the parent-reference evidence stream; any other field enters generic path
+  // reference tracking only (never parent mapping/replay/validation evidence).
+  const targetReferences = isParentSession ? parentSessionReferences : genericPathReferences;
+  if (isSyncUri(value)) {
+    if (mode === "inspect-local" || mode === "to-target") {
+      // Local source: strict validation in every direction-aware stage.
+      // Rootless slashless cwd URIs are legal only in the `cwd` field; a
+      // generic (non-cwd) path value must carry a sessions/missions namespace.
+      if (!isRootFileUri(value)) {
         throw new Error(
-          `Windows-shaped absolute parentSession path is not valid on POSIX: ${value}`,
+          `Non-cwd pi-session-sync value must be a sessions/missions file URI: ${value}`,
         );
       }
-      if (isAbsolutePath(value)) {
-        rewritten = resolver.localToSync(value);
-        mappedUri = rewritten;
-      } else {
-        rewritten = value;
+      // parentSession accepts only sessions-root references, never missions.
+      if (isParentSession && !isSessionsFileUri(value)) {
+        throw new Error(`parentSession must reference a session file, not missions: ${value}`);
       }
-    } else if (mode === "inspect-local") {
-      if (isSyncUri(value)) {
-        throw new Error(`Local parentSession must not be a sync URI: ${value}`);
+      resolver.canonicalSync(value);
+      if (isSessionsFileUri(value)) {
+        targetReferences.push({ value, rewritten: value });
       }
-      rewritten = value;
-    } else if (mode === "to-local") {
-      if (isSyncUri(value)) {
-        rewritten = resolver.syncToLocal(value);
-      } else if (isAbsolutePath(value)) {
-        // Target copies on the same machine legitimately carry in-root
-        // absolute spellings. Validate membership and keep the bytes; only
-        // out-of-root absolute paths are file errors. The validated sync URI
-        // is carried separately as absolute-reference mapping evidence.
-        mappedUri = resolver.localToSync(value);
-        rewritten = value;
-      } else {
-        rewritten = value;
-      }
-    } else if (mode === "inspect-target") {
-      if (isSyncUri(value)) {
-        rewritten = resolver.canonicalSync(value);
-      } else {
-        // Range validation of absolute spellings is performed by the full
-        // to-local pass with a real resolver that always follows.
-        rewritten = value;
-      }
-    } else if (isSyncUri(value)) {
-      rewritten = resolver.canonicalSync(value);
-    } else if (isAbsolutePath(value)) {
-      mappedUri = resolver.localToSync(value);
-      rewritten = resolver.canonicalSync(mappedUri);
-    } else {
-      rewritten = value;
+      return value;
     }
-    const reference: ParentSessionReference = { value, rewritten };
-    if (mappedUri !== undefined) reference.mappedUri = mappedUri;
-    context.parentSessionReferences.push(reference);
+    if (isParentSession && isMissionsFileUri(value)) {
+      // Target source: a missions URI in parentSession is never a legal
+      // session reference; preserve it with a warning under the target-source
+      // leniency.
+      context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
+      return value;
+    }
+    if (!isRootFileUri(value)) {
+      // Target source, non-cwd field: a rootless cwd-shaped value is not a
+      // legal file/path reference. Preserve it verbatim with a warning
+      // (cwd-field leniency never applies here).
+      context.warnings.push(
+        `Invalid pi-session-sync URI preserved verbatim in target content: ${value}`,
+      );
+      return value;
+    }
+    try {
+      const rewritten = resolver.canonicalSync(value);
+      if (mode === "to-local") {
+        const local = resolver.syncToLocal(value);
+        if (isSessionsFileUri(value)) targetReferences.push({ value, rewritten: local });
+        return local;
+      }
+      if (isSessionsFileUri(value)) targetReferences.push({ value, rewritten });
+      return rewritten;
+    } catch {
+      context.warnings.push(
+        `Invalid pi-session-sync URI preserved verbatim in target content: ${value}`,
+      );
+      return value;
+    }
+  }
+  if (!isAbsolutePath(value)) return value;
+  if (mode === "inspect-local" || mode === "inspect-target") {
+    // Inspect passes keep bytes but report in-root absolute references as
+    // mapping evidence for the scanner's directory inference.
+    targetReferences.push({ value, rewritten: value });
+    return value;
+  }
+  if (mode === "to-local") {
+    // Target copies on the same machine legitimately carry local absolute
+    // spellings. Validate range membership through the resolver and carry the
+    // URI as mapping evidence without changing the bytes; an unmappable value
+    // does not fail the sync on target source. Every target absolute spelling
+    // is machine-local (never portable), so an in-root value that happens to
+    // map on this machine still emits a warning alongside the preserved value.
+    try {
+      const mappedValue = resolver.localToSync(value);
+      if (mappedValue !== value) {
+        if (isSessionsFileUri(mappedValue)) {
+          targetReferences.push({ value, rewritten: value, mappedUri: mappedValue });
+        } else if (isParentSession) {
+          // A missions-root absolute path in parentSession is not a session
+          // reference; target-source leniency preserves it with a warning.
+          context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
+          return value;
+        }
+        context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+      } else if (!isSyncUri(value) && isAbsolutePath(value)) {
+        context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+      }
+    } catch {
+      context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+    }
+    return value;
+  }
+  if (mode === "canonical-target") {
+    if (isParentSession) {
+      // Markdown parentSession output bytes are preserved, so canonical
+      // hashing must normalize the legal local-absolute and sync-URI spellings
+      // to one portable representation. Unmappable values hash raw.
+      try {
+        const mappedUri = resolver.localToSync(value);
+        if (mappedUri === value) return value;
+        const rewritten = resolver.canonicalSync(mappedUri);
+        if (isSessionsFileUri(mappedUri)) {
+          targetReferences.push({ value, rewritten, mappedUri });
+        }
+        return rewritten;
+      } catch {
+        return value;
+      }
+    }
+    // Non-parentSession absolute paths in canonical hashing keep their raw
+    // spelling: an in-root absolute value in target content is a machine-local
+    // nonportable representation and must hash exactly as written.
+    return value;
+  }
+  const rewritten = resolver.localToSync(value);
+  if (isParentSession) {
+    // Local source: a parentSession value must reference a session file
+    // inside the sessions root. Out-of-root, Windows-shaped/UNC (foreign),
+    // missions-root, or otherwise unmapped absolute spellings are strict file
+    // errors before staging, never silently preserved.
+    if (!isSessionsFileUri(rewritten)) {
+      throw new Error(`parentSession must reference a session file: ${value}`);
+    }
+    targetReferences.push({ value, rewritten, mappedUri: rewritten });
     return rewritten;
   }
+  if (isSessionsFileUri(rewritten)) {
+    targetReferences.push({ value, rewritten, mappedUri: rewritten });
+  }
+  return rewritten;
+}
 
+function visitValue(value: StructuredValue, context: VisitContext, key?: string): StructuredValue {
+  const { mode, cwdValues, cwdPortableNames, namingOptions, portableName } = context;
+  if (key === "cwd" && typeof value !== "string") {
+    throw new Error("cwd field must be a string");
+  }
+  if (key === "parentSession" && typeof value !== "string") {
+    // parentSession must identify a session file path. A non-string value is
+    // a hard file error in every direction (the target-to-local leniency
+    // rules cover nonportable string values only).
+    throw new Error("parentSession field must be a string");
+  }
+  if (typeof value === "string") {
+    if (key === "cwd") {
+      if (mode === "to-target") {
+        // Missions rewrite cwd through per-file semantic-label evidence when
+        // available (preserves a ROOT label whose decoded path is under the
+        // current HOME); sessions keep the single configured portable name.
+        const uri = cwdToSyncUri(
+          value,
+          namingOptions,
+          context.cwdEvidence?.[cwdEvidenceKey(value)] ?? portableName,
+        );
+        cwdValues.push(syncUriToCwd(uri, namingOptions));
+        cwdPortableNames.push(syncUriToPortableName(uri, namingOptions));
+        return uri;
+      }
+      if (mode === "inspect-local") {
+        const cwd = normalizeCwd(value);
+        cwdValues.push(cwd);
+        return value;
+      }
+      if (mode === "to-local" || mode === "inspect-target") {
+        const decoded = tryDecodeCwdValue(value, namingOptions);
+        if (decoded === undefined) {
+          context.warnings.push(`Invalid target cwd value preserved verbatim: ${value}`);
+          return value;
+        }
+        cwdValues.push(decoded.cwd);
+        cwdPortableNames.push(decoded.name);
+        return mode === "to-local" ? decoded.cwd : `${SYNC_URI_PREFIX}${decoded.name}`;
+      }
+      const decoded = tryDecodeCwdValue(value, namingOptions);
+      if (decoded === undefined) {
+        // Canonical hashing must hash invalid target values exactly as the
+        // output pass left them so equivalent spellings compare identical.
+        return value;
+      }
+      cwdValues.push(decoded.cwd);
+      cwdPortableNames.push(decoded.name);
+      // Canonical hashing normalizes legacy loose spellings to the strict
+      // identity so equivalent labels hash identically on every platform.
+      return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name}`;
+    }
+    return rewriteGenericPathValue(value, context, key);
+  }
   if (Array.isArray(value)) {
-    return value.map((item) => visitValue(item, context, undefined, rewriteParentSession));
+    return value.map((item) => visitValue(item, context, undefined));
   }
   if (isRecord(value)) {
     const result: { [key: string]: StructuredValue } = Object.create(null) as {
       [key: string]: StructuredValue;
     };
     for (const [entryKey, entryValue] of Object.entries(value)) {
-      result[entryKey] = visitValue(entryValue, context, entryKey, rewriteParentSession);
+      result[entryKey] = visitValue(entryValue, context, entryKey);
     }
     return result;
   }
   return value;
-}
-
-const JSON_NUMBER_LEXEME = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
-
-/** Decompose a lexical JSON number into its exact decimal math. */
-function parseJsonNumberLexeme(token: string): { digits: bigint; exp: number; isZero: boolean } {
-  // digits is the exact integer formed by every mantissa digit, and the
-  // value equals digits * 10^exp, so negative exp appends a decimal point.
-  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
-  if (match === null) throw new Error(`Invalid JSON number lexeme: ${token}`);
-  const intPart = match[2] ?? "";
-  const fracPart = match[3] ?? "";
-  const explicitExponent = match[4] === undefined ? 0 : Number(match[4]);
-  const digits = BigInt(`${intPart}${fracPart}`);
-  const exp = explicitExponent - fracPart.length;
-  return { digits, exp, isZero: digits === 0n };
-}
-
-/** Return whether two exact decimal values denote the same number. */
-function sameExactDecimal(
-  a: { digits: bigint; exp: number; isZero: boolean },
-  b: { digits: bigint; exp: number; isZero: boolean },
-): boolean {
-  if (a.isZero || b.isZero) return a.isZero && b.isZero;
-  // Align the smaller exponent onto the larger one and compare integers.
-  if (a.exp >= b.exp) return a.digits * 10n ** BigInt(a.exp - b.exp) === b.digits;
-  return b.digits * 10n ** BigInt(b.exp - a.exp) === a.digits;
-}
-
-/**
- * Reject lexical JSON numbers whose value JavaScript cannot round-trip
- * without loss. Spelling differences that denote the same value (1.0, 1e3,
- * 1e-6, 0.1) are accepted; unsafe counts (1e999, 9007199254740993,
- * 1e-999), decimal precision loss (0.1000000000000000000001 -> 0.1), and
- * signed zero are rejected. Numbers inside string values are ordinary text
- * and stay untouched.
- */
-function assertLosslessJsonNumbers(text: string, filePath: string, lineNumber: number): void {
-  const reject = (token: string): never => {
-    throw new Error(
-      `${filePath}:${lineNumber}: JSON number cannot be preserved by JavaScript: ${token}`,
-    );
-  };
-  let index = 0;
-  let inString = false;
-  let escaped = false;
-  while (index < text.length) {
-    const character = text[index];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === "\\") escaped = true;
-      else if (character === '"') inString = false;
-      index += 1;
-      continue;
-    }
-    if (character === '"') {
-      inString = true;
-      index += 1;
-      continue;
-    }
-    JSON_NUMBER_LEXEME.lastIndex = index;
-    const match = JSON_NUMBER_LEXEME.exec(text);
-    if (match === null) {
-      index += 1;
-      continue;
-    }
-    const token = match[0];
-    const parsed = JSON.parse(token) as number;
-    if (!Number.isFinite(parsed)) reject(token);
-    if (Number.isInteger(parsed) && !Number.isSafeInteger(parsed)) reject(token);
-    if (Object.is(parsed, -0.0)) reject(token);
-    const lexeme = parseJsonNumberLexeme(token);
-    // Underflow to zero loses the value (1e-999 -> 0) unless the lexeme
-    // itself denotes zero (0, 0e-999).
-    if (parsed === 0 && !lexeme.isZero) reject(token);
-    // Decimal precision loss: the exact decimal differs from the value the
-    // parsed double denotes (its shortest round-trip spelling), so the
-    // value changes even though re-stringifying looks stable.
-    if (!sameExactDecimal(lexeme, parseJsonNumberLexeme(String(parsed)))) reject(token);
-    index += token.length;
-  }
-}
-
-/**
- * Reject a YAML numeric scalar whose source lexeme JavaScript cannot
- * round-trip without loss. The source spelling is the original lexeme from
- * the frontmatter; a number value that differs from it in value (precision
- * loss, overflow, underflow) must be rejected before staging instead of
- * silently rendering a different value. The yaml parser already collapses
- * overflow to null and underflow to 0, so only precision loss and non-finite
- * canonical forms need rejection here.
- */
-function assertYamlNumericScalarExact(node: Scalar<unknown>, filePath: string): void {
-  if (typeof node.value !== "number" && typeof node.value !== "bigint") return;
-  const source = node.source;
-  if (source === undefined) return;
-  const reject = (): never => {
-    throw new Error(`${filePath}: YAML number cannot be preserved by JavaScript: ${source}`);
-  };
-  if (typeof node.value === "bigint") return;
-  const value = node.value;
-  if (!Number.isFinite(value)) {
-    // .inf/.nan spellings are valid YAML floats; rendering them back uses the
-    // canonical YAML form, which is stable and lossless.
-    const normalized = source.trim().toLowerCase().replaceAll("_", "");
-    if (normalized === ".inf" || normalized === "-.inf" || normalized === ".nan") return;
-    reject();
-  }
-  if (Number.isInteger(value) && !Number.isSafeInteger(value)) reject();
-  if (Object.is(value, -0.0)) reject();
-  // The yaml parser normalizes overflow to null and underflow to 0 before
-  // here; precision loss remains. Compare the source lexeme's exact decimal
-  // value against the parsed double's shortest round-trip spelling.
-  let lexeme: { digits: bigint; exp: number; isZero: boolean };
-  try {
-    lexeme = parseJsonNumberLexeme(source.replaceAll("_", ""));
-  } catch {
-    // Not a plain decimal lexeme (hex, octal, sexagesimal, etc.): the yaml
-    // parser's own numeric semantics apply, which are already exact for the
-    // values it accepts.
-    return;
-  }
-  if (value === 0 && !lexeme.isZero) reject();
-  if (!sameExactDecimal(lexeme, parseJsonNumberLexeme(String(value)))) reject();
-}
-
-/** Recursively reject unrepresentable YAML numeric scalars in a document. */
-function assertNoLossyYamlNumbers(
-  node: unknown,
-  document: Document,
-  filePath: string,
-  visited: Set<unknown> = new Set(),
-): void {
-  if (node === null || node === undefined) return;
-  if (visited.has(node)) return;
-  visited.add(node);
-  if (isAlias(node)) {
-    const resolved = node.resolve(document);
-    if (resolved !== undefined) assertNoLossyYamlNumbers(resolved, document, filePath, visited);
-    return;
-  }
-  if (isScalar(node)) {
-    assertYamlNumericScalarExact(node, filePath);
-    return;
-  }
-  if (isMap(node)) {
-    for (const pair of node.items) {
-      assertNoLossyYamlNumbers(pair.key, document, filePath, visited);
-      assertNoLossyYamlNumbers(pair.value, document, filePath, visited);
-    }
-    return;
-  }
-  if (isSeq(node)) {
-    for (const item of node.items) {
-      assertNoLossyYamlNumbers(item, document, filePath, visited);
-    }
-  }
 }
 
 function transformJsonl(
@@ -474,9 +526,12 @@ function transformJsonl(
   const namingOptions = namingOptionsForTransform(options);
   const cwdPortableNames: string[] = [];
   const parentSessionReferences: ParentSessionReference[] = [];
+  const genericPathReferences: ParentSessionReference[] = [];
+  const warnings: string[] = [];
   let firstRecordSeen = false;
   let sessionCwdPresent = false;
   let sessionHeaderValid = false;
+  let sessionHeaderCwdDecodable: boolean | undefined;
 
   for (const [index, line] of lines.entries()) {
     if (line.trim() === "") {
@@ -495,24 +550,35 @@ function transformJsonl(
     }
 
     try {
-      assertLosslessJsonNumbers(line, filePath, index + 1);
       if (!firstRecordSeen) {
         firstRecordSeen = true;
         sessionCwdPresent = hasSessionHeaderCwd(parsed);
         sessionHeaderValid = isValidSessionHeader(parsed);
+        if (sessionHeaderValid && mode === "to-local") {
+          // Active-session refresh rejects a header whose cwd is a string but
+          // cannot be decoded to a portable path. Ordinary non-active target
+          // files stay lenient.
+          const headerCwd = (parsed as Record<string, unknown>).cwd;
+          sessionHeaderCwdDecodable =
+            tryDecodeCwdValue(headerCwd as string, namingOptions) !== undefined;
+        }
       }
       const structured = asStructuredValue(parsed);
       if (mode === "to-local") {
         const localValues: string[] = [];
         const localPortableNames: string[] = [];
+        const canonicalWarnings: string[] = [];
         const local = visitValue(structured, {
           mode,
           resolver,
           cwdValues: localValues,
           cwdPortableNames: localPortableNames,
           parentSessionReferences,
+          genericPathReferences,
           namingOptions,
           portableName: undefined,
+          cwdEvidence: undefined,
+          warnings,
         });
         const canonicalValues: string[] = [];
         const canonicalPortableNames: string[] = [];
@@ -522,8 +588,11 @@ function transformJsonl(
           cwdValues: canonicalValues,
           cwdPortableNames: canonicalPortableNames,
           parentSessionReferences: [],
+          genericPathReferences: [],
           namingOptions,
           portableName: undefined,
+          cwdEvidence: undefined,
+          warnings: canonicalWarnings,
         });
         outputLines.push(JSON.stringify(local));
         canonicalLines.push(JSON.stringify(canonical));
@@ -532,14 +601,18 @@ function transformJsonl(
       } else {
         const transformedValues: string[] = [];
         const transformedPortableNames: string[] = [];
+        const canonicalWarnings: string[] = [];
         const transformed = visitValue(structured, {
           mode,
           resolver,
           cwdValues: transformedValues,
           cwdPortableNames: transformedPortableNames,
           parentSessionReferences,
+          genericPathReferences,
           namingOptions,
           portableName: options.portableName,
+          cwdEvidence: options.cwdEvidence,
+          warnings,
         });
         const canonical =
           mode === "to-target"
@@ -549,8 +622,11 @@ function transformJsonl(
                 cwdValues: [],
                 cwdPortableNames: [],
                 parentSessionReferences: [],
+                genericPathReferences: [],
                 namingOptions,
                 portableName: undefined,
+                cwdEvidence: undefined,
+                warnings: canonicalWarnings,
               })
             : transformed;
         outputLines.push(JSON.stringify(transformed));
@@ -569,8 +645,77 @@ function transformJsonl(
     cwdValues,
     cwdPortableNames,
     parentSessionReferences,
+    genericPathReferences,
     sessionCwdPresent,
     sessionHeaderValid,
+    warnings,
+    sessionHeaderCwdDecodable,
+  );
+}
+
+function transformJson(
+  text: string,
+  mode: TransformMode,
+  resolver: ParentPathResolver,
+  filePath: string,
+  options: TransformOptions,
+): TransformedFile {
+  if (text.trim() === "") {
+    throw new Error(`${filePath}: empty JSON document is not allowed`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new Error(`${filePath}: invalid JSON: ${String(error)}`);
+  }
+  const namingOptions = namingOptionsForTransform(options);
+  const parentSessionReferences: ParentSessionReference[] = [];
+  const genericPathReferences: ParentSessionReference[] = [];
+  const cwdValues: string[] = [];
+  const cwdPortableNames: string[] = [];
+  const warnings: string[] = [];
+  const canonicalWarnings: string[] = [];
+  const structured = asStructuredValue(parsed);
+  const output = visitValue(structured, {
+    mode,
+    resolver,
+    cwdValues,
+    cwdPortableNames,
+    parentSessionReferences,
+    genericPathReferences,
+    namingOptions,
+    portableName: options.portableName,
+    cwdEvidence: options.cwdEvidence,
+    warnings,
+  });
+  // Canonical hash passes run over the same value the output pass produced:
+  // from local source the transformed (sync-URI) spelling is canonicalized,
+  // exactly like JSONL, so equivalent absolute/sync representations of the
+  // same file hash identically on both sides.
+  const canonical = visitValue(mode === "to-target" ? output : structured, {
+    mode: "canonical-target",
+    resolver,
+    cwdValues: [],
+    cwdPortableNames: [],
+    parentSessionReferences: [],
+    genericPathReferences: [],
+    namingOptions,
+    portableName: undefined,
+    cwdEvidence: undefined,
+    warnings: canonicalWarnings,
+  });
+  const render = (value: StructuredValue): string => `${JSON.stringify(value, null, 2)}\n`;
+  return createTransformedFile(
+    render(output),
+    render(canonical),
+    cwdValues,
+    cwdPortableNames,
+    parentSessionReferences,
+    genericPathReferences,
+    false,
+    false,
+    warnings,
   );
 }
 
@@ -618,10 +763,18 @@ function rewriteYamlCwdValue(
   cwdValues: string[],
   cwdPortableNames: string[],
   options: TransformOptions,
+  warnings: string[],
 ): string {
   const namingOptions = namingOptionsForTransform(options);
   if (mode === "to-target") {
-    const uri = cwdToSyncUri(value, namingOptions, options.portableName);
+    // Missions rewrite cwd through per-file semantic-label evidence when
+    // available (preserves a ROOT label whose decoded path is under the
+    // current HOME); sessions keep the single configured portable name.
+    const uri = cwdToSyncUri(
+      value,
+      namingOptions,
+      options.cwdEvidence?.[cwdEvidenceKey(value)] ?? options.portableName,
+    );
     cwdValues.push(syncUriToCwd(uri, namingOptions));
     cwdPortableNames.push(syncUriToPortableName(uri, namingOptions));
     return uri;
@@ -632,19 +785,26 @@ function rewriteYamlCwdValue(
     return value;
   }
   if (mode === "to-local" || mode === "inspect-target") {
-    const cwd = syncUriToCwd(value, namingOptions);
-    cwdValues.push(cwd);
-    const name = syncUriToPortableName(value, namingOptions);
-    cwdPortableNames.push(name);
-    return mode === "to-local" ? cwd : `${SYNC_URI_PREFIX}${name}`;
+    const decoded = tryDecodeCwdValue(value, namingOptions);
+    if (decoded === undefined) {
+      warnings.push(`Invalid target cwd value preserved verbatim: ${value}`);
+      return value;
+    }
+    cwdValues.push(decoded.cwd);
+    cwdPortableNames.push(decoded.name);
+    return mode === "to-local" ? decoded.cwd : `${SYNC_URI_PREFIX}${decoded.name}`;
   }
-  const cwd = syncUriToCwd(value, namingOptions);
-  cwdValues.push(cwd);
-  const name = syncUriToPortableName(value, namingOptions);
-  cwdPortableNames.push(name);
+  const decoded = tryDecodeCwdValue(value, namingOptions);
+  if (decoded === undefined) {
+    // Canonical hashing hashes invalid target values exactly as the output
+    // pass left them so equivalent spellings compare identical.
+    return value;
+  }
+  cwdValues.push(decoded.cwd);
+  cwdPortableNames.push(decoded.name);
   // Canonical hashing normalizes legacy loose spellings to the strict
   // identity so equivalent labels hash identically on every platform.
-  return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(name, namingOptions) ?? name}`;
+  return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name}`;
 }
 
 function yamlStringValue(node: unknown, document: Document): string | undefined {
@@ -652,7 +812,7 @@ function yamlStringValue(node: unknown, document: Document): string | undefined 
   return isScalar(resolved) && typeof resolved.value === "string" ? resolved.value : undefined;
 }
 
-function resolvedYamlCwdScalar(
+function resolvedYamlScalar(
   node: unknown,
   document: Document,
 ): { value: string; node: Scalar<unknown> } | undefined {
@@ -850,9 +1010,10 @@ function rewriteYamlCwdNode(
   cwdValues: string[],
   cwdPortableNames: string[],
   options: TransformOptions,
+  warnings: string[],
   visited: Set<object>,
 ): void {
-  const resolved = resolvedYamlCwdScalar(node, document);
+  const resolved = resolvedYamlScalar(node, document);
   if (resolved === undefined) throw new Error("cwd field must be a string");
   if (visited.has(resolved.node)) return;
   visited.add(resolved.node);
@@ -862,6 +1023,7 @@ function rewriteYamlCwdNode(
     cwdValues,
     cwdPortableNames,
     options,
+    warnings,
   );
 }
 
@@ -872,13 +1034,23 @@ function rewriteYamlCwdNodes(
   cwdValues: string[],
   cwdPortableNames: string[],
   options: TransformOptions,
+  warnings: string[],
   visited: Set<object>,
 ): void {
   if (node === null || node === undefined) return;
   if (isAlias(node)) {
     const resolved = node.resolve(document);
     if (resolved !== undefined) {
-      rewriteYamlCwdNodes(resolved, document, mode, cwdValues, cwdPortableNames, options, visited);
+      rewriteYamlCwdNodes(
+        resolved,
+        document,
+        mode,
+        cwdValues,
+        cwdPortableNames,
+        options,
+        warnings,
+        visited,
+      );
     }
     return;
   }
@@ -895,6 +1067,7 @@ function rewriteYamlCwdNodes(
           cwdValues,
           cwdPortableNames,
           options,
+          warnings,
           visited,
         );
       } else {
@@ -905,6 +1078,7 @@ function rewriteYamlCwdNodes(
           cwdValues,
           cwdPortableNames,
           options,
+          warnings,
           visited,
         );
       }
@@ -915,245 +1089,309 @@ function rewriteYamlCwdNodes(
     if (visited.has(node)) return;
     visited.add(node);
     for (const item of node.items) {
-      rewriteYamlCwdNodes(item, document, mode, cwdValues, cwdPortableNames, options, visited);
+      rewriteYamlCwdNodes(
+        item,
+        document,
+        mode,
+        cwdValues,
+        cwdPortableNames,
+        options,
+        warnings,
+        visited,
+      );
     }
   }
 }
 
+/**
+ * Validate that every YAML mapping value under a `parentSession` key is a
+ * string. Non-string parentSession values are hard file errors in both
+ * directions (target-to-local leniency covers nonportable string values only).
+ */
+function assertYamlParentSessionString(node: unknown, document: Document): void {
+  if (node === null || node === undefined) return;
+  if (isAlias(node)) {
+    const resolved = node.resolve(document);
+    if (resolved !== undefined) assertYamlParentSessionString(resolved, document);
+    return;
+  }
+  if (!isNode(node)) return;
+  if (isMap(node)) {
+    for (const pair of node.items) {
+      const key = yamlStringValue(pair.key, document);
+      if (key === "parentSession") {
+        const resolved = isAlias(pair.value) ? pair.value.resolve(document) : pair.value;
+        if (!isScalar(resolved) || typeof resolved.value !== "string") {
+          throw new Error("parentSession field must be a string");
+        }
+      } else {
+        assertYamlParentSessionString(pair.value, document);
+      }
+    }
+    return;
+  }
+  if (isSeq(node)) {
+    for (const item of node.items) assertYamlParentSessionString(item, document);
+  }
+}
+
+/**
+ * Rewrite every generic (non-cwd) path-valued scalar in place. Alias aliasing
+ * was resolved before this pass: cwd isolation breaks shared cwd anchors, and
+ * every remaining alias of one anchored scalar shares the same string value,
+ * so its generic rewrite is identical at every use site.
+ *
+ * Markdown parentSession output bytes are preserved in every direction: the
+ * output pass skips `parentSession` use-sites entirely (type/URI/range
+ * validation already ran in the reference-collection pass). Only the
+ * canonical-target pass rewrites parentSession so the canonical hash
+ * normalizes legal local-absolute and sync-URI spellings to one portable
+ * representation.
+ */
+function rewriteYamlGenericNodes(
+  node: unknown,
+  document: Document,
+  context: VisitContext,
+  visited: Set<object>,
+): void {
+  const rewrite = (scalar: Scalar<unknown>, value: string, key?: string): void => {
+    scalar.value = rewriteGenericPathValue(value, context, key);
+  };
+  const visit = (current: unknown, key?: string): void => {
+    if (current === null || current === undefined) return;
+    if (!isNode(current)) return;
+    if (visited.has(current)) return;
+    visited.add(current);
+    if (isAlias(current)) {
+      const resolved = current.resolve(document);
+      if (resolved !== undefined) visit(resolved, key);
+      return;
+    }
+    if (isScalar(current)) {
+      if (typeof current.value === "string") rewrite(current, current.value, key);
+      return;
+    }
+    if (isMap(current)) {
+      for (const pair of current.items) {
+        const pairKey = yamlStringValue(pair.key, document);
+        if (pairKey === "cwd") continue;
+        if (pairKey === "parentSession" && context.mode !== "canonical-target") continue;
+        if (isNode(pair.value)) visit(pair.value, pairKey);
+      }
+      return;
+    }
+    if (isSeq(current)) {
+      for (const item of current.items) {
+        if (isNode(item)) visit(item);
+      }
+    }
+  };
+  visit(node);
+}
+
+/**
+ * Collect generic path references and validate every string beginning with the
+ * sync scheme. The walk never mutates; it reports failures exactly like the
+ * JSON path handling would during the stage that actually rewrites. A
+ * `parentSession` value is sessions-only: missions URIs and missions-root
+ * absolute paths are strict errors on local source and warning-preserved on
+ * target source.
+ *
+ * Validation and reference collection are use-site aware: an anchored scalar
+ * referenced by several fields is visited once per use-site with that
+ * use-site's key. ParentSession semantics (sessions-only/type/range
+ * validation and bytes-unchanged output) must never depend on field order or
+ * a shared-scalar visited dedup. Map/sequence nodes keep visited-cycle
+ * protection so self-referential structures terminate.
+ */
+function collectYamlPathReferences(
+  node: unknown,
+  document: Document,
+  mode: TransformMode,
+  context: VisitContext,
+  parentReferences: ParentSessionReference[],
+  genericReferences: ParentSessionReference[],
+  visited = new Set<object>(),
+): void {
+  const visit = (current: unknown, key?: string): void => {
+    if (current === null || current === undefined) return;
+    if (isAlias(current)) {
+      const resolved = current.resolve(document);
+      if (resolved !== undefined) visit(resolved, key);
+      return;
+    }
+    if (!isNode(current)) return;
+    if (isScalar(current)) {
+      if (typeof current.value !== "string") return;
+      const value = current.value as string;
+      const isParentSession = key === "parentSession";
+      const references = isParentSession ? parentReferences : genericReferences;
+      // A `pi-session-sync://sessions/<portableName>` URI names a session
+      // DIRECTORY, never a session file. parentSession must identify a parent
+      // session FILE, so local-source validation rejects the directory form
+      // exactly like the JSON visit path.
+      if (
+        isParentSession &&
+        (mode === "inspect-local" || mode === "to-target") &&
+        isSessionsDirectorySyncUri(value)
+      ) {
+        throw new Error(
+          `parentSession must reference a session file, not a session directory: ${value}`,
+        );
+      }
+      if (isSyncUri(value)) {
+        // Validate legality; legal URI spellings stay byte-identical in local
+        // sources and decode back to local paths in target copies. On target
+        // source an unparseable URI is preserved with a warning, not an error.
+        // Rootless slashless cwd URIs stay legal only in the `cwd` field.
+        if (mode === "inspect-local" || mode === "to-target") {
+          if (!isRootFileUri(value)) {
+            throw new Error(
+              `Non-cwd pi-session-sync value must be a sessions/missions file URI: ${value}`,
+            );
+          }
+          if (isParentSession && !isSessionsFileUri(value)) {
+            throw new Error(`parentSession must reference a session file, not missions: ${value}`);
+          }
+          context.resolver.canonicalSync(value);
+          if (isSessionsFileUri(value)) references.push({ value, rewritten: value });
+          return;
+        }
+        if (isParentSession && isMissionsFileUri(value)) {
+          context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
+          return;
+        }
+        if (!isRootFileUri(value)) {
+          context.warnings.push(
+            `Invalid pi-session-sync URI preserved verbatim in target content: ${value}`,
+          );
+          return;
+        }
+        try {
+          const rewritten = context.resolver.canonicalSync(value);
+          if (mode === "to-local") {
+            const local = context.resolver.syncToLocal(value);
+            if (isSessionsFileUri(value)) references.push({ value, rewritten: local });
+            return;
+          }
+          if (isSessionsFileUri(value)) references.push({ value, rewritten });
+        } catch {
+          context.warnings.push(
+            `Invalid pi-session-sync URI preserved verbatim in target content: ${value}`,
+          );
+        }
+        return;
+      }
+      if (isAbsolutePath(value) && mode === "to-target") {
+        const rewritten = context.resolver.localToSync(value);
+        if (isParentSession) {
+          // Local source: a parentSession value must reference a session file
+          // inside the sessions root. Out-of-root, Windows-shaped/UNC, or
+          // missions-root absolute spellings are strict file errors before
+          // staging, never silently preserved.
+          if (!isSessionsFileUri(rewritten)) {
+            throw new Error(`parentSession must reference a session file: ${value}`);
+          }
+          references.push({ value, rewritten, mappedUri: rewritten });
+          return;
+        }
+        if (isSessionsFileUri(rewritten)) {
+          references.push({ value, rewritten, mappedUri: rewritten });
+        }
+        return;
+      }
+      if (isAbsolutePath(value) && mode === "to-local") {
+        try {
+          const mappedValue = context.resolver.localToSync(value);
+          if (mappedValue !== value) {
+            if (isSessionsFileUri(mappedValue)) {
+              references.push({ value, rewritten: value, mappedUri: mappedValue });
+            } else if (isParentSession) {
+              context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
+              return;
+            }
+            // Every target absolute spelling is machine-local (never
+            // portable): preserve verbatim with a warning even when it maps
+            // on this machine.
+            context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+          } else {
+            // Out-of-root absolute spellings on target source are preserved
+            // verbatim (never portable): report a warning, not an error.
+            context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+          }
+        } catch {
+          context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+        }
+        return;
+      }
+      if (isAbsolutePath(value)) {
+        references.push({ value, rewritten: value });
+      }
+      return;
+    }
+    if (visited.has(current)) return;
+    visited.add(current);
+    if (isMap(current)) {
+      for (const pair of current.items) {
+        // Mapping keys never participate in generic path rewriting or
+        // reference collection; only values do (P13). Key detection for
+        // `cwd` still runs through the key scalar itself.
+        const pairKey = yamlStringValue(pair.key, document);
+        if (pairKey === "cwd") continue;
+        if (isNode(pair.value)) visit(pair.value, pairKey);
+      }
+      return;
+    }
+    if (isSeq(current)) {
+      for (const item of current.items) {
+        if (isNode(item)) visit(item);
+      }
+    }
+  };
+  visit(node);
+}
+
+/**
+ * Isolate every `parentSession` alias use-site from a shared scalar anchor
+ * before generic rewriting. ParentSession output bytes are preserved and its
+ * canonical hashing normalizes absolute/URI spellings per use-site, so its
+ * semantics must never depend on field order or a shared-scalar visited dedup:
+ * each parentSession use-site gets its own scalar when the anchored value is
+ * shared with generic (or cwd) fields. When the anchor is declared directly
+ * under a `parentSession` key, the non-parentSession use-sites are the ones
+ * cloned so the shared parent value stays intact.
+ */
 function isolateSharedYamlParentSessionAliases(document: Document): void {
   const analysis = analyzeYamlAliases(document);
   for (const [source, entries] of analysis.uses) {
     const anchored = analysis.anchoredNodes.get(source);
-    if (anchored === undefined) continue;
+    if (anchored === undefined || !isScalar(anchored)) continue;
+    // An anchor declared directly under a `parentSession` key protects the
+    // parentSession scalar itself: every generic/cwd alias of that scalar is
+    // a use-site writing through the shared anchor, and each must be isolated
+    // so its rewrite never mutates the preserved parentSession bytes. An
+    // anchor declared elsewhere protects its parentSession alias use-sites by
+    // cloning those instead. Either way the protection must not depend on the
+    // document order of the anchor declaration relative to generic fields.
+    const anchorUnderParentSession = analysis.anchoredKeys.get(source) === "parentSession";
     const parentEntries = entries.filter((entry) => entry.directKey === "parentSession");
     const otherEntries = entries.filter((entry) => entry.directKey !== "parentSession");
-    if (
-      isScalar(anchored) &&
-      analysis.anchoredKeys.get(source) === "parentSession" &&
-      otherEntries.length > 0
-    ) {
-      const replaceAnchorOwner = analysis.anchoredReplacements.get(source);
-      const firstOtherEntry = otherEntries[0];
-      if (replaceAnchorOwner === undefined || firstOtherEntry === undefined) continue;
+    if (parentEntries.length === 0 && !anchorUnderParentSession) continue;
+    if (anchorUnderParentSession) {
+      // Anchor declared under parentSession: clone every generic/cwd use-site
+      // so their rewrites never mutate the shared parentSession value.
+      for (const entry of otherEntries) {
+        const resolved = entry.alias.resolve(document);
+        if (resolved !== undefined) entry.replace(cloneYamlAliasValue(entry.alias, document));
+      }
+    } else {
+      // Anchor declared elsewhere: clone every parentSession use-site so
+      // parentSession semantics are independent of field order and of the
+      // generic rewrite applied to the shared anchored value.
       for (const entry of parentEntries) {
         const resolved = entry.alias.resolve(document);
-        if (resolved !== undefined && isScalar(resolved)) {
-          entry.replace(cloneYamlAliasValue(entry.alias, document));
-        }
+        if (resolved !== undefined) entry.replace(cloneYamlAliasValue(entry.alias, document));
       }
-      const parentValue = anchored.clone() as Scalar<unknown>;
-      delete (parentValue as Scalar<unknown> & { anchor?: string }).anchor;
-      replaceAnchorOwner(parentValue);
-      if (firstOtherEntry.alias.comment === undefined) delete anchored.comment;
-      else anchored.comment = firstOtherEntry.alias.comment;
-      if (firstOtherEntry.alias.commentBefore === undefined) delete anchored.commentBefore;
-      else anchored.commentBefore = firstOtherEntry.alias.commentBefore;
-      if (firstOtherEntry.alias.spaceBefore === undefined) delete anchored.spaceBefore;
-      else anchored.spaceBefore = firstOtherEntry.alias.spaceBefore;
-      firstOtherEntry.replace(anchored);
-      continue;
-    }
-    if (parentEntries.length === 0) continue;
-    for (const entry of parentEntries) {
-      const resolved = entry.alias.resolve(document);
-      if (resolved !== undefined && isScalar(resolved)) {
-        entry.replace(cloneYamlAliasValue(entry.alias, document));
-      }
-    }
-  }
-}
-
-// Markdown keeps parentSession output bytes untouched, but validity and the
-// canonical hash must follow the same rules as JSONL parentSession values:
-// string type, sync-URI direction checks, Windows-shaped rejection on POSIX,
-// and sessions-root range validation for absolute local paths.
-function validatedMarkdownParentSessionRewrite(
-  value: string,
-  mode: TransformMode,
-  resolver: ParentPathResolver,
-): { rewritten: string; mappedUri?: string } {
-  if (mode === "to-target") {
-    if (isSyncUri(value)) {
-      // A legal sync URI in a local Markdown file is preserved byte-for-byte
-      // (Markdown never rewrites parentSession output) but still validates
-      // like JSONL: canonical segments, decodable portable name, a safe
-      // generated local session directory for the decoded cwd, and symlink
-      // plus root-boundary safety. Malformed or unsafe URIs throw through
-      // syncToLocal before staging; the canonicalSync pass supplies the
-      // canonical hash representation.
-      resolver.syncToLocal(value);
-      return { rewritten: resolver.canonicalSync(value) };
-    }
-    if (process.platform !== "win32" && isWindowsShapedAbsolutePath(value)) {
-      throw new Error(`Windows-shaped absolute parentSession path is not valid on POSIX: ${value}`);
-    }
-    if (isAbsolutePath(value)) {
-      // Markdown output bytes stay untouched; the validated sync URI travels
-      // separately as absolute-reference mapping evidence.
-      const mappedUri = resolver.localToSync(value);
-      return { rewritten: value, mappedUri };
-    }
-    return { rewritten: value };
-  }
-  if (mode === "inspect-local") {
-    if (isSyncUri(value)) {
-      // Inspect-local scan resolvers cannot decode every URI spelling; the
-      // mandatory to-target staging pass validates legality before writes and
-      // the current value is retained as the collected reference.
-      return { rewritten: value };
-    }
-    if (process.platform !== "win32" && isWindowsShapedAbsolutePath(value)) {
-      throw new Error(`Windows-shaped absolute parentSession path is not valid on POSIX: ${value}`);
-    }
-    return { rewritten: value };
-  }
-  if (mode === "to-local") {
-    if (isSyncUri(value)) return { rewritten: resolver.syncToLocal(value) };
-    if (isAbsolutePath(value)) {
-      // Markdown keeps parentSession output bytes untouched, so a target copy
-      // legitimately carries the local absolute spelling. Range and shape
-      // validation still apply; the rewritten form stays unchanged. The
-      // validated sync URI is carried as absolute-reference mapping evidence.
-      const mappedUri = resolver.localToSync(value);
-      return { rewritten: value, mappedUri };
-    }
-    return { rewritten: value };
-  }
-  if (isSyncUri(value)) return { rewritten: resolver.canonicalSync(value) };
-  if (isAbsolutePath(value)) {
-    // inspect-target scans run before parent mappings are known and their
-    // canonical text is discarded. Range validation of absolute spellings is
-    // performed by the full-resolver to-local pass that always follows.
-    return { rewritten: value };
-  }
-  return { rewritten: value };
-}
-
-function collectYamlParentSessionScalar(
-  node: unknown,
-  document: Document,
-  mode: TransformMode,
-  resolver: ParentPathResolver,
-  references: ParentSessionReference[],
-  visited: Set<object>,
-): void {
-  const resolved = isAlias(node) ? node.resolve(document) : node;
-  if (resolved === null || resolved === undefined) return;
-  if (!isScalar(resolved) || typeof resolved.value !== "string") {
-    throw new Error("parentSession field must be a string");
-  }
-  if (visited.has(resolved)) return;
-  visited.add(resolved);
-  const rewrite = validatedMarkdownParentSessionRewrite(resolved.value, mode, resolver);
-  references.push({
-    value: resolved.value,
-    rewritten: rewrite.rewritten,
-    ...(rewrite.mappedUri === undefined ? {} : { mappedUri: rewrite.mappedUri }),
-  });
-}
-
-function collectYamlParentSessionReferences(
-  node: unknown,
-  document: Document,
-  mode: TransformMode,
-  resolver: ParentPathResolver,
-  references: ParentSessionReference[],
-  visited = new Set<object>(),
-): void {
-  if (node === null || node === undefined) return;
-  if (isAlias(node)) {
-    const resolved = node.resolve(document);
-    if (resolved !== undefined) {
-      collectYamlParentSessionReferences(resolved, document, mode, resolver, references, visited);
-    }
-    return;
-  }
-  if (isMap(node)) {
-    if (visited.has(node)) return;
-    visited.add(node);
-    for (const pair of node.items) {
-      const key = yamlStringValue(pair.key, document);
-      if (key === "parentSession") {
-        collectYamlParentSessionScalar(pair.value, document, mode, resolver, references, visited);
-      } else {
-        collectYamlParentSessionReferences(
-          pair.value,
-          document,
-          mode,
-          resolver,
-          references,
-          visited,
-        );
-      }
-    }
-    return;
-  }
-  if (isSeq(node)) {
-    if (visited.has(node)) return;
-    visited.add(node);
-    for (const item of node.items) {
-      collectYamlParentSessionReferences(item, document, mode, resolver, references, visited);
-    }
-  }
-}
-
-function canonicalParentSessionValue(
-  value: string,
-  resolver: ParentPathResolver,
-  normalizeAbsolute: boolean,
-): string {
-  if (isSyncUri(value)) return resolver.canonicalSync(value);
-  if (!isAbsolutePath(value)) return value;
-  if (!normalizeAbsolute) return value;
-  // Values are validated before this point, so failures to prove root
-  // membership are file errors like the JSONL parentSession handling.
-  return resolver.canonicalSync(resolver.localToSync(value));
-}
-
-function rewriteYamlParentSessionNode(
-  node: unknown,
-  document: Document,
-  resolver: ParentPathResolver,
-  normalizeAbsolute: boolean,
-): void {
-  const resolved = isAlias(node) ? node.resolve(document) : node;
-  if (!isScalar(resolved) || typeof resolved.value !== "string") return;
-  resolved.value = canonicalParentSessionValue(resolved.value, resolver, normalizeAbsolute);
-}
-
-function rewriteYamlParentSessionNodes(
-  node: unknown,
-  document: Document,
-  resolver: ParentPathResolver,
-  normalizeAbsolute: boolean,
-  visited = new Set<object>(),
-): void {
-  if (node === null || node === undefined) return;
-  if (isAlias(node)) {
-    const resolved = node.resolve(document);
-    if (resolved !== undefined) {
-      rewriteYamlParentSessionNodes(resolved, document, resolver, normalizeAbsolute, visited);
-    }
-    return;
-  }
-  if (isMap(node)) {
-    if (visited.has(node)) return;
-    visited.add(node);
-    for (const pair of node.items) {
-      const key = yamlStringValue(pair.key, document);
-      if (key === "parentSession") {
-        rewriteYamlParentSessionNode(pair.value, document, resolver, normalizeAbsolute);
-      } else {
-        rewriteYamlParentSessionNodes(pair.value, document, resolver, normalizeAbsolute, visited);
-      }
-    }
-    return;
-  }
-  if (isSeq(node)) {
-    if (visited.has(node)) return;
-    visited.add(node);
-    for (const item of node.items) {
-      rewriteYamlParentSessionNodes(item, document, resolver, normalizeAbsolute, visited);
     }
   }
 }
@@ -1180,22 +1418,43 @@ function transformMarkdown(
       throw new Error(document.errors.map((error) => error.message).join("; "));
     }
     rejectUnresolvedYamlAliases(document);
-    assertNoLossyYamlNumbers(document.contents, document, filePath);
   } catch (error) {
     throw new Error(`${filePath}: invalid YAML frontmatter: ${String(error)}`);
   }
 
   try {
+    const namingOptions = namingOptionsForTransform(options);
     const parentSessionReferences: ParentSessionReference[] = [];
-    collectYamlParentSessionReferences(
+    const genericPathReferences: ParentSessionReference[] = [];
+    const warnings: string[] = [];
+    // Reference collection runs once over the ORIGINAL document; the output
+    // rewrite pass reuses throwaway arrays so every generic value is collected
+    // exactly once. (Markdown has no JSON-style value aliasing; the cwd and
+    // parentSession isolation passes clone use-sites, never values.)
+    const baseContext: VisitContext = {
+      mode,
+      resolver,
+      cwdValues: [],
+      cwdPortableNames: [],
+      parentSessionReferences: [],
+      genericPathReferences: [],
+      namingOptions,
+      portableName: options.portableName,
+      cwdEvidence: undefined,
+      warnings,
+    };
+    assertYamlParentSessionString(document.contents, document);
+    collectYamlPathReferences(
       document.contents,
       document,
       mode,
-      resolver,
+      baseContext,
       parentSessionReferences,
+      genericPathReferences,
     );
     const outputDocument = document.clone();
     isolateSharedYamlCwdAliases(outputDocument);
+    isolateSharedYamlParentSessionAliases(outputDocument);
     const outputCwdValues: string[] = [];
     const outputCwdPortableNames: string[] = [];
     rewriteYamlCwdNodes(
@@ -1205,10 +1464,17 @@ function transformMarkdown(
       outputCwdValues,
       outputCwdPortableNames,
       options,
+      warnings,
+      new Set<object>(),
+    );
+    rewriteYamlGenericNodes(
+      outputDocument.contents,
+      outputDocument,
+      baseContext,
       new Set<object>(),
     );
     const canonicalDocument = mode === "to-local" ? document.clone() : outputDocument.clone();
-    if (mode === "to-local" || mode === "to-target" || mode === "inspect-target") {
+    if (mode === "to-local" || mode === "to-target") {
       isolateSharedYamlCwdAliases(canonicalDocument);
       isolateSharedYamlParentSessionAliases(canonicalDocument);
       rewriteYamlCwdNodes(
@@ -1218,13 +1484,26 @@ function transformMarkdown(
         [],
         [],
         options,
+        [],
         new Set<object>(),
       );
-      rewriteYamlParentSessionNodes(
+      const canonicalContext: VisitContext = {
+        mode: "canonical-target",
+        resolver,
+        cwdValues: [],
+        cwdPortableNames: [],
+        parentSessionReferences: [],
+        genericPathReferences: [],
+        namingOptions,
+        portableName: undefined,
+        cwdEvidence: undefined,
+        warnings: [],
+      };
+      rewriteYamlGenericNodes(
         canonicalDocument.contents,
         canonicalDocument,
-        resolver,
-        mode === "to-local" || mode === "to-target",
+        canonicalContext,
+        new Set<object>(),
       );
     }
     // Blank lines immediately before the closing delimiter and the delimiter's
@@ -1242,7 +1521,7 @@ function transformMarkdown(
       .replaceAll("\n", frontmatterLineEnding);
     const render = (value: Document): string => {
       // Keep raw YAML (comments, blank lines, no AST content) byte-identical:
-      // only cwd-bearing maps are serialized, and those always have content.
+      // only rewritten scalar maps are serialized, and those always have content.
       if (value.contents === null) {
         return `${frontmatter.open}${frontmatter.yaml}${frontmatter.close}${frontmatter.after}`;
       }
@@ -1263,6 +1542,10 @@ function transformMarkdown(
       outputCwdValues,
       outputCwdPortableNames,
       parentSessionReferences,
+      genericPathReferences,
+      false,
+      false,
+      warnings,
     );
   } catch (error) {
     throw new Error(`${filePath}: ${String(error)}`);
@@ -1278,6 +1561,9 @@ export async function transformFile(
   const text = await readFile(filePath, "utf8");
   if (filePath.toLowerCase().endsWith(".jsonl")) {
     return transformJsonl(text, mode, resolver, filePath, options);
+  }
+  if (filePath.toLowerCase().endsWith(".json")) {
+    return transformJson(text, mode, resolver, filePath, options);
   }
   if (filePath.toLowerCase().endsWith(".md")) {
     return transformMarkdown(text, mode, filePath, resolver, options);
@@ -1295,6 +1581,9 @@ export function transformFileText(
   if (filePath.toLowerCase().endsWith(".jsonl")) {
     return transformJsonl(text, mode, resolver, filePath, options);
   }
+  if (filePath.toLowerCase().endsWith(".json")) {
+    return transformJson(text, mode, resolver, filePath, options);
+  }
   if (filePath.toLowerCase().endsWith(".md")) {
     return transformMarkdown(text, mode, filePath, resolver, options);
   }
@@ -1307,6 +1596,7 @@ export function createParentPathResolver(
   layoutOrNamingOptions: SessionLayout | Partial<PortableNameOptions> = "nested",
   fallbackOrNamingOptions?: { portableName: string } | Partial<PortableNameOptions>,
   namingOptions: Partial<PortableNameOptions> | undefined = undefined,
+  missionsRoot: string | undefined = undefined,
 ): ParentPathResolver {
   const layout = typeof layoutOrNamingOptions === "string" ? layoutOrNamingOptions : "nested";
   const fallback =
@@ -1320,18 +1610,83 @@ export function createParentPathResolver(
         ? fallbackOrNamingOptions
         : undefined
       : layoutOrNamingOptions);
+  const sessionsLookup = (localKey: string): { portableName: string } | undefined => {
+    const mapping =
+      lookup(localKey) ?? (fallback !== undefined && layout !== "flat" ? fallback : undefined);
+    return mapping;
+  };
   return {
-    localToSync: (value) =>
-      localSessionPathToSyncUri(
+    localToSync: (value) => {
+      const converted = localPathToRootUri(
         value,
         sessionsRoot,
-        lookup,
+        missionsRoot,
+        sessionsLookup,
         layout,
-        fallback,
-        effectiveNamingOptions,
-      ),
+        "to-target",
+      );
+      // Only paths inside a synced root are rewritten; every other value stays
+      // byte-identical (out-of-root absolutes, relative values, identifiers).
+      // In-root sessions values map through `localPathToRootUri` with the exact
+      // nested/flat lookup and error for unmapped paths.
+      return converted === undefined ? value : converted.uri;
+    },
     syncToLocal: (value) =>
-      syncParentUriToLocalPath(value, sessionsRoot, layout, effectiveNamingOptions),
-    canonicalSync: (value) => syncParentUriToCanonical(value, effectiveNamingOptions),
+      rootUriToLocalPath(
+        value,
+        sessionsRoot,
+        missionsRoot,
+        layout,
+        effectiveNamingOptions as PortableNameOptions,
+      ),
+    canonicalSync: (value) =>
+      canonicalRootUri(value, effectiveNamingOptions as PortableNameOptions),
+  };
+}
+
+/**
+ * Direction-aware generic-path resolver for tree containers (missions) that
+ * can reference either synced root. Local → target is STRICT: absolute paths
+ * inside `sessionsRoot` or `missionsRoot` always become portable URIs, even
+ * when the referenced path is missing and no exact file mapping exists
+ * (containing-directory inference covers flat layouts); an unmappable
+ * in-root sessions path is an error, never silently preserved. Target →
+ * local stays LENIENT (handled by the caller's to-local wrapper): a
+ * machine-local path or unknown mapping cannot fail a whole mission file.
+ */
+export function createGenericPathResolver(
+  sessionsRoot: string,
+  missionsRoot: string | undefined,
+  lookup: (localKey: string) => { portableName: string } | undefined,
+  layout: SessionLayout,
+  namingOptions?: Partial<PortableNameOptions>,
+): ParentPathResolver {
+  const effectiveNamingOptions = namingOptionsForTransform(
+    namingOptions === undefined ? {} : { namingOptions },
+  );
+  const resolveLookup = (localKey: string): { portableName: string } | undefined =>
+    lookup(localKey);
+  return {
+    localToSync: (value) => {
+      const converted = localPathToRootUri(
+        value,
+        sessionsRoot,
+        missionsRoot,
+        resolveLookup,
+        layout,
+        "to-target",
+      );
+      return converted === undefined ? value : converted.uri;
+    },
+    syncToLocal: (value) =>
+      rootUriToLocalPath(
+        value,
+        sessionsRoot,
+        missionsRoot,
+        layout,
+        effectiveNamingOptions as PortableNameOptions,
+      ),
+    canonicalSync: (value) =>
+      canonicalRootUri(value, effectiveNamingOptions as PortableNameOptions),
   };
 }

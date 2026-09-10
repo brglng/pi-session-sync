@@ -341,6 +341,18 @@ describe("portable session names", () => {
     expect(decodePortableSessionDirName("ABS%2Ftmp%2Fproject", options)?.cwd).toBe("/tmp/project");
   });
 
+  it("does not reserve sessions and missions as labels", () => {
+    // The exhaustive unsafe-label list reserves no `sessions`/`missions`
+    // spellings: they are ordinary cross-platform-safe labels, and URI
+    // parsing distinguishes namespace delimiters from percent-encoded names.
+    const options = normalizePortableNameOptions({
+      homeLabel: "sessions",
+      rootLabel: "missions",
+    });
+    expect(options.homeLabel).toBe("sessions");
+    expect(options.rootLabel).toBe("missions");
+  });
+
   it("rejects unsafe configured labels but allows Unicode labels", () => {
     for (const label of [
       "",

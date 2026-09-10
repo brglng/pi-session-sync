@@ -171,10 +171,16 @@ export function targetFlatMappingHasLiveFile(
 
 export function flatTargetKeyIdentityIsStale(key: string, ctx: DecisionContext): boolean {
   if (ctx.layout !== "flat") return false;
-  const slash = key.indexOf("/");
-  if (slash <= 0) return false;
-  const portableName = key.slice(0, slash);
-  const relativePath = key.slice(slash + 1);
+  let portableName: string;
+  let relativePath: string;
+  try {
+    const parsed = parseLogicalKey(key, ctx.namingOptions);
+    if (parsed.root !== "sessions") return false;
+    portableName = parsed.portableName;
+    relativePath = parsed.relativePath;
+  } catch {
+    return false;
+  }
   return ctx.staleFlatExactIdentities.has(
     flatMappingIdentityKey(relativePath, portableName, ctx.namingOptions),
   );

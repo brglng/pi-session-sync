@@ -35,14 +35,15 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(sessionsRoot);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir, extra: true }),
       );
       await writeFile(join(sessionsRoot, "root-unknown.txt"), "ignored\n");
       const portableName = portableSessionDirName(cwd);
-      await mkdir(join(targetDir, portableName));
-      await writeFile(join(targetDir, portableName, "bad.jsonl"), "{bad}\n");
+      await mkdir(join(targetDir, "sessions", portableName));
+      await writeFile(join(targetDir, "sessions", portableName, "bad.jsonl"), "{bad}\n");
       process.env.PI_CODING_AGENT_DIR = agentDir;
       process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
 
@@ -91,6 +92,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(sessionsRoot);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir }),
@@ -98,8 +100,8 @@ describe("Pi extension registration", () => {
       await writeFile(join(sessionsRoot, "root-unknown.txt"), "ignored\\n");
       const portable = portableSessionDirName(cwd);
       const localFile = join(sessionsRoot, "session.jsonl");
-      const targetFile = join(targetDir, portable, "session.jsonl");
-      await mkdir(join(targetDir, portable));
+      const targetFile = join(targetDir, "sessions", portable, "session.jsonl");
+      await mkdir(join(targetDir, "sessions", portable));
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "local" })}\\n`);
       await writeFile(
         targetFile,
@@ -147,6 +149,81 @@ describe("Pi extension registration", () => {
     }
   });
 
+  it("records a forbidden missions symlink race as a nonfatal error instead of re-validating and failing", async () => {
+    const root = await makeTempRoot("pi-session-sync-root-race-");
+    const previousAgent = process.env.PI_CODING_AGENT_DIR;
+    const previousSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const agentDir = join(root, "agent");
+    const sessionsRoot = join(agentDir, "sessions");
+    const missionsRoot = join(agentDir, "missions");
+    const targetDir = join(root, "target");
+    const cwd = join(root, "project");
+    try {
+      await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
+      await mkdir(sessionsRoot);
+      await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
+      await writeFile(
+        join(agentDir, "extensions", "pi-session-sync", "config.json"),
+        JSON.stringify({ targetDir }),
+      );
+      await writeFile(join(sessionsRoot, "session.jsonl"), `${JSON.stringify({ cwd })}\n`);
+      // Race setup: the local missions root dangles into targetDir/missions,
+      // which is missing at validation time and only re-created after the
+      // real-path overlap checks run. Re-validating inside syncSessions would
+      // then resolve the symlink into the just-created child and hard-fail the
+      // whole command; a single validated-root pass records the blocked-source
+      // error instead and keeps the safe sessions tree synchronized.
+      await symlink(join(targetDir, "missions"), missionsRoot, "dir");
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
+
+      const notifications: string[] = [];
+      const commands = new Map<string, unknown>();
+      const pi = {
+        on() {},
+        registerCommand(name: string, definition: unknown) {
+          commands.set(name, definition);
+        },
+      } as unknown as ExtensionAPI;
+      extension(pi);
+      const definition = commands.get("session-sync") as {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      };
+      const context = {
+        cwd,
+        waitForIdle: async () => {},
+        ui: {
+          notify(message: string) {
+            notifications.push(message);
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      await definition.handler("", context);
+      // Nonfatal security error: explicitly surfaced, but the command must
+      // not report "synchronization failed".
+      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
+        false,
+      );
+      expect(
+        notifications.some((message) =>
+          message.includes("Blocked local source symlink into targetDir"),
+        ),
+      ).toBe(true);
+      const portable = portableSessionDirName(cwd);
+      expect(
+        JSON.parse(await readFile(join(targetDir, "sessions", portable, "session.jsonl"), "utf8"))
+          .cwd,
+      ).toBe(`pi-session-sync://${portable}`);
+    } finally {
+      if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgent;
+      if (previousSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessions;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses the actual SessionManager directory for CLI-style custom roots", async () => {
     const root = await makeTempRoot("pi-session-sync-context-");
     const previousAgent = process.env.PI_CODING_AGENT_DIR;
@@ -161,6 +238,7 @@ describe("Pi extension registration", () => {
       await mkdir(actualSessions);
       await mkdir(ignoredSessions);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir }),
@@ -192,7 +270,8 @@ describe("Pi extension registration", () => {
       await definition.handler("", context);
       const portable = portableSessionDirName(cwd);
       expect(
-        JSON.parse(await readFile(join(targetDir, portable, "session.jsonl"), "utf8")).cwd,
+        JSON.parse(await readFile(join(targetDir, "sessions", portable, "session.jsonl"), "utf8"))
+          .cwd,
       ).toBe(`pi-session-sync://${portable}`);
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -217,6 +296,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(actualSessions, { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await mkdir(cwd, { recursive: true });
       await mkdir(otherCwd, { recursive: true });
       await writeFile(
@@ -261,12 +341,12 @@ describe("Pi extension registration", () => {
 
       const currentName = portableSessionDirName(cwd);
       const otherName = portableSessionDirName(otherCwd);
-      expect(await readFile(join(targetDir, currentName, "current.jsonl"), "utf8")).toContain(
-        `pi-session-sync://${currentName}`,
-      );
-      expect(await readFile(join(targetDir, otherName, "other.jsonl"), "utf8")).toContain(
-        `pi-session-sync://${otherName}`,
-      );
+      expect(
+        await readFile(join(targetDir, "sessions", currentName, "current.jsonl"), "utf8"),
+      ).toContain(`pi-session-sync://${currentName}`);
+      expect(
+        await readFile(join(targetDir, "sessions", otherName, "other.jsonl"), "utf8"),
+      ).toContain(`pi-session-sync://${otherName}`);
       expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
         false,
       );
@@ -294,6 +374,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(actualSessions, { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await mkdir(cwd, { recursive: true });
       await mkdir(otherCwd, { recursive: true });
       await mkdir(join(cwd, ".pi"), { recursive: true });
@@ -338,12 +419,12 @@ describe("Pi extension registration", () => {
       const assertFlat = async (): Promise<void> => {
         const currentName = portableSessionDirName(cwd);
         const otherName = portableSessionDirName(otherCwd);
-        expect(await readFile(join(targetDir, currentName, "current.jsonl"), "utf8")).toContain(
-          `pi-session-sync://${currentName}`,
-        );
-        expect(await readFile(join(targetDir, otherName, "other.jsonl"), "utf8")).toContain(
-          `pi-session-sync://${otherName}`,
-        );
+        expect(
+          await readFile(join(targetDir, "sessions", currentName, "current.jsonl"), "utf8"),
+        ).toContain(`pi-session-sync://${currentName}`);
+        expect(
+          await readFile(join(targetDir, "sessions", otherName, "other.jsonl"), "utf8"),
+        ).toContain(`pi-session-sync://${otherName}`);
       };
 
       await definition.handler("", context);
@@ -393,6 +474,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(resumedCwd, ".pi"), { recursive: true });
       await mkdir(actualSessions, { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(join(startupCwd, ".pi", "settings.json"), JSON.stringify({}));
       await writeFile(
         join(resumedCwd, ".pi", "settings.json"),
@@ -440,9 +522,9 @@ describe("Pi extension registration", () => {
       await definition.handler("", context);
 
       const portable = portableSessionDirName(startupCwd);
-      expect(await readFile(join(targetDir, portable, "resumed.jsonl"), "utf8")).toContain(
-        `pi-session-sync://${portable}`,
-      );
+      expect(
+        await readFile(join(targetDir, "sessions", portable, "resumed.jsonl"), "utf8"),
+      ).toContain(`pi-session-sync://${portable}`);
       const state = JSON.parse(
         await readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
       ) as { scopes: Record<string, { layout: string; sessionsRoot: string }> };
@@ -476,6 +558,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(actualSessions, { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await mkdir(cwd, { recursive: true });
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
@@ -543,6 +626,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(sessionsRoot);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await symlink(sessionsRoot, sourceLink, "dir");
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
@@ -579,12 +663,12 @@ describe("Pi extension registration", () => {
       await definition.handler("", context);
 
       expect(
-        notifications.some((message) => message.includes("sessionsRoot must not be a symlink")),
+        notifications.some((message) => message.toLowerCase().includes("session sync complete")),
       ).toBe(true);
-      await expect(readFile(machineIdPath, "utf8")).rejects.toThrow();
+      await expect(readFile(machineIdPath, "utf8")).resolves.toBeDefined();
       await expect(
         readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
-      ).rejects.toThrow();
+      ).resolves.toBeDefined();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgent;
@@ -607,6 +691,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await writeFile(sessionsRoot, sourceText);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir }),
@@ -670,6 +755,7 @@ describe("Pi extension registration", () => {
     try {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir }),
@@ -704,11 +790,11 @@ describe("Pi extension registration", () => {
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
 
-      expect(notifications.some((message) => message.includes("sessionsRoot does not exist"))).toBe(
-        true,
-      );
-      await expect(readFile(machineIdPath, "utf8")).rejects.toThrow();
-      await expect(readFile(statePath, "utf8")).rejects.toThrow();
+      expect(
+        notifications.some((message) => message.toLowerCase().includes("session sync complete")),
+      ).toBe(true);
+      await expect(readFile(machineIdPath, "utf8")).resolves.toBeDefined();
+      await expect(readFile(statePath, "utf8")).resolves.toBeDefined();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgent;
@@ -727,6 +813,7 @@ describe("Pi extension registration", () => {
     try {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       process.env.PI_CODING_AGENT_DIR = agentDir;
       process.env.PI_CODING_AGENT_SESSION_DIR = join(root, "fallback-sessions");
       const commands = new Map<string, unknown>();
@@ -772,6 +859,157 @@ describe("Pi extension registration", () => {
     }
   });
 
+  it("notifies at error severity on a successful sync with forbidden source symlink errors", async () => {
+    const root = await makeTempRoot("pi-session-sync-error-severity-");
+    const previousAgent = process.env.PI_CODING_AGENT_DIR;
+    const previousSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const agentDir = join(root, "agent");
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const cwd = join(root, "project");
+    try {
+      await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
+      await mkdir(sessionsRoot);
+      await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
+      await writeFile(
+        join(agentDir, "extensions", "pi-session-sync", "config.json"),
+        JSON.stringify({ targetDir }),
+      );
+      await writeFile(join(sessionsRoot, "session.jsonl"), `${JSON.stringify({ cwd })}\n`);
+      // A forbidden source symlink into targetDir makes summary.errors nonempty
+      // while the safe session file still synchronizes (nonfatal).
+      await symlink(join(targetDir, "sessions"), join(sessionsRoot, "evil"), "dir");
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
+
+      const notifications: Array<{ message: string; type?: string | undefined }> = [];
+      const commands = new Map<string, unknown>();
+      const pi = {
+        on() {},
+        registerCommand(name: string, definition: unknown) {
+          commands.set(name, definition);
+        },
+      } as unknown as ExtensionAPI;
+      extension(pi);
+      const definition = commands.get("session-sync") as {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      };
+      const context = {
+        cwd,
+        waitForIdle: async () => {},
+        sessionManager: {
+          getSessionDir: () => sessionsRoot,
+          getSessionFile: () => undefined,
+          usesDefaultSessionDir: () => false,
+        },
+        ui: {
+          notify(message: string, type?: string) {
+            notifications.push({ message, type });
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      await definition.handler("", context);
+
+      const success = notifications.filter((notification) =>
+        notification.message.includes("Session sync complete"),
+      );
+      expect(success.length).toBe(1);
+      // The sync succeeded but the forbidden link error must reach the host
+      // at error severity, not buried at info level.
+      expect(success[0]?.type).toBe("error");
+      expect(success[0]?.message).toContain("Blocked local source symlink into targetDir");
+      expect(notifications.some((n) => n.message.includes("synchronization failed"))).toBe(false);
+    } finally {
+      if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgent;
+      if (previousSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessions;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("notifies at error severity on an active-refresh success with forbidden source symlink errors", async () => {
+    const root = await makeTempRoot("pi-session-sync-refresh-error-severity-");
+    const previousAgent = process.env.PI_CODING_AGENT_DIR;
+    const previousSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const agentDir = join(root, "agent");
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const cwd = join(root, "project");
+    const activeFile = join(sessionsRoot, "active.jsonl");
+    try {
+      await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
+      await mkdir(sessionsRoot);
+      await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
+      await mkdir(cwd, { recursive: true });
+      await writeFile(
+        join(agentDir, "extensions", "pi-session-sync", "config.json"),
+        JSON.stringify({ targetDir }),
+      );
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
+      const portable = portableSessionDirName(cwd);
+      await writeFile(
+        activeFile,
+        `${JSON.stringify({ type: "session", id: "active", cwd, value: "local" })}\n`,
+      );
+
+      const notifications: Array<{ message: string; type?: string | undefined }> = [];
+      const commands = new Map<string, unknown>();
+      const pi = {
+        on() {},
+        registerCommand(name: string, definition: unknown) {
+          commands.set(name, definition);
+        },
+      } as unknown as ExtensionAPI;
+      extension(pi);
+      const definition = commands.get("session-sync") as {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      };
+      const context = {
+        cwd,
+        waitForIdle: async () => {},
+        sessionManager: {
+          getSessionDir: () => sessionsRoot,
+          getSessionFile: () => activeFile,
+          usesDefaultSessionDir: () => false,
+        },
+        switchSession: async () => ({ cancelled: false }),
+        ui: {
+          notify(message: string, type?: string) {
+            notifications.push({ message, type });
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      // First run: populate the target copy.
+      await definition.handler("", context);
+      await writeFile(
+        join(targetDir, "sessions", portable, "active.jsonl"),
+        `${JSON.stringify({ type: "session", id: "active", cwd: `pi-session-sync://${portable}`, value: "target" })}\n`,
+      );
+      // A forbidden source symlink makes summary.errors nonempty on the
+      // refresh run; the safe file still syncs and triggers the refresh.
+      await symlink(join(targetDir, "sessions"), join(sessionsRoot, "evil"), "dir");
+      await definition.handler("", context);
+
+      const refresh = notifications.filter((notification) =>
+        notification.message.includes("Session sync committed; refreshing active session"),
+      );
+      expect(refresh.length).toBe(1);
+      expect(refresh[0]?.type).toBe("error");
+      expect(refresh[0]?.message).toContain("Blocked local source symlink into targetDir");
+      expect(JSON.parse(await readFile(activeFile, "utf8")).value).toBe("target");
+    } finally {
+      if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgent;
+      if (previousSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessions;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refreshes active session after target-to-local replacement", async () => {
     const root = await makeTempRoot("pi-session-sync-refresh-");
     const previousAgent = process.env.PI_CODING_AGENT_DIR;
@@ -785,6 +1023,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(sessionsRoot);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await mkdir(cwd, { recursive: true });
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
@@ -831,7 +1070,7 @@ describe("Pi extension registration", () => {
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
       await writeFile(
-        join(targetDir, portable, "active.jsonl"),
+        join(targetDir, "sessions", portable, "active.jsonl"),
         `${JSON.stringify({ type: "session", id: "active", cwd: `pi-session-sync://${portable}`, value: "target" })}\n`,
       );
       await definition.handler("", context);
@@ -842,7 +1081,7 @@ describe("Pi extension registration", () => {
       );
       cancelRefresh = true;
       await writeFile(
-        join(targetDir, portable, "active.jsonl"),
+        join(targetDir, "sessions", portable, "active.jsonl"),
         `${JSON.stringify({ type: "session", id: "active", cwd: `pi-session-sync://${portable}`, value: "target-again" })}\n`,
       );
       await definition.handler("", context);
@@ -877,6 +1116,7 @@ describe("Pi extension registration", () => {
       await mkdir(activeDir, { recursive: true });
       await mkdir(otherDir, { recursive: true });
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir }),
@@ -912,7 +1152,9 @@ describe("Pi extension registration", () => {
 
       expect((await lstat(activeDir)).isDirectory()).toBe(true);
       await expect(lstat(otherDir)).rejects.toThrow();
-      await expect(lstat(join(targetDir, portableSessionDirName(otherCwd)))).rejects.toThrow();
+      await expect(
+        lstat(join(targetDir, "sessions", portableSessionDirName(otherCwd))),
+      ).rejects.toThrow();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgent;
@@ -934,6 +1176,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(sessionsRoot);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       process.env.PI_CODING_AGENT_DIR = agentDir;
       process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
 
@@ -1040,6 +1283,7 @@ describe("Pi extension registration", () => {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(sessionsRoot);
       await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
       await writeFile(
         join(agentDir, "extensions", "pi-session-sync", "config.json"),
         JSON.stringify({ targetDir }),
@@ -1076,7 +1320,8 @@ describe("Pi extension registration", () => {
 
       const portable = portableSessionDirName(cwd);
       expect(
-        JSON.parse(await readFile(join(targetDir, portable, "session.jsonl"), "utf8")).cwd,
+        JSON.parse(await readFile(join(targetDir, "sessions", portable, "session.jsonl"), "utf8"))
+          .cwd,
       ).toBe(`pi-session-sync://${portable}`);
       expect(lock.reserved).toBe(false);
       expect(lock.active).toBe(false);

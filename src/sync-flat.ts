@@ -12,7 +12,7 @@ import {
 } from "./sync-native.ts";
 import { decisionKeepsScannedFile } from "./sync-nested.ts";
 import { parentReferenceMatchesMapping } from "./sync-parent-ref.ts";
-import { canonicalStateLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
+import { canonicalStateLogicalKey, parseLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
 import { canonicalStatePortableName } from "./sync-state-normalize.ts";
 import type { DecisionContext, FileDecision } from "./sync-types.ts";
 
@@ -30,7 +30,7 @@ export function flatLogicalKey(
   namingOptions: PortableNameOptions,
 ): string {
   return canonicalStateLogicalKey(
-    `${canonicalStatePortableName(portableName, namingOptions)}/${relativePath}`,
+    `sessions/${canonicalStatePortableName(portableName, namingOptions)}/${relativePath}`,
     namingOptions,
   );
 }
@@ -48,12 +48,9 @@ export function scannedFlatFile(
   if (process.platform !== "win32") return undefined;
   const canonicalPortableName = canonicalStatePortableName(portableName, namingOptions);
   for (const [candidateKey, file] of scan.files) {
-    const slash = candidateKey.indexOf("/");
-    if (slash <= 0) continue;
-    if (
-      candidateKey.slice(0, slash) === canonicalPortableName &&
-      nativeNameIdentity(candidateKey.slice(slash + 1)) === nativeNameIdentity(relativePath)
-    ) {
+    const parsed = parseLogicalKey(candidateKey, namingOptions);
+    if (parsed.root !== "sessions" || parsed.portableName !== canonicalPortableName) continue;
+    if (nativeNameIdentity(parsed.relativePath) === nativeNameIdentity(relativePath)) {
       return file;
     }
   }

@@ -25,7 +25,13 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "active-flat-machine",
         now: 73_250,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "nested", "active.jsonl");
+      const targetFile = join(
+        fixture.targetDir,
+        "sessions",
+        fixture.portableName,
+        "nested",
+        "active.jsonl",
+      );
       await writeFile(
         targetFile,
         `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}`, value: "target" })}\n`,
@@ -61,7 +67,13 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "active-nested-machine",
         now: 73_750,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "nested", "active.jsonl");
+      const targetFile = join(
+        fixture.targetDir,
+        "sessions",
+        fixture.portableName,
+        "nested",
+        "active.jsonl",
+      );
       await writeFile(
         targetFile,
         `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}`, value: "target" })}\n`,
@@ -215,7 +227,7 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "case-active-delete-machine",
         now: 76_654,
       });
-      await rm(join(fixture.targetDir, fixture.portableName, "UPPER.jsonl"));
+      await rm(join(fixture.targetDir, "sessions", fixture.portableName, "UPPER.jsonl"));
       await syncSessions({
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
@@ -245,7 +257,7 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "case-active-refresh-machine",
         now: 76_656,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "UPPER.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "UPPER.jsonl");
       await writeFile(
         targetFile,
         `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}`, value: "target" })}\n`,
@@ -330,7 +342,7 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "active-machine",
         now: 73_500,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await writeFile(
         targetFile,
         `${JSON.stringify({ type: "session", id: "active", cwd: `pi-session-sync://${fixture.portableName}`, value: "target" })}\n`,
@@ -352,7 +364,7 @@ describe("bidirectional session sync active sessions", () => {
   it("keeps non-active cwd-less JSONL valid but rejects invalid active headers", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "session.jsonl");
-    const targetTree = join(fixture.targetDir, fixture.portableName);
+    const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
     try {
       await mkdir(fixture.cwd, { recursive: true });
       await writeFile(
@@ -423,7 +435,7 @@ describe("bidirectional session sync active sessions", () => {
         now: 73_500,
       });
       const before = await readFile(statePath, "utf8");
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await writeFile(
         targetFile,
         `${JSON.stringify({ type: "session", id: "target-without-cwd", value: "target-without-cwd" })}\n`,
@@ -445,12 +457,55 @@ describe("bidirectional session sync active sessions", () => {
     }
   });
 
+  it("rejects active refresh from a target JSONL with an undecodable cwd header", async () => {
+    const fixture = await makeFixture();
+    const source = join(fixture.localTree, "session.jsonl");
+    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
+    try {
+      await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "local" })}\n`);
+      await utimes(source, 1, 1);
+      await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "active-undecodable-cwd-machine",
+        now: 80_000,
+      });
+      const before = await readFile(statePath, "utf8");
+      // A string cwd that is not a decodable portable URI in the active
+      // session header must refuse the whole refresh before any write.
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
+      await writeFile(
+        targetFile,
+        `${JSON.stringify({
+          type: "session",
+          id: "target-undecodable",
+          cwd: "pi-session-sync://NOT-A-REAL-LABEL%2Fx",
+          value: "target-undecodable",
+        })}\n`,
+      );
+      await utimes(targetFile, 2, 2);
+      await expect(
+        syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          machineId: "active-undecodable-cwd-machine",
+          activeSessionFile: source,
+          now: 81_000,
+        }),
+      ).rejects.toThrow(/undecodable session cwd/);
+      expect(JSON.parse(await readFile(source, "utf8")).value).toBe("local");
+      expect(await readFile(statePath, "utf8")).toBe(before);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
   it("refreshes active session when target session cwd does not exist", async () => {
     const fixture = await makeFixture();
     const missingCwd = join(fixture.root, "missing-active-project");
     const missingName = portableSessionDirName(missingCwd);
     const source = join(fixture.sessionsRoot, defaultSessionDirName(missingCwd), "session.jsonl");
-    const targetFile = join(fixture.targetDir, missingName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", missingName, "session.jsonl");
     try {
       await mkdir(dirname(source), { recursive: true });
       await writeFile(source, `${JSON.stringify({ cwd: missingCwd, value: "local" })}\n`);
@@ -483,7 +538,7 @@ describe("bidirectional session sync active sessions", () => {
   it("refreshes active session when decoded session cwd is not a directory", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "session.jsonl");
-    const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
     try {
       await writeFile(fixture.cwd, "not a directory\n");
       await writeFile(
@@ -528,7 +583,7 @@ describe("bidirectional session sync active sessions", () => {
         machineId: "active-logical-delete-machine",
         now: 2_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       const statePath = join(fixture.targetDir, STATE_FILE_NAME);
       const targetBefore = await readFile(targetFile, "utf8");
       const stateBefore = await readFile(statePath, "utf8");
@@ -563,7 +618,7 @@ describe("bidirectional session sync active sessions", () => {
       });
       const statePath = join(fixture.targetDir, STATE_FILE_NAME);
       const before = await readFile(statePath, "utf8");
-      await rm(join(fixture.targetDir, fixture.portableName, "session.jsonl"));
+      await rm(join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"));
       await expect(
         syncSessions({
           sessionsRoot: fixture.sessionsRoot,
@@ -647,7 +702,7 @@ describe("bidirectional session sync active sessions", () => {
       });
       await expect(
         readFile(
-          join(fixture.targetDir, portableSessionDirName(machineCwd), "session.jsonl"),
+          join(fixture.targetDir, "sessions", portableSessionDirName(machineCwd), "session.jsonl"),
           "utf8",
         ),
       ).rejects.toThrow();
@@ -663,7 +718,8 @@ describe("bidirectional session sync active sessions", () => {
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { entries: Record<string, { localSnapshots: Record<string, unknown> }> };
       const snapshots =
-        state.entries[`${portableSessionDirName(machineCwd)}/session.jsonl`]?.localSnapshots;
+        state.entries[`sessions/${portableSessionDirName(machineCwd)}/session.jsonl`]
+          ?.localSnapshots;
       const snapshotKeys = Object.keys(snapshots ?? {});
       expect(snapshotKeys.some((key) => key.endsWith("::machine-a"))).toBe(true);
       expect(snapshotKeys.some((key) => key.endsWith("::machine-b"))).toBe(true);
@@ -716,7 +772,8 @@ describe("bidirectional session sync active sessions", () => {
       const roots = Object.values(state.scopes).map((scope) => scope.sessionsRoot);
       expect(roots).toContain(sessionsUpper);
       expect(roots).toContain(sessionsLower);
-      const snapshots = state.entries[`${fixture.portableName}/session.jsonl`]?.localSnapshots;
+      const snapshots =
+        state.entries[`sessions/${fixture.portableName}/session.jsonl`]?.localSnapshots;
       expect(
         Object.keys(snapshots ?? {}).filter((key) => key.endsWith("::case-scope-machine")).length,
       ).toBe(2);

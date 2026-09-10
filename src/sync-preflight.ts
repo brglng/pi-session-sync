@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { lstat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { SessionLayout } from "./config.ts";
 import {
@@ -9,7 +9,12 @@ import {
   type PortableNameOptions,
 } from "./portable-name.ts";
 import type { ScannedFile, ScanResult } from "./scan.ts";
-import { pathIdentity } from "./session-paths.ts";
+import {
+  isSyncUri,
+  pathIdentity,
+  SESSIONS_FILE_URI_PREFIX,
+  syncParentUriToLocalPath,
+} from "./session-paths.ts";
 import type { StateEntry, SyncState } from "./state.ts";
 import { restoreDecisionState } from "./sync-commit.ts";
 import { flatLogicalKey, isFlatPathUnderMappingDirectory } from "./sync-flat.ts";
@@ -18,6 +23,8 @@ import {
   mappingForNativeName,
   nativeCompatiblePortableMappings,
   nativePathEquals,
+  nativePathInsideOrEqual,
+  realPathWithMissingSuffix,
   sameNativeName,
   sameOrInside,
 } from "./sync-native.ts";
@@ -80,6 +87,121 @@ export function mappingHasBlockedLocalMutation(
   });
 }
 
+/**
+ * True when a local-side destination path would resolve (through followed
+ * source symlinks) to a real path inside `targetDir` itself or any of its
+ * descendants. Such a write or delete must be blocked before commit: local
+ * source symlinks into targetDir are already recorded and skipped by the
+ * scan, and this preflight check closes the window where a path changes
+ * between scan and commit so no local write/delete can ever land inside the
+ * portable target tree.
+ */
+export async function destinationResolvesInsideTarget(
+  path: string,
+  targetDir: string,
+): Promise<boolean> {
+  const resolved = await realPathWithMissingSuffix(path);
+  return nativePathInsideOrEqual(targetDir, resolved);
+}
+
+/**
+ * Verify a scanned SOURCE file still resolves as scanned before any staging
+ * or commit. A source path that vanished or became a dangling symlink between
+ * scan and preflight must block the affected action with a warning: committing
+ * would either copy stale content or fail at commit time after staging. A
+ * source leaf symlink must still resolve to the exact real file the scan
+ * recorded; a dangling leaf is unresolved and blocks.
+ */
+export async function sourcePathResolves(file: ScannedFile): Promise<boolean> {
+  let info: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    info = await lstat(file.absolutePath);
+  } catch {
+    // Vanished between scan and preflight.
+    return false;
+  }
+  if (!info.isSymbolicLink()) return true;
+  if (file.physicalPath === undefined) return false;
+  try {
+    return nativePathEquals(await realpath(file.absolutePath), file.physicalPath);
+  } catch {
+    // Dangling source symlink.
+    return false;
+  }
+}
+
+/**
+ * Local→target parentSession validation beyond URI syntax: every typed sync-URI
+ * reference in a LOCAL source file must name a parent session FILE.
+ *
+ * - A sessions-directory URI (`pi-session-sync://sessions/<portableName>` with
+ *   no relative path) names a directory, not a file: file error.
+ * - A referenced target that EXISTS but is not a regular file (directory,
+ *   symlink, fifo, ...) is a file error. A MISSING target stays valid when the
+ *   URI, range, and segment rules already passed during the scan.
+ * - Raw absolute references are validated through the sync URI the scan's
+ *   local→target conversion produced (`mappedUri`): the converted form must
+ *   never bypass the parent-file contract just because the source spelling was
+ *   an absolute path.
+ *
+ * Runs for local sessions files and for local mission files (mission
+ * `parentSession` values follow the same parent-file contract) before any
+ * preflight, staging, or write.
+ *
+ * Throws to stop the whole sync before staging.
+ */
+export async function validateParentReferenceTargets(
+  files: ReadonlyMap<string, ScannedFile>,
+  ctx: DecisionContext,
+): Promise<void> {
+  for (const file of files.values()) {
+    if (file.side !== "local") continue;
+    for (const reference of file.parentSessionReferences) {
+      // Raw absolute spellings arrive pre-converted by the scan's to-target
+      // pass: validate the mapped sync URI so conversion cannot bypass the
+      // parent-file contract.
+      const effectiveUri = isSyncUri(reference.value)
+        ? reference.value
+        : (reference.mappedUri ?? reference.rewritten);
+      if (effectiveUri === undefined || !isSyncUri(effectiveUri)) continue;
+      // Directory URIs are rejected at transform time on local source; this
+      // guard covers references collected through any other path.
+      if (!effectiveUri.toLowerCase().startsWith(SESSIONS_FILE_URI_PREFIX)) continue;
+      const slash = effectiveUri.slice(SESSIONS_FILE_URI_PREFIX.length).indexOf("/");
+      if (slash < 0) {
+        throw new Error(
+          `parentSession must reference a session file, not a session directory: ${reference.value}`,
+        );
+      }
+      // Resolve the referenced local path on a best-effort basis: URI syntax,
+      // range, and segment rules were already validated during the scan. A
+      // path that cannot even be computed (e.g. a decoded cwd whose generated
+      // session directory name is unsafe) can never exist on this machine, so
+      // only the regular-file existence check depends on it.
+      let localTarget: string | undefined;
+      try {
+        localTarget = syncParentUriToLocalPath(
+          effectiveUri,
+          ctx.sessionsRoot,
+          ctx.layout,
+          ctx.namingOptions,
+        );
+      } catch {
+        localTarget = undefined;
+      }
+      if (localTarget === undefined) continue;
+      // stat (follow) semantics match the scanner: a leaf file symlink is a
+      // session file, while a directory (or symlink to one) is not regular.
+      const info = await stat(localTarget).catch(() => undefined);
+      if (info !== undefined && !info.isFile()) {
+        throw new Error(
+          `parentSession references a non-regular file: ${reference.value} -> ${localTarget}`,
+        );
+      }
+    }
+  }
+}
+
 export async function mappingHasSymlinkedTargetPath(
   localName: string,
   portableName: string,
@@ -89,16 +211,19 @@ export async function mappingHasSymlinkedTargetPath(
   state: SyncState | undefined = undefined,
 ): Promise<boolean> {
   if (layout === "nested") {
-    // The tree-root symlink check must address the physical on-disk target
-    // name: a legacy loose-named tree keeps that spelling even though keys
-    // use the strict identity.
+    // The tree-root symlink check addresses the on-disk target root name; all
+    // accepted trees use the strict spelling so the physical name equals the
+    // canonical identity.
     const physicalTargetName =
       ctx.targetPhysicalPortableNames.get(
         canonicalStatePortableName(portableName, ctx.namingOptions),
       ) ?? portableName;
     if (
-      (await pathHasSymlink(ctx.sessionsRoot, join(ctx.sessionsRoot, localName))) ||
-      (await pathHasSymlink(ctx.targetDir, join(ctx.targetDir, physicalTargetName)))
+      (await pathHasSymlink(ctx.sessionsRoot, join(ctx.sessionsRoot, localName), "root-only")) ||
+      (await pathHasSymlink(
+        ctx.sessionsTargetRoot,
+        join(ctx.sessionsTargetRoot, physicalTargetName),
+      ))
     ) {
       return true;
     }
@@ -115,8 +240,8 @@ export async function mappingHasSymlinkedTargetPath(
           continue;
         }
         if (
-          (await pathHasSymlink(ctx.sessionsRoot, localPathForKey(ctx, key))) ||
-          (await pathHasSymlink(ctx.targetDir, targetPathForKey(ctx, key)))
+          (await pathHasSymlink(ctx.sessionsRoot, localPathForKey(ctx, key), "root-only")) ||
+          (await pathHasSymlink(ctx.sessionsTargetRoot, targetPathForKey(ctx, key)))
         ) {
           return true;
         }
@@ -126,8 +251,8 @@ export async function mappingHasSymlinkedTargetPath(
   if (layout === "flat") {
     const mappingKey = flatLogicalKey(localName, portableName, ctx.namingOptions);
     if (
-      (await pathHasSymlink(ctx.sessionsRoot, localPathForKey(ctx, mappingKey))) ||
-      (await pathHasSymlink(ctx.targetDir, targetPathForKey(ctx, mappingKey)))
+      (await pathHasSymlink(ctx.sessionsRoot, localPathForKey(ctx, mappingKey), "root-only")) ||
+      (await pathHasSymlink(ctx.sessionsTargetRoot, targetPathForKey(ctx, mappingKey)))
     ) {
       return true;
     }
@@ -149,7 +274,7 @@ export async function mappingHasSymlinkedTargetPath(
       belongsToMapping = nestedFileMatchesMapping(file, localName, portableName, ctx.namingOptions);
     }
     if (!belongsToMapping) continue;
-    if (await pathHasSymlink(ctx.targetDir, targetPathForKey(ctx, file.key))) return true;
+    if (await pathHasSymlink(ctx.sessionsTargetRoot, targetPathForKey(ctx, file.key))) return true;
   }
   return false;
 }
@@ -177,16 +302,24 @@ export async function preflightDecisions(
       }
       let safe = true;
       for (const action of decision.deletes) {
-        const root = action.side === "local" ? ctx.sessionsRoot : ctx.targetDir;
-        const otherRoot = action.side === "local" ? ctx.targetDir : ctx.sessionsRoot;
+        const root = action.side === "local" ? ctx.sessionsRoot : ctx.sessionsTargetRoot;
+        const otherRoot = action.side === "local" ? ctx.sessionsTargetRoot : ctx.sessionsRoot;
         const otherPath = destinationPath(
           ctx,
           decision.key,
           action.side === "local" ? "target" : "local",
         );
         if (
-          (await pathHasSymlink(root, action.path)) ||
-          (await pathHasSymlink(otherRoot, otherPath))
+          (await pathHasSymlink(
+            root,
+            action.path,
+            action.side === "local" ? "root-only" : "strict",
+          )) ||
+          (await pathHasSymlink(
+            otherRoot,
+            otherPath,
+            action.side === "local" ? "strict" : "root-only",
+          ))
         ) {
           safe = false;
           break;
@@ -200,16 +333,24 @@ export async function preflightDecisions(
       if (decision.previousEntry?.tombstone === null || decision.deletes.length === 0) continue;
       let safe = true;
       for (const action of decision.deletes) {
-        const root = action.side === "local" ? ctx.sessionsRoot : ctx.targetDir;
-        const otherRoot = action.side === "local" ? ctx.targetDir : ctx.sessionsRoot;
+        const root = action.side === "local" ? ctx.sessionsRoot : ctx.sessionsTargetRoot;
+        const otherRoot = action.side === "local" ? ctx.sessionsTargetRoot : ctx.sessionsRoot;
         const otherPath = destinationPath(
           ctx,
           decision.key,
           action.side === "local" ? "target" : "local",
         );
         if (
-          (await pathHasSymlink(root, action.path)) ||
-          (await pathHasSymlink(otherRoot, otherPath))
+          (await pathHasSymlink(
+            root,
+            action.path,
+            action.side === "local" ? "root-only" : "strict",
+          )) ||
+          (await pathHasSymlink(
+            otherRoot,
+            otherPath,
+            action.side === "local" ? "strict" : "root-only",
+          ))
         ) {
           safe = false;
           break;
@@ -301,13 +442,34 @@ export async function preflightDecisions(
     const missingSide = local === undefined ? "local" : target === undefined ? "target" : undefined;
     if (missingSide !== undefined && (decision.copies.length > 0 || decision.deletes.length > 0)) {
       const missingPath = destinationPath(ctx, decision.key, missingSide);
-      const missingRoot = missingSide === "local" ? ctx.sessionsRoot : ctx.targetDir;
+      const missingRoot = missingSide === "local" ? ctx.sessionsRoot : ctx.sessionsTargetRoot;
+      // A missing-side path that resolves into the PHYSICAL targetDir through
+      // a source symlink is pointed target content the sync must never touch:
+      // it is covered by a blocked (security-skipped) local source symlink.
+      // Deletion or restore through it would delete/overwrite the pointed
+      // target tree, so the whole decision is blocked with a warning and the
+      // previous state is restored instead of treating the occupied path as a
+      // hard unknown-file error.
+      if (
+        missingSide === "local" &&
+        (await destinationResolvesInsideTarget(missingPath, ctx.physicalTargetDir))
+      ) {
+        warnings.push(
+          `Skipped logical path through blocked source symlink into targetDir: ${missingPath}`,
+        );
+        restoreDecisionState(decision, nextEntries);
+        for (const action of decision.copies) blockedCopies.add(action);
+        for (const action of decision.deletes) blockedDeletes.add(action);
+        noteBlockedDestination(missingRoot, missingPath);
+        continue;
+      }
       const missingStatus = await preflightMissingPath(
         missingRoot,
         missingPath,
         decision.key,
         knownPaths,
         replaceableDeleteKeys,
+        missingSide === "local",
       );
       if (missingStatus === "occupied-other") {
         throw new Error(`Logical destination path collision: ${missingPath}`);
@@ -350,49 +512,118 @@ export async function preflightDecisions(
       }
     }
     for (const action of decision.copies) {
-      const root = action.destinationSide === "local" ? ctx.sessionsRoot : ctx.targetDir;
+      const root = action.destinationSide === "local" ? ctx.sessionsRoot : ctx.sessionsTargetRoot;
+      // The scanned SOURCE must still resolve: a source path that vanished or
+      // became a dangling symlink between scan and preflight blocks this
+      // action before staging (committing would copy stale content or fail
+      // after staging).
+      if (!(await sourcePathResolves(action.source))) {
+        warnings.push(`Skipped sync through unresolved source: ${action.source.absolutePath}`);
+        restoreDecisionState(decision, nextEntries);
+        blockedCopies.add(action);
+        noteBlockedDestination(root, action.destinationPath);
+        continue;
+      }
+      // A local destination that would resolve into targetDir through a
+      // source symlink must never receive a write: the scan already records
+      // and skips such symlinks, and this check closes the window where a
+      // path changes between scan and commit. Containment uses the PHYSICAL
+      // targetDir identity so ancestor aliases are covered.
+      if (
+        action.destinationSide === "local" &&
+        (await destinationResolvesInsideTarget(action.destinationPath, ctx.physicalTargetDir))
+      ) {
+        warnings.push(
+          `Skipped sync into targetDir through source symlink: ${action.destinationPath}`,
+        );
+        restoreDecisionState(decision, nextEntries);
+        blockedCopies.add(action);
+        noteBlockedDestination(root, action.destinationPath);
+        continue;
+      }
+      // A local source leaf file symlink is followed by the scanner and the
+      // commit writes through it to the real file; the preflight verifies the
+      // leaf still resolves to the scanned real path and lets the write go
+      // through instead of blocking every leaf symlink.
+      const localLeaf =
+        action.destinationSide === "local"
+          ? localScanFiles.get(decision.key)?.physicalPath
+          : undefined;
       const result = await preflightDestination(
         root,
         action.destinationPath,
         decision.key,
         knownPaths,
         replaceableDeleteKeys,
+        action.destinationSide === "local",
+        localLeaf,
       );
       if (result.kind === "symlink") {
         warnings.push(`Skipped sync through symlink: ${action.destinationPath}`);
         restoreDecisionState(decision, nextEntries);
         blockedCopies.add(action);
         noteBlockedDestination(root, action.destinationPath);
-      } else if (
-        activeSessionFile !== undefined &&
-        action.destinationSide === "local" &&
-        nativePathEquals(action.destinationPath, activeSessionFile)
-      ) {
-        const activeSessionDir = activeSessionDirFor(ctx, decision.key);
-        if (!nativePathEquals(dirname(action.destinationPath), activeSessionDir)) {
-          throw new Error(
-            `Cannot refresh active session file below sessionDir root: ${activeSessionFile}`,
-          );
+      } else {
+        if (localLeaf !== undefined) action.resolvedPath = localLeaf;
+        if (
+          activeSessionFile !== undefined &&
+          action.destinationSide === "local" &&
+          nativePathEquals(action.destinationPath, activeSessionFile)
+        ) {
+          const activeSessionDir = activeSessionDirFor(ctx, decision.key);
+          if (!nativePathEquals(dirname(action.destinationPath), activeSessionDir)) {
+            throw new Error(
+              `Cannot refresh active session file below sessionDir root: ${activeSessionFile}`,
+            );
+          }
+          await validateActiveRefreshSource(action.source, ctx);
+          refreshSessionFile = activeSessionFile;
         }
-        await validateActiveRefreshSource(action.source, ctx);
-        refreshSessionFile = activeSessionFile;
       }
     }
     for (const action of decision.deletes) {
-      const root = action.side === "local" ? ctx.sessionsRoot : ctx.targetDir;
-      const otherRoot = action.side === "local" ? ctx.targetDir : ctx.sessionsRoot;
+      const root = action.side === "local" ? ctx.sessionsRoot : ctx.sessionsTargetRoot;
+      const otherRoot = action.side === "local" ? ctx.sessionsTargetRoot : ctx.sessionsRoot;
       const otherPath = destinationPath(
         ctx,
         decision.key,
         action.side === "local" ? "target" : "local",
       );
-      const actionThroughSymlink = await pathHasSymlink(root, action.path);
-      const counterpartThroughSymlink = await pathHasSymlink(otherRoot, otherPath);
+      // A local delete that would resolve into targetDir through a source
+      // symlink must never remove target content: the scan already records and
+      // skips such symlinks, and this check closes the window where a path
+      // changes between scan and commit. Containment uses the PHYSICAL
+      // targetDir identity so ancestor aliases are covered.
+      if (
+        action.side === "local" &&
+        (await destinationResolvesInsideTarget(action.path, ctx.physicalTargetDir))
+      ) {
+        warnings.push(`Skipped deletion into targetDir through source symlink: ${action.path}`);
+        restoreDecisionState(decision, nextEntries);
+        blockedDeletes.add(action);
+        noteBlockedDestination(root, action.path);
+        continue;
+      }
+      const localLeaf =
+        action.side === "local" ? localScanFiles.get(decision.key)?.physicalPath : undefined;
+      const actionThroughSymlink = await pathHasSymlink(
+        root,
+        action.path,
+        action.side === "local" ? "follow-source" : "strict",
+        localLeaf,
+      );
+      const counterpartThroughSymlink = await pathHasSymlink(
+        otherRoot,
+        otherPath,
+        action.side === "local" ? "strict" : "root-only",
+      );
       if (actionThroughSymlink || counterpartThroughSymlink) {
         warnings.push(`Skipped deletion through symlink: ${action.path}`);
         restoreDecisionState(decision, nextEntries);
         blockedDeletes.add(action);
         noteBlockedDestination(root, action.path);
+      } else if (localLeaf !== undefined && action.resolvedPath === undefined) {
+        action.resolvedPath = localLeaf;
       }
     }
   }
@@ -511,6 +742,16 @@ export async function preflightDecisions(
       const decoded = decodePortableSessionDirName(parsed.portableName, ctx.namingOptions);
       if (decoded === null) continue;
       if (!blockedLocalNames.has(defaultSessionDirName(decoded.cwd))) continue;
+      // Only adoption copies that write INTO the blocked local tree belong to
+      // the migration-only group; ordinary local->target copies under the
+      // same tree stay per-key (their destination is the strict target side
+      // and the blocked local symlink does not affect them).
+      const writesIntoBlockedTree = decision.copies.some((action) => {
+        if (action.destinationSide !== "local") return false;
+        const destination = resolve(action.destinationPath);
+        return [...blockedNestedTreeRoots].some((treeRoot) => sameOrInside(treeRoot, destination));
+      });
+      if (!writesIntoBlockedTree) continue;
       for (const action of decision.copies) blockedCopies.add(action);
       for (const action of decision.deletes) blockedDeletes.add(action);
       restoreDecisionState(decision, nextEntries);
@@ -714,6 +955,11 @@ export async function validateActiveRefreshSource(
   if (!source.sessionHeaderValid) {
     throw new Error(
       `Cannot refresh active session from target JSONL without a valid session header (type=session, string id, and string cwd): ${source.absolutePath}`,
+    );
+  }
+  if (source.sessionHeaderCwdDecodable === false) {
+    throw new Error(
+      `Cannot refresh active session from target JSONL with an undecodable session cwd: ${source.absolutePath}`,
     );
   }
   const { portableName } = parseLogicalKey(source.key, ctx.namingOptions);

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { decodePortableSessionDirName } from "./portable-name.ts";
 import {
@@ -20,20 +20,41 @@ import type { DecisionContext } from "./sync-types.ts";
 
 export function targetPathForKey(ctx: DecisionContext, key: string): string {
   const parsed = parseLogicalKey(key, ctx.namingOptions);
-  // Logical keys use the strict portable identity, but an existing target
-  // tree keeps its physical on-disk (possibly legacy loose) directory name:
-  // copies, deletions, and cleanup must address that physical path so no
-  // strict-named duplicate tree is ever created next to a legacy tree. Only
-  // brand-new trees (absent from the physical map) use the strict spelling.
+  if (parsed.root === "missions") {
+    if (ctx.missionsTargetRoot === undefined) {
+      throw new Error(`Missions not configured but logical key exists: ${key}`);
+    }
+    const path = resolve(ctx.missionsTargetRoot, ...parsed.relativePath.split("/"));
+    if (!isPathInside(ctx.missionsTargetRoot, path)) {
+      throw new Error(`Logical key escapes missions target root: ${key}`);
+    }
+    return path;
+  }
+  // Logical keys use the strict portable identity; every accepted target tree
+  // is the canonical strict spelling, so copies, deletions, and cleanup
+  // address that spelling. The map exists as a conservative guard for target
+  // root entries the scan accepted under the strict identity.
   const physicalName =
     ctx.targetPhysicalPortableNames.get(parsed.portableName) ?? parsed.portableName;
-  const path = resolve(ctx.targetDir, physicalName, ...parsed.relativePath.split("/"));
-  if (!isPathInside(ctx.targetDir, path)) throw new Error(`Logical key escapes targetDir: ${key}`);
+  const path = resolve(ctx.sessionsTargetRoot, physicalName, ...parsed.relativePath.split("/"));
+  if (!isPathInside(ctx.sessionsTargetRoot, path)) {
+    throw new Error(`Logical key escapes sessions target root: ${key}`);
+  }
   return path;
 }
 
 export function localPathForKey(ctx: DecisionContext, key: string): string {
   const parsed = parseLogicalKey(key, ctx.namingOptions);
+  if (parsed.root === "missions") {
+    if (ctx.missionsRoot === undefined) {
+      throw new Error(`Missions not configured but logical key exists: ${key}`);
+    }
+    const path = resolve(ctx.missionsRoot, ...parsed.relativePath.split("/"));
+    if (!isPathInside(ctx.missionsRoot, path)) {
+      throw new Error(`Logical key escapes missions root: ${key}`);
+    }
+    return path;
+  }
   if (ctx.layout === "flat") {
     const path = resolve(ctx.sessionsRoot, ...parsed.relativePath.split("/"));
     if (!isPathInside(ctx.sessionsRoot, path)) {
@@ -128,7 +149,27 @@ export function validateActiveSessionOwnership(ctx: DecisionContext): void {
   }
 }
 
-export async function pathHasSymlink(root: string, candidate: string): Promise<boolean> {
+/**
+ * How symlinks are treated for one preflight path.
+ *
+ * - `"strict"` (target side): every symlink on the path blocks the
+ *   operation; target roots and their internal trees are never followed.
+ * - `"root-only"` (local counterpart guards): only the configured source
+ *   root element itself may be a symlink; any symlink strictly below it still
+ *   blocks, so an internal local symlink keeps guarding identity decisions.
+ * - `"follow-source"` (source-side writes): the configured source root and
+ *   every internal symlinked ancestor directory are followed (their targets
+ *   may live outside the root), but a symlink at the destination leaf is
+ *   still blocked so the commit never replaces it with a regular file.
+ */
+export type SymlinkWriteMode = "strict" | "root-only" | "follow-source";
+
+export async function pathHasSymlink(
+  root: string,
+  candidate: string,
+  mode: SymlinkWriteMode = "strict",
+  allowLeafSymlink: string | undefined = undefined,
+): Promise<boolean> {
   if (!sameOrInside(root, candidate)) return true;
   const rootPath = resolve(root);
   const rootPathIdentity = nativePathIdentity(rootPath);
@@ -143,7 +184,44 @@ export async function pathHasSymlink(root: string, candidate: string): Promise<b
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (info?.isSymbolicLink()) return true;
+    if (info?.isSymbolicLink()) {
+      if (mode === "strict") return true;
+      if (mode === "root-only") {
+        // A permitted local counterpart root may itself be a symlink;
+        // symlinks strictly inside it still block.
+        if (nativePathIdentity(current) === rootPathIdentity) return false;
+        return true;
+      }
+      // follow-source: root and internal ancestor directories are followed;
+      // the destination leaf itself is a symlink only when it has not been
+      // verified as a scanned source leaf (allowLeafSymlink) that the commit
+      // will write/delete through to its real file.
+      if (nativePathIdentity(current) === candidatePathIdentity) {
+        if (allowLeafSymlink !== undefined) {
+          try {
+            const info: Awaited<ReturnType<typeof lstat>> | undefined = await lstat(current);
+            if (info?.isSymbolicLink() === true) {
+              const resolved: string | undefined = await realpath(current).catch(() => undefined);
+              if (resolved !== undefined && nativePathEquals(resolved, allowLeafSymlink)) {
+                return false;
+              }
+            }
+          } catch {
+            // Fall through: an unverifiable leaf symlink blocks.
+          }
+        }
+        return true;
+      }
+      // An internal symlinked ancestor directory is followed only when its
+      // target still resolves to a directory. A DANGLING symlink cannot be
+      // followed: the write/delete would fail at commit after staging, so the
+      // path is blocked here with a warning by the caller.
+      const resolved = await realpath(current).catch(() => undefined);
+      if (resolved === undefined) return true;
+      const resolvedInfo = await lstat(resolved).catch(() => undefined);
+      if (resolvedInfo === undefined || !resolvedInfo.isDirectory()) return true;
+      return false;
+    }
     if (
       info !== undefined &&
       nativePathIdentity(current) !== candidatePathIdentity &&
@@ -162,7 +240,11 @@ export async function pathHasSymlink(root: string, candidate: string): Promise<b
   }
 }
 
-export async function hasNonDirectoryAncestor(root: string, candidate: string): Promise<boolean> {
+export async function hasNonDirectoryAncestor(
+  root: string,
+  candidate: string,
+  permitRootSymlink = false,
+): Promise<boolean> {
   if (!sameOrInside(root, candidate)) return true;
   const rootPath = nativePathIdentity(root);
   let current = dirname(resolve(candidate));
@@ -174,6 +256,19 @@ export async function hasNonDirectoryAncestor(root: string, candidate: string): 
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     if (info !== undefined) {
+      // Source-side writes treat every symlinked ancestor directory as a
+      // followed directory boundary (their targets may live outside the
+      // root); target-side writes reject any symlink strictly below the root.
+      if (!info.isDirectory() && info.isSymbolicLink() && permitRootSymlink) {
+        // A dangling symlink cannot be followed: its target is not a
+        // directory, so the ancestor is unusable and the write would fail at
+        // commit after staging.
+        const resolved = await realpath(current).catch(() => undefined);
+        if (resolved === undefined) return true;
+        const resolvedInfo = await lstat(resolved).catch(() => undefined);
+        if (resolvedInfo === undefined || !resolvedInfo.isDirectory()) return true;
+        return false;
+      }
       if (!info.isDirectory()) return true;
       if (nativePathIdentity(current) === rootPath) return false;
       return false;

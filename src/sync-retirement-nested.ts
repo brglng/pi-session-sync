@@ -142,7 +142,7 @@ export function migrateNestedStateEntries(
     const targetDecoded = decodePortableSessionDirName(targetPortableName, namingOptions);
     if (targetDecoded === null || !sameCwdPath(decoded.cwd, targetDecoded.cwd)) continue;
     const newKey = canonicalStateLogicalKey(
-      `${targetPortableName}/${parsed.relativePath}`,
+      `sessions/${targetPortableName}/${parsed.relativePath}`,
       namingOptions,
     );
     if (

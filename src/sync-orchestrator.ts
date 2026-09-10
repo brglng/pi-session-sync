@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -50,6 +50,13 @@ import {
   shouldRetireFlatMapping,
 } from "./sync-flat.ts";
 import {
+  isMissionsKey,
+  missionMappingsFromScans,
+  preflightMissions,
+  resolveMissionsEntry,
+  scanMissionsTree,
+} from "./sync-missions.ts";
+import {
   deleteRecordValueForNativeName,
   machineScopeKeyFor,
   mappingForNativeName,
@@ -94,12 +101,13 @@ import {
   targetPathForKey,
   validateActiveSessionOwnership,
 } from "./sync-paths-keys.ts";
-import { validateSyncRoots } from "./sync-paths-validate.ts";
+import { collectTargetDirLegacyWarnings, validateSyncRoots } from "./sync-paths-validate.ts";
 import {
   decisionHasBlockedLocalMutation,
   mappingHasBlockedLocalMutation,
   mappingHasSymlinkedTargetPath,
   preflightDecisions,
+  validateParentReferenceTargets,
 } from "./sync-preflight.ts";
 import { retiredFlatMappingsBeforeLocalScan } from "./sync-retirement-flat.ts";
 import {
@@ -123,18 +131,179 @@ import {
 import {
   type DecisionContext,
   type FileDecision,
+  FORBIDDEN_TARGET_SYMLINK_PREFIX,
   STATE_FILE_NAME,
   SyncFailure,
   type SyncOptions,
   type SyncSummary,
 } from "./sync-types.ts";
+import { createGenericPathResolver, type ParentPathResolver } from "./transform.ts";
+import { isValidatedSyncRoots, type ValidatedSyncRoots } from "./validated-roots.ts";
+
+/**
+ * Merge per-machine mission cwd label evidence into the next state entry for
+ * one logical file. `nextMachineEvidence` is the evidence the entry must
+ * carry for `machineId` after this sync: the target scan's evidence when the
+ * target file exists (authoritative; an empty map resets stale labels), or
+ * the previously persisted machine evidence when the target file is missing
+ * (so a surviving local copy still re-encodes with its original label).
+ * Empty merged records are never written; the machine key is removed when
+ * the evidence disappears.
+ */
+function patchMissionEntryEvidence(
+  entry: StateEntry,
+  machineId: string,
+  nextMachineEvidence: Record<string, string> | undefined,
+): void {
+  const existing = entry.cwdEvidence;
+  const hasExistingKey = existing !== undefined && Object.hasOwn(existing, machineId);
+  if (nextMachineEvidence === undefined || Object.keys(nextMachineEvidence).length === 0) {
+    if (!hasExistingKey) return;
+    const copy: Record<string, Record<string, string>> = Object.create(null) as Record<
+      string,
+      Record<string, string>
+    >;
+    for (const [key, record] of Object.entries(existing ?? {})) {
+      if (key === machineId) continue;
+      Object.defineProperty(copy, key, {
+        value: record,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    if (Object.keys(copy).length === 0) delete entry.cwdEvidence;
+    else entry.cwdEvidence = copy;
+    return;
+  }
+  const record: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const [cwd, portableName] of Object.entries(nextMachineEvidence)) {
+    Object.defineProperty(record, cwd, {
+      value: portableName,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  const copy: Record<string, Record<string, string>> = Object.create(null) as Record<
+    string,
+    Record<string, string>
+  >;
+  for (const [key, recordValue] of Object.entries(existing ?? {})) {
+    Object.defineProperty(copy, key, {
+      value: recordValue,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(copy, machineId, {
+    value: record,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  entry.cwdEvidence = copy;
+}
 
 export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
+  return syncSessionsInternal(options, undefined);
+}
+
+/**
+ * Wait for the extension command's tunnel: the extension command calls
+ * `validateSyncRoots` exactly once (before any scan) and passes the validated
+ * root token back through this internal-only entry, so the orchestrator does
+ * not re-run the overlap checks after the command already created the target
+ * child directories (re-running would turn a forbidden source-root symlink
+ * race — the symlink resolving into a just-created target child — into a hard
+ * failure instead of the scanner's nonfatal blocked-source error).
+ *
+ * This function is not part of the public API: it is exported only through
+ * the internal `./sync-internal.ts` module for the extension command. The
+ * token cannot be forged: the brand and the complete validated tuple
+ * (sessionsRoot, targetDir, missionsRoot, logical and physical target roots)
+ * are verified against the supplied options before any trust is granted.
+ * Direct public `syncSessions` callers always re-validate the roots.
+ */
+export async function syncSessionsWithValidatedRoots(
+  options: SyncOptions,
+  validatedRoots: ValidatedSyncRoots,
+): Promise<SyncSummary> {
+  if (!isValidatedSyncRoots(validatedRoots)) {
+    throw new SyncFailure(
+      "Rejected fabricated validated-root token: roots must come from validateSyncRoots",
+      [],
+    );
+  }
+  const sessionsRoot = resolve(options.sessionsRoot);
+  const targetDir = resolve(options.targetDir);
+  const missionsRoot =
+    options.missionsRoot === undefined ? undefined : resolve(options.missionsRoot);
+  const rejectMismatch = (
+    field: string,
+    expected: string | undefined,
+    actual: string | undefined,
+  ): void => {
+    throw new SyncFailure(
+      `Validated roots do not match ${field} (${actual ?? "<none>"} vs ${expected}): ` +
+        `refusing to redirect a sync with roots validated for another target`,
+      [],
+    );
+  };
+  if (validatedRoots.sessionsRoot !== sessionsRoot) {
+    rejectMismatch("sessionsRoot", sessionsRoot, validatedRoots.sessionsRoot);
+  }
+  if (validatedRoots.targetRoot !== targetDir) {
+    rejectMismatch("targetDir", targetDir, validatedRoots.targetRoot);
+  }
+  if (validatedRoots.missionsRoot !== missionsRoot) {
+    rejectMismatch("missionsRoot", missionsRoot, validatedRoots.missionsRoot);
+  }
+  if (validatedRoots.sessionsTargetRoot !== resolve(targetDir, "sessions")) {
+    rejectMismatch(
+      "sessions target root",
+      resolve(targetDir, "sessions"),
+      validatedRoots.sessionsTargetRoot,
+    );
+  }
+  if (
+    validatedRoots.missionsTargetRoot !==
+    (missionsRoot === undefined ? undefined : resolve(targetDir, "missions"))
+  ) {
+    rejectMismatch(
+      "missions target root",
+      missionsRoot === undefined ? "<none>" : resolve(targetDir, "missions"),
+      validatedRoots.missionsTargetRoot,
+    );
+  }
+  let physicalTargetRoot: string;
+  try {
+    physicalTargetRoot = await realpath(targetDir);
+  } catch (error) {
+    throw new SyncFailure(`Cannot resolve targetDir ${targetDir}: ${errorMessage(error)}`, []);
+  }
+  if (physicalTargetRoot !== validatedRoots.physicalTargetRoot) {
+    rejectMismatch(
+      "physical target identity",
+      physicalTargetRoot,
+      validatedRoots.physicalTargetRoot,
+    );
+  }
+  return syncSessionsInternal(options, validatedRoots);
+}
+
+async function syncSessionsInternal(
+  options: SyncOptions,
+  trustedRoots: ValidatedSyncRoots | undefined,
+): Promise<SyncSummary> {
   if (options.now !== undefined && !Number.isFinite(options.now)) {
     throw new SyncFailure("Sync timestamp must be a finite number", []);
   }
   const sessionsRoot = resolve(options.sessionsRoot);
   const layout = options.layout ?? "nested";
+  const missionsRoot =
+    options.missionsRoot === undefined ? undefined : resolve(options.missionsRoot);
   const scopeKey = scopeKeyFor(layout, sessionsRoot);
   const machineScopeKey = machineScopeKeyFor(
     scopeKey,
@@ -143,6 +312,14 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
   const ctx: DecisionContext = {
     sessionsRoot,
     targetDir: resolve(options.targetDir),
+    // Physical identity is filled in after validateSyncRoots below; the
+    // lexical spelling is the safe placeholder before validation.
+    physicalTargetDir: resolve(options.targetDir),
+    sessionsTargetRoot: resolve(options.targetDir, "sessions"),
+    ...(missionsRoot === undefined ? {} : { missionsRoot }),
+    ...(missionsRoot === undefined
+      ? {}
+      : { missionsTargetRoot: resolve(options.targetDir, "missions") }),
     layout,
     machineId: machineScopeKey,
     activeSessionFile:
@@ -176,15 +353,38 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
       ...(options.extraPrefixes === undefined ? {} : { extraPrefixes: options.extraPrefixes }),
     }),
   };
-  const targetDir = await validateSyncRoots(ctx.sessionsRoot, ctx.targetDir);
+  const validatedRoots =
+    trustedRoots ?? (await validateSyncRoots(ctx.sessionsRoot, ctx.targetDir, missionsRoot));
+  const targetDir = validatedRoots.targetRoot;
+  ctx.physicalTargetDir = validatedRoots.physicalTargetRoot;
+  ctx.sessionsTargetRoot = validatedRoots.sessionsTargetRoot;
+  if (validatedRoots.missionsTargetRoot !== undefined) {
+    ctx.missionsTargetRoot = validatedRoots.missionsTargetRoot;
+  }
   validateActiveSessionOwnership(ctx);
+  const targetDirLegacyWarnings = await collectTargetDirLegacyWarnings(targetDir, STATE_FILE_NAME);
+  // Initialized before state load so hard errors during state validation or
+  // the early checks still report any warnings collected so far.
+  let accumulatedWarnings = [...targetDirLegacyWarnings];
   const statePath = join(targetDir, STATE_FILE_NAME);
   const loadedState = await loadState(statePath);
-  const hadState = loadedState !== null;
-  const state = loadedState ?? emptyState();
-  normalizeStateEntryKeys(state, ctx.namingOptions);
-  if (loadedState !== null) {
-    for (const [storedScopeKey, storedScope] of Object.entries(loadedState.scopes)) {
+  const hadState = loadedState.kind !== "none";
+  // Recognized OLD state is ignored without migration or deletion: the sync
+  // continues with an empty in-memory state, and the commit phase must NOT
+  // replace the old manifest bytes on disk (silently discarding unknown
+  // content would make recovery impossible and would masquerade as an
+  // implicit migration). Current-state files always commit normally.
+  const preserveOldStateManifest = loadedState.kind === "old";
+  const stateWarnings = [
+    ...(loadedState.kind === "old" ? loadedState.warnings : []),
+    ...targetDirLegacyWarnings,
+  ];
+  accumulatedWarnings = [...stateWarnings];
+  const state = loadedState.kind === "valid" ? loadedState.state : emptyState();
+  if (loadedState.kind === "valid") {
+    const validState = loadedState.state;
+    normalizeStateEntryKeys(state, ctx.namingOptions);
+    for (const [storedScopeKey, storedScope] of Object.entries(validState.scopes)) {
       if (!namingConfigMatches(storedScope.namingConfig, ctx.namingOptions)) {
         throw new SyncFailure(
           `Naming configuration mismatch in state scope: ${storedScopeKey}`,
@@ -200,9 +400,9 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     }
   }
   const stateScope =
-    loadedState === null
+    loadedState.kind !== "valid"
       ? emptyScope(layout, sessionsRoot, ctx.namingOptions)
-      : (Object.entries(loadedState.scopes).find(([storedKey]) =>
+      : (Object.entries(loadedState.state.scopes).find(([storedKey]) =>
           sameScopeKey(storedKey, scopeKey),
         )?.[1] ?? emptyScope(layout, sessionsRoot, ctx.namingOptions));
   normalizeStateScopePortableNames(stateScope, ctx.namingOptions);
@@ -265,6 +465,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     // make a same-path old/new mapping ambiguous or poison parentSession
     // lookup while a current NEW mapping stays fully usable.
     for (const [key, entry] of Object.entries(state.entries)) {
+      if (key.startsWith("missions/")) continue;
       if (entry.tombstone === null && entry.target !== null) continue;
       try {
         const parsed = parseLogicalKey(key, ctx.namingOptions);
@@ -285,6 +486,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
   // their evidence for normal recovery or explicit conflict handling.
   const tombstonedFiles = new Map<string, TombstonedFileStatus>();
   for (const [key, entry] of Object.entries(state.entries)) {
+    if (key.startsWith("missions/")) continue;
     if (entry.tombstone === null) continue;
     try {
       tombstonedFiles.set(canonicalStateLogicalKey(key, ctx.namingOptions), {
@@ -307,7 +509,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
       ctx.layout,
       ctx.sessionsRoot,
       ctx.namingOptions,
-      { lookupExclusions: staleFlatExactMappings },
+      {
+        lookupExclusions: staleFlatExactMappings,
+        ...(missionsRoot === undefined ? {} : { missionsRoot }),
+        forbiddenSymlinkTarget: ctx.physicalTargetDir,
+      },
     );
   } catch (error) {
     initialLocalError = error;
@@ -332,7 +538,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
         ctx.layout,
         ctx.sessionsRoot,
         ctx.namingOptions,
-        { lookupExclusions: staleFlatExactMappings },
+        {
+          lookupExclusions: staleFlatExactMappings,
+          ...(missionsRoot === undefined ? {} : { missionsRoot }),
+          forbiddenSymlinkTarget: ctx.physicalTargetDir,
+        },
       );
       initialLocalError = undefined;
     } catch {
@@ -364,7 +574,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
         ctx.layout,
         ctx.sessionsRoot,
         ctx.namingOptions,
-        { lookupExclusions: staleFlatExactMappings },
+        {
+          lookupExclusions: staleFlatExactMappings,
+          ...(missionsRoot === undefined ? {} : { missionsRoot }),
+          forbiddenSymlinkTarget: ctx.physicalTargetDir,
+        },
       );
       initialLocalError = undefined;
     } catch {
@@ -375,9 +589,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     initialLocalScan === undefined && initialLocalError instanceof ScanFailure
       ? initialLocalError.partialResult
       : undefined;
-  const initialLocalWarnings =
-    initialLocalScan?.warnings ??
-    (initialLocalError instanceof ScanFailure ? initialLocalError.warnings : []);
+  const initialLocalWarnings = [
+    ...stateWarnings,
+    ...(initialLocalScan?.warnings ??
+      (initialLocalError instanceof ScanFailure ? initialLocalError.warnings : [])),
+  ];
   if (ctx.layout === "nested" && initialLocalScan !== undefined) {
     // Initial scan still reflects pre-adoption local mappings. Fill only
     // directories absent from persisted historical state; never overwrite an
@@ -490,7 +706,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     const targetLookupExtraMappings =
       ctx.layout === "nested" ? targetScanNestedExtraMappings : mergedTargetExtraMappings;
     targetScan = await scanSessions(
-      targetDir,
+      ctx.sessionsTargetRoot,
       "target",
       stateScope,
       STATE_FILE_NAME,
@@ -499,6 +715,8 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
       ctx.namingOptions,
       {
         lookupExclusions: staleFlatExactMappings,
+        ...(missionsRoot === undefined ? {} : { missionsRoot }),
+        forbiddenSymlinkTarget: ctx.physicalTargetDir,
         ...(targetLookupExtraMappings === undefined
           ? {}
           : { lookupExtraMappings: targetLookupExtraMappings }),
@@ -519,16 +737,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     ]);
   }
   // Record each existing target root's physical on-disk directory name per
-  // strict portable identity, including alias roots that are not usable
-  // directories (symlinks, non-directories) but decode as valid portable
-  // names. Logical keys are strict, but reads, copies, deletions, and
-  // empty-directory cleanup must address the physical (possibly legacy
-  // loose) path so no strict-named duplicate tree is ever created next to a
-  // legacy tree or legacy symlink; only brand-new trees use the strict
-  // spelling. Multiple physical roots (any accepted spellings, directory or
-  // alias) sharing one identity are an ambiguous mapping collision: reject
-  // before any decision or write instead of silently choosing one spelling
-  // or creating twin trees.
+  // strict portable identity. Logical keys are strict, and every accepted
+  // target tree is a canonical strict spelling, so reads, copies, deletions,
+  // and empty-directory cleanup always address the strict path. Multiple
+  // accepted roots sharing one identity are an ambiguous mapping collision:
+  // reject before any decision or write instead of creating twin trees.
   const physicalRootNames = new Map<string, string>();
   for (const tree of targetScan.trees) {
     const identity = portableNameKeyIdentity(tree.portableName, ctx.namingOptions);
@@ -541,22 +754,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
     }
     physicalRootNames.set(identity, tree.rootName);
   }
-  for (const alias of targetScan.rootAliases) {
-    const identity = portableNameKeyIdentity(alias.portableName, ctx.namingOptions);
-    const existing = physicalRootNames.get(identity);
-    if (existing !== undefined && existing !== alias.rootName) {
-      throw new SyncFailure(
-        `Conflicting target session directories for one portable identity: ${existing} and ${alias.rootName}`,
-        [...initialLocalWarnings, ...targetScan.warnings],
-      );
-    }
-    physicalRootNames.set(identity, alias.rootName);
-  }
   for (const [identity, rootName] of physicalRootNames) {
     ctx.targetPhysicalPortableNames.set(identity, rootName);
   }
   const scanWarnings = [...new Set([...initialLocalWarnings, ...targetScan.warnings])];
-  let accumulatedWarnings = scanWarnings;
+  accumulatedWarnings = scanWarnings;
   // Live target tree mappings for nested layouts, computed once after
   // stale/replacement classification and reused by the local scan prep below.
   let liveTargetTreeMappingsForDecisions = new Map<string, string>();
@@ -1191,7 +1393,11 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           ctx.layout,
           ctx.sessionsRoot,
           ctx.namingOptions,
-          { lookupExclusions: staleFlatExactMappings },
+          {
+            lookupExclusions: staleFlatExactMappings,
+            ...(missionsRoot === undefined ? {} : { missionsRoot }),
+            forbiddenSymlinkTarget: ctx.physicalTargetDir,
+          },
         );
       } catch (error) {
         if (error instanceof SyncFailure) throw error;
@@ -1270,7 +1476,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
         ctx.layout === "nested" ? refreshedNestedExtraMappings : refreshedExtraMappings;
       try {
         targetScan = await scanSessions(
-          targetDir,
+          ctx.sessionsTargetRoot,
           "target",
           stateScope,
           STATE_FILE_NAME,
@@ -1279,6 +1485,8 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           ctx.namingOptions,
           {
             lookupExclusions: staleFlatExactMappings,
+            ...(missionsRoot === undefined ? {} : { missionsRoot }),
+            forbiddenSymlinkTarget: ctx.physicalTargetDir,
             ...(refreshedLookupExtraMappings === undefined
               ? {}
               : { lookupExtraMappings: refreshedLookupExtraMappings }),
@@ -1408,7 +1616,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
             ]);
       try {
         targetScan = await scanSessions(
-          targetDir,
+          ctx.sessionsTargetRoot,
           "target",
           stateScope,
           STATE_FILE_NAME,
@@ -1417,6 +1625,8 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           ctx.namingOptions,
           {
             lookupExclusions: supersededExclusions,
+            ...(missionsRoot === undefined ? {} : { missionsRoot }),
+            forbiddenSymlinkTarget: ctx.physicalTargetDir,
             ...(supersededLookupExtraMappings === undefined
               ? {}
               : { lookupExtraMappings: supersededLookupExtraMappings }),
@@ -1478,7 +1688,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
       );
     }
     const allKeys = new Set<string>([
-      ...Object.keys(state.entries),
+      ...Object.keys(state.entries).filter((key) => !key.startsWith("missions/")),
       ...localScan.files.keys(),
       ...targetScan.files.keys(),
     ]);
@@ -1693,12 +1903,13 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           if (previousEntry !== undefined) nextEntries[key] = previousEntry;
           continue;
         }
-        const localPath = localPathForKey(ctx, key);
         const targetPath = targetPathForKey(ctx, key);
-        if (
-          (await pathHasSymlink(ctx.sessionsRoot, localPath)) ||
-          (await pathHasSymlink(ctx.targetDir, targetPath))
-        ) {
+        // Local source roots follow symlinks (root and internal), so a local
+        // logical path through a symlink is not a decision-time block: the
+        // scan already followed it and the per-action preflight checks below
+        // still block local WRITES through symlinks. Only the target side
+        // stays strict here.
+        if (await pathHasSymlink(ctx.sessionsTargetRoot, targetPath)) {
           warnings.push(`Skipped logical path through symlink: ${key}`);
           if (ctx.layout === "nested") {
             // A migration-only replacement group must treat a decision-time
@@ -1819,6 +2030,10 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
       // Replacement parentSession directory mappings are applied to the state
       // scope only AFTER preflight: a symlink-blocked logical replacement
       // group must leave the state directory mapping bytes untouched.
+      // Local→target parentSession references must name parent session FILES:
+      // a sessions-directory URI or an existing non-regular referenced target
+      // is a file error that stops the sync before any staging or write.
+      await validateParentReferenceTargets(localScan.files, ctx);
       const { blockedCopies, blockedDeletes, blockedReplacementPortableNames, refreshSessionFile } =
         await preflightDecisions(
           decisions,
@@ -2042,6 +2257,333 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           setRecordValueForNativeName(directories, localName, portableName);
         }
       }
+      // ===== Missions tree =====
+      const missionDecisions: FileDecision[] = [];
+      const missionBlockedCopies = new Set<FileDecision["copies"][number]>();
+      const missionBlockedDeletes = new Set<FileDecision["deletes"][number]>();
+      const missionScannedFiles: { local: number; target: number } = {
+        local: 0,
+        target: 0,
+      };
+      if (ctx.missionsRoot !== undefined && ctx.missionsTargetRoot !== undefined) {
+        const missionSessionMappings = new Map<string, string>();
+        // Names contributed only by the persisted-scope fallback below. They
+        // participate in exact session lookups (so mission-evidenced parent
+        // mappings keep working) but NEVER in flat containing-directory
+        // inference: a stale retired membership must not make a current live
+        // directory ambiguous or override its mapping.
+        const missionFallbackMappings = new Set<string>();
+        const addMissionMappingTo = (
+          mappings: Map<string, string>,
+        ): ((localName: string, portableName: string) => void) => {
+          const add = (localName: string, portableName: string): void => {
+            if (portableName.length === 0) return;
+            const existing = mappingForNativeName(mappings, localName);
+            if (existing === undefined) {
+              mappings.set(localName, portableName);
+              return;
+            }
+            if (!nativeCompatiblePortableMappings(existing, portableName, ctx.namingOptions)) {
+              throw new SyncFailure(
+                `Conflicting mission session mapping for ${localName}: ${existing} and ${portableName}`,
+                warnings,
+              );
+            }
+          };
+          return add;
+        };
+        const addMissionMapping = addMissionMappingTo(missionSessionMappings);
+        // Current LIVE local/target mappings seed first: they are authoritative
+        // for the resolver this sync uses. Retained (non-retired) persisted
+        // mappings from the next-state scope then fill in parent-only evidence
+        // that has no live file; stale/retired persisted mappings never
+        // override a current live mapping and never silently win by being
+        // seeded first. Incompatible labels always error instead of silently
+        // first-wins.
+        for (const [localName, mapping] of localScan.localMappings) {
+          addMissionMapping(localName, mapping.portableName);
+        }
+        for (const [localName, mapping] of localScan.flatMappings) {
+          addMissionMapping(localName, mapping.portableName);
+        }
+        for (const [localName, mapping] of targetScan.flatMappings) {
+          addMissionMapping(localName, mapping.portableName);
+        }
+        for (const [localName, mapping] of targetScan.flatParentMappings) {
+          addMissionMapping(localName, mapping.portableName);
+        }
+        for (const tree of targetScan.trees) {
+          addMissionMapping(defaultSessionDirName(tree.cwd), tree.portableName);
+        }
+        for (const [localName, mapping] of targetScan.parentDirectoryMappings) {
+          addMissionMapping(localName, mapping.portableName);
+        }
+        for (const [localName, portableName] of Object.entries(directories)) {
+          addMissionMapping(localName, portableName);
+        }
+        for (const [localName, portableName] of Object.entries(flatFiles)) {
+          addMissionMapping(localName, portableName);
+        }
+        // Mission-derived parent-only mappings legitimately outlive the
+        // tree-only retirement decision: previous mission content keeps
+        // referencing a session file that has no local/target tree this
+        // pass. Seed the persisted scope as a final fallback for names no
+        // live or next-state mapping already claimed; live mappings seeded
+        // above always take precedence, and incompatible labels error
+        // instead of silently first-wins. Fallback names stay out of
+        // directory-inference membership counting.
+        for (const [localName, portableName] of Object.entries(stateScope.directories)) {
+          if (mappingForNativeName(missionSessionMappings, localName) === undefined) {
+            missionFallbackMappings.add(localName);
+          }
+          addMissionMapping(localName, portableName);
+        }
+        for (const [localName, portableName] of Object.entries(stateScope.flatFiles)) {
+          if (mappingForNativeName(missionSessionMappings, localName) === undefined) {
+            missionFallbackMappings.add(localName);
+          }
+          addMissionMapping(localName, portableName);
+        }
+        const missionSessionLookup = (localKey: string): { portableName: string } | undefined => {
+          const name = mappingForNativeName(missionSessionMappings, localKey);
+          if (name !== undefined) return { portableName: name };
+          if (ctx.layout !== "flat") return undefined;
+          // Flat containing-directory inference: a flat session FILE mapping
+          // (`foo/known.jsonl`) owns its containing directory, so a referenced
+          // path inside that directory — including the directory itself and
+          // deeper missing paths — with no exact mapping still rewrites to the
+          // same session's portable URI. Ambiguous directories (members
+          // mapping to different labels) never guess — the reference stays a
+          // strict unmapped error in the local→target direction. Fallback
+          // (retired persisted) membership never counts toward inference.
+          let directory = localKey;
+          for (;;) {
+            const directoryIdentity = nativeNameIdentity(directory);
+            let portable: string | undefined;
+            let ambiguous = false;
+            for (const [candidate, candidatePortable] of missionSessionMappings) {
+              if (missionFallbackMappings.has(candidate)) continue;
+              const candidateSlash = candidate.lastIndexOf("/");
+              const candidateDirectory =
+                candidateSlash < 0 ? "" : candidate.slice(0, candidateSlash);
+              if (nativeNameIdentity(candidateDirectory) !== directoryIdentity) continue;
+              if (portable === undefined) portable = candidatePortable;
+              else if (portable !== candidatePortable) ambiguous = true;
+            }
+            if (portable !== undefined && !ambiguous) return { portableName: portable };
+            const slash = directory.lastIndexOf("/");
+            if (slash < 0) break;
+            directory = directory.slice(0, slash);
+          }
+          return undefined;
+        };
+        const makeMissionsResolver = (): ParentPathResolver =>
+          createGenericPathResolver(
+            ctx.sessionsRoot,
+            ctx.missionsRoot,
+            missionSessionLookup,
+            ctx.layout,
+            ctx.namingOptions,
+          );
+        // Pass one: scan both trees with the seeded mappings. Missions content
+        // may reference session files that never exist locally (parent-only
+        // evidence); the target copy carries the portable URI spelling, which
+        // the target scan records even when the referenced file is absent.
+        const missionPassOneResolver = makeMissionsResolver();
+        const firstMissionLocalScan = await scanMissionsTree(
+          ctx.missionsRoot,
+          "local",
+          ctx.namingOptions,
+          missionPassOneResolver,
+          true,
+          ctx.physicalTargetDir,
+        );
+        const missionTargetScan = await scanMissionsTree(
+          ctx.missionsTargetRoot,
+          "target",
+          ctx.namingOptions,
+          missionPassOneResolver,
+          false,
+          ctx.physicalTargetDir,
+        );
+        // Derive parent-only session directory mappings from the scanned
+        // mission content on BOTH sides and seed them back into the resolver.
+        // Re-scan the local missions tree so local absolute spellings of
+        // those sessions files rewrite to portable URIs on this very sync;
+        // the target copy already carries the portable spelling.
+        const missionPassOneMappings = missionMappingsFromScans(
+          firstMissionLocalScan,
+          missionTargetScan,
+          ctx,
+        );
+        for (const [localName, portableName] of missionPassOneMappings) {
+          // Current scan evidence supersedes the persisted fallback: once the
+          // mapping was live-derived, it participates in directory inference
+          // like any other live membership.
+          missionFallbackMappings.delete(localName);
+          addMissionMapping(localName, portableName);
+        }
+        // Mission cwd label evidence: the TARGET scan is the authoritative
+        // source of the semantic portable labels mission cwd values must
+        // keep across round-trips. When the current target file carries no
+        // decodable cwd (or is missing), this machine's PERSISTED evidence is
+        // the fallback so a surviving local copy still re-encodes with its
+        // original label. The merged evidence feeds the final local→target
+        // scan below.
+        const missionPersistedCwdEvidence: Record<string, Record<string, string>> = Object.create(
+          null,
+        ) as Record<string, Record<string, string>>;
+        for (const key of Object.keys(state.entries).filter(isMissionsKey)) {
+          const persisted = stateEntryForKey(state, key, ctx.namingOptions)?.cwdEvidence?.[
+            ctx.machineId
+          ];
+          if (persisted === undefined || Object.keys(persisted).length === 0) continue;
+          const record: Record<string, string> = Object.create(null) as Record<string, string>;
+          for (const [cwd, portableName] of Object.entries(persisted)) {
+            Object.defineProperty(record, cwd, {
+              value: portableName,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            });
+          }
+          Object.defineProperty(missionPersistedCwdEvidence, key, {
+            value: record,
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+        }
+        const missionTargetCwdEvidence = missionTargetScan.cwdEvidence;
+        const missionEvidenceByKey = new Map<string, Readonly<Record<string, string>>>();
+        for (const key of new Set([
+          ...missionTargetCwdEvidence.keys(),
+          ...Object.keys(missionPersistedCwdEvidence),
+        ])) {
+          const targetRecord = missionTargetCwdEvidence.get(key);
+          const persistedRecord = missionPersistedCwdEvidence[key];
+          if (targetRecord !== undefined && Object.keys(targetRecord).length > 0) {
+            missionEvidenceByKey.set(key, targetRecord);
+          } else if (persistedRecord !== undefined) {
+            missionEvidenceByKey.set(key, persistedRecord);
+          }
+        }
+        const missionLocalScan =
+          missionSessionMappings.size === 0 &&
+          missionPassOneMappings.size === 0 &&
+          missionEvidenceByKey.size === 0
+            ? firstMissionLocalScan
+            : await scanMissionsTree(
+                ctx.missionsRoot,
+                "local",
+                ctx.namingOptions,
+                makeMissionsResolver(),
+                true,
+                ctx.physicalTargetDir,
+                missionEvidenceByKey,
+              );
+        if (!missionLocalScan.rootPresent) {
+          warnings.push(`Ignored missing local missions root: ${ctx.missionsRoot}`);
+        }
+        warnings.push(...missionLocalScan.warnings, ...missionTargetScan.warnings);
+        // Local mission parentSession values follow the same parent-file
+        // contract as local sessions files: after the scan's to-target
+        // conversion, a raw absolute spelling or a sync URI naming an existing
+        // directory/non-regular target must stop the sync before preflight,
+        // staging, or any write.
+        await validateParentReferenceTargets(missionLocalScan.files, ctx);
+        const missionStateKeys = Object.keys(state.entries).filter(isMissionsKey);
+        const missionAllKeys = new Set<string>([
+          ...missionStateKeys,
+          ...missionLocalScan.files.keys(),
+          ...missionTargetScan.files.keys(),
+        ]);
+        for (const key of [...missionAllKeys].sort()) {
+          const local = missionLocalScan.files.get(key);
+          const target = missionTargetScan.files.get(key);
+          const previousEntry = stateEntryForKey(state, key, ctx.namingOptions);
+          const decision = resolveMissionsEntry(key, local, target, ctx, previousEntry);
+          if (decision === undefined) continue;
+          if (decision.nextEntry !== undefined) {
+            // Persist the current-machine cwd label evidence into the next
+            // state entry: the TARGET file's labels when it exists this sync
+            // (authoritative; an empty record resets stale labels), otherwise
+            // this machine's previously persisted labels so a surviving local
+            // copy still re-encodes with its original semantic label.
+            const targetEvidence = missionTargetCwdEvidence.get(key);
+            const persistedEvidence = previousEntry?.cwdEvidence?.[ctx.machineId];
+            const nextMachineEvidence =
+              targetEvidence !== undefined
+                ? Object.keys(targetEvidence).length > 0
+                  ? targetEvidence
+                  : undefined
+                : persistedEvidence !== undefined && Object.keys(persistedEvidence).length > 0
+                  ? persistedEvidence
+                  : undefined;
+            patchMissionEntryEvidence(decision.nextEntry, ctx.machineId, nextMachineEvidence);
+          }
+          missionDecisions.push(decision);
+          if (decision.nextEntry !== undefined) nextEntries[key] = decision.nextEntry;
+        }
+        missionScannedFiles.local = missionLocalScan.files.size;
+        missionScannedFiles.target = missionTargetScan.files.size;
+        const missionPreflight = await preflightMissions(
+          missionDecisions,
+          ctx,
+          missionLocalScan.files,
+          missionTargetScan.files,
+          nextEntries,
+          warnings,
+        );
+        for (const action of missionPreflight.blockedCopies) missionBlockedCopies.add(action);
+        for (const action of missionPreflight.blockedDeletes) missionBlockedDeletes.add(action);
+        // Missions content is portable evidence for parent-only session
+        // directories: persist the derived mappings into the next state scope
+        // so repeated target↔local syncs keep rewriting the referenced session
+        // files as portable URIs even when the referenced file never exists.
+        // Evidence is filtered by the FINAL mission decisions: a mission file
+        // deleted on its own side must not seed a persistent mapping, and both
+        // the local and target scans contribute surviving references.
+        const missionDecisionMap = new Map(
+          missionDecisions.map((decision) => [decision.key, decision]),
+        );
+        const missionPersistedMappings = missionMappingsFromScans(
+          missionLocalScan,
+          missionTargetScan,
+          ctx,
+          missionDecisionMap,
+          missionBlockedDeletes,
+        );
+        if (ctx.layout === "nested") {
+          for (const [localName, portableName] of missionPersistedMappings) {
+            const existing = recordValueForNativeName(directories, localName);
+            if (existing === undefined) {
+              setRecordValueForNativeName(directories, localName, portableName);
+            } else if (
+              !nativeCompatiblePortableMappings(existing, portableName, ctx.namingOptions)
+            ) {
+              throw new SyncFailure(
+                `Conflicting mission session mapping for ${localName}: ${existing} and ${portableName}`,
+                warnings,
+              );
+            }
+          }
+        } else {
+          for (const [localName, portableName] of missionPersistedMappings) {
+            const existing = recordValueForNativeName(flatFiles, localName);
+            if (existing === undefined) {
+              setRecordValueForNativeName(flatFiles, localName, portableName);
+            } else if (
+              !nativeCompatiblePortableMappings(existing, portableName, ctx.namingOptions)
+            ) {
+              throw new SyncFailure(
+                `Conflicting mission session mapping for ${localName}: ${existing} and ${portableName}`,
+                warnings,
+              );
+            }
+          }
+        }
+      }
       const nextScope: StateScope = {
         layout: ctx.layout,
         sessionsRoot: ctx.sessionsRoot,
@@ -2150,11 +2692,12 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
       const stageRoot = await mkdtemp(join(tmpdir(), "pi-session-sync-"));
       let copied = 0;
       let deleted = 0;
+      const commitAll = [...commitDecisions, ...missionDecisions];
       try {
         let copyIndex = 0;
-        for (const decision of commitDecisions) {
+        for (const decision of commitAll) {
           for (const action of decision.copies) {
-            if (blockedCopies.has(action)) continue;
+            if (blockedCopies.has(action) || missionBlockedCopies.has(action)) continue;
             if (action.stagedPath !== undefined) continue;
             await stageCopy(action, stageRoot, copyIndex++);
           }
@@ -2164,27 +2707,37 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
           encoding: "utf8",
           mode: 0o600,
         });
-        for (const decision of commitDecisions) {
+        for (const decision of commitAll) {
           for (const action of decision.copies) {
+            if (blockedCopies.has(action) || missionBlockedCopies.has(action)) continue;
             if (action.stagedPath === undefined) continue;
             await commitCopy(action);
             copied += 1;
           }
           for (const action of decision.deletes) {
-            if (blockedDeletes.has(action)) continue;
+            if (blockedDeletes.has(action) || missionBlockedDeletes.has(action)) continue;
             await commitDelete(action);
             deleted += 1;
           }
         }
-        await rm(statePath, { force: true });
-        await moveStagedFile(stagedStatePath, statePath);
+        if (!preserveOldStateManifest) {
+          await rm(statePath, { force: true });
+          await moveStagedFile(stagedStatePath, statePath);
+        }
 
-        const cleanupNeeded = decisions.some(
-          (decision) =>
-            decision.deletes.some((action) => !blockedDeletes.has(action)) ||
-            (decision.nextEntry?.tombstone !== null &&
-              nextEntries[decision.key] === decision.nextEntry),
-        );
+        const cleanupNeeded =
+          decisions.some(
+            (decision) =>
+              decision.deletes.some((action) => !blockedDeletes.has(action)) ||
+              (decision.nextEntry?.tombstone !== null &&
+                nextEntries[decision.key] === decision.nextEntry),
+          ) ||
+          missionDecisions.some(
+            (decision) =>
+              decision.deletes.some((action) => !missionBlockedDeletes.has(action)) ||
+              (decision.nextEntry?.tombstone !== null &&
+                nextEntries[decision.key] === decision.nextEntry),
+          );
         if (cleanupNeeded) {
           const directoriesToClean = new Set<string>([
             ...localScan.knownDirectories,
@@ -2195,7 +2748,7 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
               if (blockedDeletes.has(action)) continue;
               addCleanupPath(
                 action.path,
-                action.side === "local" ? ctx.sessionsRoot : ctx.targetDir,
+                action.side === "local" ? ctx.sessionsRoot : ctx.sessionsTargetRoot,
                 ctx.layout,
                 directoriesToClean,
               );
@@ -2212,8 +2765,21 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
               );
               addCleanupPath(
                 targetPathForKey(ctx, decision.key),
-                ctx.targetDir,
+                ctx.sessionsTargetRoot,
                 "nested",
+                directoriesToClean,
+              );
+            }
+          }
+          for (const decision of missionDecisions) {
+            for (const action of decision.deletes) {
+              if (missionBlockedDeletes.has(action)) continue;
+              addCleanupPath(
+                action.path,
+                action.side === "local"
+                  ? (ctx.missionsRoot ?? action.path)
+                  : (ctx.missionsTargetRoot ?? action.path),
+                "flat",
                 directoriesToClean,
               );
             }
@@ -2224,10 +2790,27 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
             protectedLocalDirectories.add(resolve(activeSessionDir));
           }
           for (const directory of [...directoriesToClean].sort((a, b) => b.length - a.length)) {
-            const root = sameOrInside(ctx.sessionsRoot, directory)
-              ? ctx.sessionsRoot
-              : ctx.targetDir;
-            if (await pathHasSymlink(root, directory)) continue;
+            let root: string | undefined;
+            if (sameOrInside(ctx.sessionsRoot, directory)) root = ctx.sessionsRoot;
+            else if (ctx.missionsRoot !== undefined && sameOrInside(ctx.missionsRoot, directory)) {
+              root = ctx.missionsRoot;
+            } else if (sameOrInside(ctx.sessionsTargetRoot, directory)) {
+              root = ctx.sessionsTargetRoot;
+            } else if (
+              ctx.missionsTargetRoot !== undefined &&
+              sameOrInside(ctx.missionsTargetRoot, directory)
+            ) {
+              root = ctx.missionsTargetRoot;
+            }
+            if (root === undefined) continue;
+            if (
+              await pathHasSymlink(
+                root,
+                directory,
+                sameOrInside(ctx.sessionsRoot, directory) ? "root-only" : "strict",
+              )
+            )
+              continue;
             await removeEmptyDirectories(
               directory,
               directoriesToClean,
@@ -2239,11 +2822,25 @@ export async function syncSessions(options: SyncOptions): Promise<SyncSummary> {
         await rm(stageRoot, { recursive: true, force: true });
       }
 
+      // Nonfatal security errors (forbidden source symlinks into targetDir)
+      // are reported separately from warnings: the sync continues with the
+      // safe files, but the host must surface these as explicit errors.
+      const syncErrors = warnings.filter((message) =>
+        message.startsWith(FORBIDDEN_TARGET_SYMLINK_PREFIX),
+      );
+      const nonErrorWarnings = warnings.filter(
+        (message) => !message.startsWith(FORBIDDEN_TARGET_SYMLINK_PREFIX),
+      );
       const summary = {
         copied,
         deleted,
-        filesScanned: localScan.files.size + targetScan.files.size,
-        warnings,
+        filesScanned:
+          localScan.files.size +
+          targetScan.files.size +
+          missionScannedFiles.local +
+          missionScannedFiles.target,
+        warnings: nonErrorWarnings,
+        errors: syncErrors,
         statePath,
       };
       if (refreshSessionFile === undefined) return summary;

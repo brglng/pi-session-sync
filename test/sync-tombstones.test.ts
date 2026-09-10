@@ -19,9 +19,9 @@ describe("bidirectional session sync tombstones", () => {
       const localTree = join(fixture.sessionsRoot, defaultSessionDirName(localCwd));
       const targetPortable = portableSessionDirName(targetCwd);
       await mkdir(localTree, { recursive: true });
-      await mkdir(join(fixture.targetDir, targetPortable));
+      await mkdir(join(fixture.targetDir, "sessions", targetPortable));
       const localFile = join(localTree, "local.jsonl");
-      const targetFile = join(fixture.targetDir, targetPortable, "target.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", targetPortable, "target.jsonl");
       await writeFile(localFile, `${JSON.stringify({ cwd: localCwd })}\n`);
       await writeFile(
         targetFile,
@@ -52,14 +52,14 @@ describe("bidirectional session sync tombstones", () => {
       await mkdir(flatRoot);
       const portableA = portableSessionDirName(join(fixture.root, "project-a"));
       const portableB = portableSessionDirName(join(fixture.root, "project-b"));
-      await mkdir(join(fixture.targetDir, portableA));
-      await mkdir(join(fixture.targetDir, portableB));
+      await mkdir(join(fixture.targetDir, "sessions", portableA));
+      await mkdir(join(fixture.targetDir, "sessions", portableB));
       await writeFile(
-        join(fixture.targetDir, portableA, "same.jsonl"),
+        join(fixture.targetDir, "sessions", portableA, "same.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${portableA}` })}\n`,
       );
       await writeFile(
-        join(fixture.targetDir, portableB, "same.jsonl"),
+        join(fixture.targetDir, "sessions", portableB, "same.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${portableB}` })}\n`,
       );
       await expect(
@@ -86,13 +86,16 @@ describe("bidirectional session sync tombstones", () => {
       await mkdir(flatRoot);
       const portableA = portableSessionDirName(cwdA);
       const portableB = portableSessionDirName(cwdB);
-      await mkdir(join(fixture.targetDir, portableA));
-      await mkdir(join(fixture.targetDir, portableB, "foo.jsonl"), { recursive: true });
+      await mkdir(join(fixture.targetDir, "sessions", portableA));
+      await mkdir(join(fixture.targetDir, "sessions", portableB, "foo.jsonl"), { recursive: true });
       await writeFile(
-        join(fixture.targetDir, portableA, "foo.jsonl"),
+        join(fixture.targetDir, "sessions", portableA, "foo.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${portableA}` })}\n`,
       );
-      await writeFile(join(fixture.targetDir, portableB, "foo.jsonl", "child.md"), "child\n");
+      await writeFile(
+        join(fixture.targetDir, "sessions", portableB, "foo.jsonl", "child.md"),
+        "child\n",
+      );
       await expect(
         syncSessions({
           sessionsRoot: flatRoot,
@@ -112,7 +115,7 @@ describe("bidirectional session sync tombstones", () => {
     const fixture = await makeFixture();
     try {
       const source = join(fixture.localTree, "same.md");
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(targetTree, { recursive: true });
       await writeFile(join(targetTree, "SAME.MD"), "unknown\n");
       await writeFile(source, `---\ncwd: ${fixture.cwd}\n---\nsource\n`);
@@ -135,7 +138,7 @@ describe("bidirectional session sync tombstones", () => {
     const fixture = await makeFixture();
     try {
       const source = join(fixture.localTree, "nested", "same.md");
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(join(fixture.localTree, "nested"), { recursive: true });
       await mkdir(join(targetTree, "NESTED"), { recursive: true });
       await writeFile(source, `---\ncwd: ${fixture.cwd}\n---\nsource\n`);
@@ -159,7 +162,7 @@ describe("bidirectional session sync tombstones", () => {
     try {
       const source = join(fixture.localTree, "same.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(join(targetTree, "same.jsonl"), { recursive: true });
       await expect(
         syncSessions({
@@ -218,8 +221,9 @@ describe("bidirectional session sync tombstones", () => {
       });
       const secondPortable = portableSessionDirName(secondCwd);
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, secondPortable, relativePath), "utf8"))
-          .cwd,
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", secondPortable, relativePath), "utf8"),
+        ).cwd,
       ).toBe(`pi-session-sync://${secondPortable}`);
     } finally {
       await cleanup(fixture.root);
@@ -264,7 +268,7 @@ describe("bidirectional session sync tombstones", () => {
       await rm(fileA);
 
       const secondPortable = portableSessionDirName(secondCwd);
-      const targetFile = join(fixture.targetDir, secondPortable, relativePath);
+      const targetFile = join(fixture.targetDir, "sessions", secondPortable, relativePath);
       await mkdir(dirname(targetFile), { recursive: true });
       await writeFile(
         targetFile,
@@ -316,8 +320,8 @@ describe("bidirectional session sync tombstones", () => {
 
       const oldPortable = portableSessionDirName(oldCwd);
       const newPortable = portableSessionDirName(newCwd);
-      const oldTargetFile = join(fixture.targetDir, oldPortable, relativePath);
-      const newTargetFile = join(fixture.targetDir, newPortable, relativePath);
+      const oldTargetFile = join(fixture.targetDir, "sessions", oldPortable, relativePath);
+      const newTargetFile = join(fixture.targetDir, "sessions", newPortable, relativePath);
       await mkdir(dirname(oldTargetFile), { recursive: true });
       await mkdir(dirname(newTargetFile), { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd: oldCwd, value: "stale-old" })}\n`);
@@ -360,7 +364,7 @@ describe("bidirectional session sync tombstones", () => {
         targetDir: fixture.targetDir,
         now: 71_500,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await rm(targetFile);
       await mkdir(targetFile);
       await expect(
@@ -395,7 +399,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "manual-delete-a",
         now: 2_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await rm(targetFile);
       await writeFile(fileB, `${JSON.stringify({ cwd: fixture.cwd, value: "old" })}\n`);
       await utimes(fileB, 1, 1);
@@ -449,7 +453,12 @@ describe("bidirectional session sync tombstones", () => {
           now: 2_000,
         });
 
-        const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+        const targetFile = join(
+          fixture.targetDir,
+          "sessions",
+          fixture.portableName,
+          "session.jsonl",
+        );
         await rm(targetFile);
         await writeFile(fileB, presentText);
         await utimes(fileB, 4, 4);
@@ -514,7 +523,10 @@ describe("bidirectional session sync tombstones", () => {
       expect(JSON.parse(await readFile(localAFile, "utf8")).value).toBe("target-new");
       expect(
         JSON.parse(
-          await readFile(join(fixture.targetDir, fixture.portableName, "session.jsonl"), "utf8"),
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
         ).value,
       ).toBe("target-new");
     } finally {
@@ -544,7 +556,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "known-local-b",
         now: 3_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(targetFile, 2, 2);
       await syncSessions({
         sessionsRoot: sessionsB,
@@ -574,7 +586,12 @@ describe("bidirectional session sync tombstones", () => {
       const fixture = await makeFixture();
       try {
         const source = join(fixture.localTree, "session.jsonl");
-        const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+        const targetFile = join(
+          fixture.targetDir,
+          "sessions",
+          fixture.portableName,
+          "session.jsonl",
+        );
         const baseLocalText = `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`;
         const baseTargetText = `${JSON.stringify({
           cwd: `pi-session-sync://${fixture.portableName}`,
@@ -642,8 +659,18 @@ describe("bidirectional session sync tombstones", () => {
       try {
         const touchedSource = join(fixture.localTree, "touched.jsonl");
         const changedSource = join(fixture.localTree, "changed.jsonl");
-        const touchedTarget = join(fixture.targetDir, fixture.portableName, "touched.jsonl");
-        const changedTarget = join(fixture.targetDir, fixture.portableName, "changed.jsonl");
+        const touchedTarget = join(
+          fixture.targetDir,
+          "sessions",
+          fixture.portableName,
+          "touched.jsonl",
+        );
+        const changedTarget = join(
+          fixture.targetDir,
+          "sessions",
+          fixture.portableName,
+          "changed.jsonl",
+        );
         const touchedLocalText = `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`;
         const touchedTargetText = `${JSON.stringify({
           cwd: `pi-session-sync://${fixture.portableName}`,
@@ -703,7 +730,12 @@ describe("bidirectional session sync tombstones", () => {
       const fixture = await makeFixture();
       try {
         const source = join(fixture.localTree, "session.jsonl");
-        const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+        const targetFile = join(
+          fixture.targetDir,
+          "sessions",
+          fixture.portableName,
+          "session.jsonl",
+        );
         const baseLocalText = `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`;
         const baseTargetText = `${JSON.stringify({
           cwd: `pi-session-sync://${fixture.portableName}`,
@@ -780,8 +812,8 @@ describe("bidirectional session sync tombstones", () => {
         now: 79_000,
       });
       await mkdir(fixture.localTree, { recursive: true });
-      await mkdir(join(fixture.targetDir, fixture.portableName), { recursive: true });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      await mkdir(join(fixture.targetDir, "sessions", fixture.portableName), { recursive: true });
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "stale-local" })}\n`);
       await writeFile(
         targetFile,
@@ -823,7 +855,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "unchanged-target-b",
         now: 3_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(targetFile, 2, 2);
       await syncSessions({
         sessionsRoot: sessionsB,
@@ -867,7 +899,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "local-baseline-b",
         now: 7_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(targetFile, 2, 2);
       await syncSessions({
         sessionsRoot: sessionsB,
@@ -907,7 +939,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "unchanged-local-machine",
         now: 2_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(localFile, 3, 3);
       await rm(targetFile);
       await syncSessions({
@@ -935,7 +967,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "mixed-tombstone-machine",
         now: 78_000,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await rm(source);
       await syncSessions({
         sessionsRoot: fixture.sessionsRoot,
@@ -945,7 +977,7 @@ describe("bidirectional session sync tombstones", () => {
       });
 
       await mkdir(fixture.localTree, { recursive: true });
-      await mkdir(join(fixture.targetDir, fixture.portableName), { recursive: true });
+      await mkdir(join(fixture.targetDir, "sessions", fixture.portableName), { recursive: true });
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "new" })}\n`);
       await writeFile(
         targetFile,
@@ -963,7 +995,7 @@ describe("bidirectional session sync tombstones", () => {
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { entries: Record<string, { tombstone: unknown }> };
-      expect(state.entries[`${fixture.portableName}/session.jsonl`]?.tombstone).toBe(null);
+      expect(state.entries[`sessions/${fixture.portableName}/session.jsonl`]?.tombstone).toBe(null);
     } finally {
       await cleanup(fixture.root);
     }
@@ -980,7 +1012,7 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "equal-mtime-machine",
         now: 72_750,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       const targetMtime = (await lstat(targetFile)).mtimeMs / 1000;
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "local" })}\n`);
       await utimes(source, targetMtime, targetMtime);

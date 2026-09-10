@@ -14,6 +14,7 @@ export async function makeFixture() {
   const targetDir = join(root, "target");
   await mkdir(sessionsRoot);
   await mkdir(targetDir);
+  await mkdir(join(targetDir, "sessions"));
   const cwd = join(root, "project");
   const localTree = join(sessionsRoot, defaultSessionDirName(cwd));
   await mkdir(localTree, { recursive: true });

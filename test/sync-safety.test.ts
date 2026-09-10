@@ -28,7 +28,9 @@ describe("bidirectional session sync safety", () => {
         now: 11_000,
       });
       await expect(lstat(fixture.localTree)).rejects.toThrow();
-      await expect(lstat(join(fixture.targetDir, fixture.portableName))).rejects.toThrow();
+      await expect(
+        lstat(join(fixture.targetDir, "sessions", fixture.portableName)),
+      ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
     }
@@ -78,7 +80,9 @@ describe("bidirectional session sync safety", () => {
         now: 11_125,
       });
       await rm(source);
-      await rm(join(fixture.targetDir, fixture.portableName, "nested", "session.jsonl"));
+      await rm(
+        join(fixture.targetDir, "sessions", fixture.portableName, "nested", "session.jsonl"),
+      );
       await syncSessions({
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
@@ -103,7 +107,12 @@ describe("bidirectional session sync safety", () => {
         targetDir: fixture.targetDir,
         now: 11_250,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, relativeSessionPath);
+      const targetFile = join(
+        fixture.targetDir,
+        "sessions",
+        fixture.portableName,
+        relativeSessionPath,
+      );
       await rm(source);
       await rm(targetFile);
       await syncSessions({
@@ -112,7 +121,9 @@ describe("bidirectional session sync safety", () => {
         now: 12_250,
       });
       await expect(lstat(fixture.localTree)).rejects.toThrow();
-      await expect(lstat(join(fixture.targetDir, fixture.portableName))).rejects.toThrow();
+      await expect(
+        lstat(join(fixture.targetDir, "sessions", fixture.portableName)),
+      ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
     }
@@ -128,7 +139,7 @@ describe("bidirectional session sync safety", () => {
         targetDir: fixture.targetDir,
         now: 11_500,
       });
-      const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       const external = join(fixture.root, "external-session.jsonl");
       await writeFile(external, "external\n");
       await rm(targetFile);
@@ -156,7 +167,7 @@ describe("bidirectional session sync safety", () => {
         targetDir: fixture.targetDir,
         now: 11_000,
       });
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       const externalTree = join(fixture.root, "external-tree");
       await mkdir(externalTree);
       await rm(targetTree, { recursive: true, force: true });
@@ -219,7 +230,13 @@ describe("bidirectional session sync safety", () => {
         now: 10_500,
       });
       expect(summary.copied).toBe(1);
-      const targetFile = join(externalTarget, "target", fixture.portableName, "session.jsonl");
+      const targetFile = join(
+        externalTarget,
+        "target",
+        "sessions",
+        fixture.portableName,
+        "session.jsonl",
+      );
       expect(JSON.parse(await readFile(targetFile, "utf8")).cwd).toBe(
         `pi-session-sync://${fixture.portableName}`,
       );
@@ -235,43 +252,44 @@ describe("bidirectional session sync safety", () => {
     }
   });
 
-  it("rejects a symlinked source root before local-to-target writes", async () => {
+  it("follows a symlinked source root for local-to-target writes", async () => {
     const fixture = await makeFixture();
     const sourceLink = join(fixture.root, "sessions-link");
     const source = join(fixture.localTree, "session.jsonl");
-    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
     const sourceText = `${JSON.stringify({ cwd: fixture.cwd, value: "local" })}\n`;
     try {
       await writeFile(source, sourceText);
       await symlink(fixture.sessionsRoot, sourceLink, "dir");
-      await expect(
-        syncSessions({
-          sessionsRoot: sourceLink,
-          targetDir: fixture.targetDir,
-          now: 11_000,
-        }),
-      ).rejects.toThrow(/sessionsRoot must not be a symlink/);
+      const summary = await syncSessions({
+        sessionsRoot: sourceLink,
+        targetDir: fixture.targetDir,
+        now: 11_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
+        ).value,
+      ).toBe("local");
       expect(await readFile(source, "utf8")).toBe(sourceText);
-      await expect(
-        readFile(join(fixture.targetDir, fixture.portableName, "session.jsonl")),
-      ).rejects.toThrow();
-      await expect(readFile(statePath, "utf8")).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects a symlinked source root before target-to-local writes", async () => {
+  it("follows a symlinked source root for target-to-local writes", async () => {
     const fixture = await makeFixture();
     const externalLocal = join(fixture.root, "external-local");
     const sourceLink = join(fixture.root, "sessions-link");
-    const targetFile = join(fixture.targetDir, fixture.portableName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
     const externalLocalFile = join(
       externalLocal,
       defaultSessionDirName(fixture.cwd),
       "session.jsonl",
     );
-    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
     const targetText = `${JSON.stringify({
       cwd: `pi-session-sync://${fixture.portableName}`,
       value: "target",
@@ -281,35 +299,32 @@ describe("bidirectional session sync safety", () => {
       await writeFile(targetFile, targetText);
       await mkdir(externalLocal);
       await symlink(externalLocal, sourceLink, "dir");
-      await expect(
-        syncSessions({
-          sessionsRoot: sourceLink,
-          targetDir: fixture.targetDir,
-          now: 11_001,
-        }),
-      ).rejects.toThrow(/sessionsRoot must not be a symlink/);
+      const summary = await syncSessions({
+        sessionsRoot: sourceLink,
+        targetDir: fixture.targetDir,
+        now: 11_001,
+      });
+      expect(summary.copied).toBe(1);
       expect(await readFile(targetFile, "utf8")).toBe(targetText);
-      await expect(readFile(externalLocalFile, "utf8")).rejects.toThrow();
-      await expect(readFile(statePath, "utf8")).rejects.toThrow();
+      expect(JSON.parse(await readFile(externalLocalFile, "utf8")).value).toBe("target");
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects a symlinked source root before parent-path writes or state", async () => {
+  it("follows a symlinked source root for parent-path writes and state", async () => {
     const fixture = await makeFixture();
     const externalLocal = join(fixture.root, "external-parent-local");
     const sourceLink = join(fixture.root, "sessions-link");
     const parentCwd = join(fixture.root, "parent-project");
     const parentName = portableSessionDirName(parentCwd);
-    const targetMain = join(fixture.targetDir, fixture.portableName, "main.jsonl");
-    const targetParent = join(fixture.targetDir, parentName, "parent.jsonl");
+    const targetMain = join(fixture.targetDir, "sessions", fixture.portableName, "main.jsonl");
+    const targetParent = join(fixture.targetDir, "sessions", parentName, "parent.jsonl");
     const externalMain = join(externalLocal, defaultSessionDirName(fixture.cwd), "main.jsonl");
-    const externalParent = join(externalLocal, defaultSessionDirName(parentCwd), "parent.jsonl");
-    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
+    const localParent = join(externalLocal, defaultSessionDirName(parentCwd), "parent.jsonl");
     const mainText = `${JSON.stringify({
       cwd: `pi-session-sync://${fixture.portableName}`,
-      parentSession: `pi-session-sync://${parentName}/parent.jsonl`,
+      parentSession: `pi-session-sync://sessions/${parentName}/parent.jsonl`,
       value: "target",
     })}\n`;
     const parentText = `${JSON.stringify({
@@ -323,18 +338,21 @@ describe("bidirectional session sync safety", () => {
       await writeFile(targetParent, parentText);
       await mkdir(externalLocal);
       await symlink(externalLocal, sourceLink, "dir");
-      await expect(
-        syncSessions({
-          sessionsRoot: sourceLink,
-          targetDir: fixture.targetDir,
-          now: 11_002,
-        }),
-      ).rejects.toThrow(/sessionsRoot must not be a symlink/);
+      const summary = await syncSessions({
+        sessionsRoot: sourceLink,
+        targetDir: fixture.targetDir,
+        now: 11_002,
+      });
+      expect(summary.copied).toBe(2);
       expect(await readFile(targetMain, "utf8")).toBe(mainText);
       expect(await readFile(targetParent, "utf8")).toBe(parentText);
-      await expect(readFile(externalMain, "utf8")).rejects.toThrow();
-      await expect(readFile(externalParent, "utf8")).rejects.toThrow();
-      await expect(readFile(statePath, "utf8")).rejects.toThrow();
+      // The target parentSession URI is rewritten to the local absolute path
+      // of the parent session materialized through the symlinked source root.
+      expect(JSON.parse(await readFile(externalMain, "utf8")).value).toBe("target");
+      expect(JSON.parse(await readFile(externalMain, "utf8")).parentSession).toBe(
+        join(sourceLink, defaultSessionDirName(parentCwd), "parent.jsonl"),
+      );
+      expect(JSON.parse(await readFile(localParent, "utf8")).value).toBe("parent");
     } finally {
       await cleanup(fixture.root);
     }
@@ -366,7 +384,8 @@ describe("bidirectional session sync safety", () => {
       expect(summary.copied).toBe(1);
       const portable = portableSessionDirName(fixture.cwd);
       expect(
-        JSON.parse(await readFile(join(targetDir, portable, "session.jsonl"), "utf8")).cwd,
+        JSON.parse(await readFile(join(targetDir, "sessions", portable, "session.jsonl"), "utf8"))
+          .cwd,
       ).toBe(`pi-session-sync://${portable}`);
     } finally {
       await cleanup(fixture.root);
@@ -392,7 +411,10 @@ describe("bidirectional session sync safety", () => {
         now: 21_000,
       });
       expect(
-        await readFile(join(fixture.targetDir, fixture.portableName, "orphan.md"), "utf8"),
+        await readFile(
+          join(fixture.targetDir, "sessions", fixture.portableName, "orphan.md"),
+          "utf8",
+        ),
       ).toBe("plain markdown\n");
     } finally {
       await cleanup(fixture.root);
@@ -415,18 +437,57 @@ describe("bidirectional session sync safety", () => {
     }
   });
 
-  it("rejects a missing source root before overlap scanning", async () => {
+  it("rejects a missing source root when its path overlaps the target", async () => {
     const fixture = await makeFixture();
     try {
       const alias = join(fixture.root, "alias");
       await symlink(fixture.targetDir, alias, "dir");
+      // The source path does not exist yet but resolves (through the symlink)
+      // inside the target directory: creating it there would self-sync, so
+      // the overlap is rejected even though the source root is missing.
       await expect(
         syncSessions({
           sessionsRoot: join(alias, "missing-sessions"),
           targetDir: fixture.targetDir,
           now: 34_000,
         }),
-      ).rejects.toThrow(/sessionsRoot does not exist/);
+      ).rejects.toThrow(/overlap/);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("rejects overlapping missions root and target child roots", async () => {
+    const fixture = await makeFixture();
+    try {
+      const missionsRoot = join(fixture.targetDir, "missions");
+      await expect(
+        syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          missionsRoot,
+          now: 34_100,
+        }),
+      ).rejects.toThrow(/overlap/);
+      const insideSessions = join(fixture.targetDir, "sessions", "nested");
+      await expect(
+        syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          missionsRoot: insideSessions,
+          now: 34_101,
+        }),
+      ).rejects.toThrow(/overlap/);
+      // A missing missions root whose path lands inside a target child is
+      // rejected too, before any target child is created.
+      await expect(
+        syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          missionsRoot: join(fixture.targetDir, "sessions", "missing-missions"),
+          now: 34_102,
+        }),
+      ).rejects.toThrow(/overlap/);
     } finally {
       await cleanup(fixture.root);
     }
@@ -440,19 +501,18 @@ describe("bidirectional session sync safety", () => {
     try {
       await mkdir(external);
       await symlink(external, alias, "dir");
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(targetTree);
       await writeFile(
         join(targetTree, "session.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}` })}\n`,
       );
-      await expect(
-        syncSessions({
-          sessionsRoot: missingLocalRoot,
-          targetDir: fixture.targetDir,
-          now: 34_001,
-        }),
-      ).rejects.toThrow(/sessionsRoot does not exist/);
+      const summary = await syncSessions({
+        sessionsRoot: missingLocalRoot,
+        targetDir: fixture.targetDir,
+        now: 34_001,
+      });
+      expect(summary.warnings.some((warning) => warning.includes("missing"))).toBe(true);
       await expect(
         readFile(join(external, fixture.portableName, "session.jsonl"), "utf8"),
       ).rejects.toThrow();
@@ -465,7 +525,7 @@ describe("bidirectional session sync safety", () => {
     const fixture = await makeFixture();
     try {
       await writeFile(join(fixture.sessionsRoot, "root-unknown.txt"), "ignored\n");
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(targetTree);
       await writeFile(join(targetTree, "bad.jsonl"), "{bad}\n");
       let failure: unknown;
@@ -487,67 +547,172 @@ describe("bidirectional session sync safety", () => {
     }
   });
 
-  it("rejects malformed target metadata before committing", async () => {
+  it("preserves malformed target metadata and continues with a warning", async () => {
     const fixture = await makeFixture();
     try {
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(targetTree);
       const targetFile = join(targetTree, "bad.jsonl");
-      await writeFile(targetFile, `${JSON.stringify({ cwd: "/private/not-portable" })}\n`);
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 35_000,
-        }),
-      ).rejects.toThrow(/not a pi-session-sync URI/);
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+      const original = `${JSON.stringify({ cwd: "/private/not-portable" })}\n`;
+      await writeFile(targetFile, original);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 35_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Invalid target cwd value preserved verbatim"),
+        ),
+      ).toBe(true);
+      expect(await readFile(join(fixture.localTree, "bad.jsonl"), "utf8")).toBe(original);
+      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).resolves.toContain(
+        "bad.jsonl",
+      );
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects malformed state files", async () => {
+  it("rejects an unsupported version state file before scanning", async () => {
     const fixture = await makeFixture();
     try {
-      await writeFile(join(fixture.targetDir, STATE_FILE_NAME), JSON.stringify({ version: 2 }));
+      const stateText = JSON.stringify({ version: 2 });
+      await writeFile(join(fixture.targetDir, STATE_FILE_NAME), stateText);
       await expect(
         syncSessions({
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           now: 36_000,
         }),
-      ).rejects.toThrow(/version 1/);
+      ).rejects.toThrow(/Invalid pi-session-sync state \(unsupported version 2\)/);
+      // The state manifest is untouched: unsupported version is a hard error.
+      expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe(stateText);
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects version 1 scopes without normalized naming config", async () => {
+  it("rejects invalid JSON state files before scanning", async () => {
     const fixture = await makeFixture();
     try {
+      await writeFile(join(fixture.targetDir, STATE_FILE_NAME), "{ not json");
+      await expect(
+        syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          now: 36_002,
+        }),
+      ).rejects.toThrow(/Invalid pi-session-sync state \(invalid JSON\)/);
+      // The state manifest is untouched: malformed current state is never
+      // silently treated as empty and overwritten.
+      expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe("{ not json");
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("rejects malformed current version=1 state before scanning or staging", async () => {
+    const fixture = await makeFixture();
+    try {
+      const malformed = {
+        version: 1,
+        scopes: {},
+        entries: {
+          [`sessions/${fixture.portableName}/session.jsonl`]: {
+            baselineHash: "x",
+            localSnapshots: {},
+            target: { hash: 123 },
+            tombstone: null,
+          },
+        },
+      };
+      const stateText = JSON.stringify(malformed);
+      await writeFile(join(fixture.targetDir, STATE_FILE_NAME), stateText);
+      await expect(
+        syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          now: 36_003,
+        }),
+      ).rejects.toThrow(/Invalid pi-session-sync state/);
+      // Malformed current state is never overwritten.
+      expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe(stateText);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("ignores recognized old rootless state with a warning and continues", async () => {
+    const fixture = await makeFixture();
+    try {
+      // Old rootless-layout state: entry keys without the sessions/missions
+      // namespace. It is recognizable old/inapplicable state and must be
+      // ignored with a warning, never treated as malformed current state.
+      await writeFile(
+        join(fixture.targetDir, STATE_FILE_NAME),
+        JSON.stringify({
+          version: 1,
+          scopes: {},
+          entries: {
+            [`${fixture.portableName}/session.jsonl`]: {
+              baselineHash: null,
+              localSnapshots: {},
+              target: null,
+              tombstone: null,
+            },
+          },
+        }),
+      );
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 36_004,
+      });
+      expect(summary.copied).toBe(0);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Ignored old/inapplicable pi-session-sync state"),
+        ),
+      ).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("ignores an old-schema scope with non-empty rootless mappings without migrating", async () => {
+    const fixture = await makeFixture();
+    try {
+      // Old-schema scope: rootless `directories`/`flatFiles` maps and no
+      // `namingConfig` field (every current writer persists it). This is
+      // recognizable old state and must be ignored with a warning, never
+      // parsed as malformed current state and never migrated.
       await writeFile(
         join(fixture.targetDir, STATE_FILE_NAME),
         JSON.stringify({
           version: 1,
           scopes: {
-            [`nested:${fixture.sessionsRoot}`]: {
-              layout: "nested",
+            [`flat:${fixture.sessionsRoot}`]: {
+              layout: "flat",
               sessionsRoot: fixture.sessionsRoot,
               directories: {},
-              flatFiles: {},
+              flatFiles: { "session.jsonl": fixture.portableName },
             },
           },
           entries: {},
         }),
       );
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 36_001,
-        }),
-      ).rejects.toThrow(/naming config/);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 36_005,
+      });
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Ignored old/inapplicable pi-session-sync state"),
+        ),
+      ).toBe(true);
     } finally {
       await cleanup(fixture.root);
     }
@@ -599,7 +764,7 @@ describe("bidirectional session sync safety", () => {
           version: 1,
           scopes: {},
           entries: {
-            [`${fixture.portableName}/../escape`]: stateEntry,
+            [`sessions/${fixture.portableName}/../escape`]: stateEntry,
           },
         }),
       );
@@ -646,25 +811,25 @@ describe("bidirectional session sync safety", () => {
         now: 50_000,
       });
       expect(first.copied).toBe(3);
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       const targetMain = join(targetTree, "main.jsonl");
       const targetMainEntry = JSON.parse(await readFile(targetMain, "utf8")) as Record<
         string,
         unknown
       >;
       expect(targetMainEntry.parentSession).toBe(
-        `pi-session-sync://${fixture.portableName}/nested/parent.jsonl`,
+        `pi-session-sync://sessions/${fixture.portableName}/nested/parent.jsonl`,
       );
       expect((targetMainEntry.metadata as Record<string, unknown>).parentSession).toBe(
-        `pi-session-sync://${fixture.portableName}/nested/missing-parent.jsonl`,
+        `pi-session-sync://sessions/${fixture.portableName}/nested/missing-parent.jsonl`,
       );
       await writeFile(
         targetMain,
         `${JSON.stringify({
           cwd: `pi-session-sync://${fixture.portableName}`,
-          parentSession: `pi-session-sync://${fixture.portableName}/nested/parent.jsonl`,
+          parentSession: `pi-session-sync://sessions/${fixture.portableName}/nested/parent.jsonl`,
           metadata: {
-            parentSession: `pi-session-sync://${fixture.portableName}/nested/missing-parent.jsonl`,
+            parentSession: `pi-session-sync://sessions/${fixture.portableName}/nested/missing-parent.jsonl`,
           },
           kind: "target",
         })}\n`,
@@ -691,6 +856,638 @@ describe("bidirectional session sync safety", () => {
         now: 62_000,
       });
       expect(await readFile(join(flatRoot, "orphan.md"), "utf8")).toBe("flat target orphan\n");
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+});
+
+describe("source symlink following", () => {
+  it("follows an internal source session-directory symlink and dedups a repeated real directory", async () => {
+    const fixture = await makeFixture();
+    const external = join(fixture.root, "external-tree");
+    const symlinkLocalName = defaultSessionDirName(fixture.cwd);
+    const symlinkDir = join(fixture.sessionsRoot, symlinkLocalName);
+    try {
+      await mkdir(external, { recursive: true });
+      // Replace the default local tree with a symlink to an external dir.
+      await rm(symlinkDir, { recursive: true, force: true });
+      await symlink(external, symlinkDir, "dir");
+      await writeFile(
+        join(external, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, value: "external" })}\n`,
+      );
+      const first = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "internal-symlink-machine",
+        now: 42_000,
+      });
+      expect(first.copied).toBe(1);
+      expect(
+        JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
+        ).value,
+      ).toBe("external");
+
+      // A second symlink to the same real directory is a repeated real
+      // directory: it is warned about and not traversed twice.
+      const duplicateLocalName = defaultSessionDirName(join(fixture.root, "other-project"));
+      await symlink(external, join(fixture.sessionsRoot, duplicateLocalName), "dir");
+      const again = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "internal-symlink-machine",
+        now: 43_000,
+      });
+      expect(
+        again.warnings.some((warning) => warning.includes("Skipped repeated session directory")),
+      ).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("warns and skips a source symlink cycle without hanging", async () => {
+    const fixture = await makeFixture();
+    try {
+      await writeFile(
+        join(fixture.localTree, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd })}\n`,
+      );
+      // A directory symlink pointing back at its own parent creates a cycle.
+      const loopDir = join(fixture.localTree, "loop");
+      await mkdir(loopDir, { recursive: true });
+      await symlink(fixture.localTree, join(loopDir, "back"), "dir");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "cycle-machine",
+        now: 44_000,
+      });
+      expect(
+        summary.warnings.some((warning) => warning.includes("Skipped repeated session directory")),
+      ).toBe(true);
+      // The sync still completed and copied the session file.
+      expect(
+        (
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          )
+        ).includes('"s1"'),
+      ).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("reports missing source roots as warnings without failing the other tree", async () => {
+    const fixture = await makeFixture();
+    try {
+      const missionsRoot = join(fixture.root, "missions");
+      await mkdir(dirname(missionsRoot).length === 0 ? fixture.root : fixture.root, {
+        recursive: true,
+      });
+      // An absent missions root (no files yet) is ignored with a warning, not
+      // an error; sessions content still synchronizes.
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        machineId: "missing-missions-machine",
+        now: 45_000,
+      });
+      expect(
+        summary.warnings.some(
+          (warning) => warning.includes("Ignored missing") || warning.includes("missing"),
+        ),
+      ).toBe(true);
+      const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
+      // No local session file exists: nothing to copy, but the sync completes.
+      await expect(readFile(targetFile, "utf8")).rejects.toThrow();
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("reports a missing flat sessions root as a warning without failing", async () => {
+    const fixture = await makeFixture();
+    try {
+      const missingFlatRoot = join(fixture.root, "missing-flat-sessions");
+      const summary = await syncSessions({
+        sessionsRoot: missingFlatRoot,
+        targetDir: fixture.targetDir,
+        layout: "flat",
+        machineId: "missing-flat-machine",
+        now: 46_000,
+      });
+      expect(
+        summary.warnings.some((warning) => warning.includes("Ignored missing local sessions root")),
+      ).toBe(true);
+      // The other (target) tree still syncs: the summary simply has nothing
+      // to copy, and no state file is required.
+      expect(summary.copied).toBe(0);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("reports dangling flat source-root symlinks as a warning without failing", async () => {
+    if (process.platform === "win32") return;
+    const fixture = await makeFixture();
+    const dangling = join(fixture.root, "dangling-flat-sessions");
+    try {
+      await symlink(join(fixture.root, "nowhere"), dangling, "dir");
+      const summary = await syncSessions({
+        sessionsRoot: dangling,
+        targetDir: fixture.targetDir,
+        layout: "flat",
+        machineId: "dangling-flat-machine",
+        now: 46_001,
+      });
+      expect(
+        summary.warnings.some((warning) => warning.includes("Ignored missing local sessions root")),
+      ).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("reports dangling nested source-root symlinks as warnings without failing", async () => {
+    if (process.platform === "win32") return;
+    const fixture = await makeFixture();
+    const dangling = join(fixture.root, "dangling-nested-sessions");
+    try {
+      await symlink(join(fixture.root, "nowhere"), dangling, "dir");
+      const summary = await syncSessions({
+        sessionsRoot: dangling,
+        targetDir: fixture.targetDir,
+        layout: "nested",
+        machineId: "dangling-nested-sessions-machine",
+        now: 46_002,
+      });
+      expect(
+        summary.warnings.some((warning) => warning.includes("Ignored missing local sessions root")),
+      ).toBe(true);
+      expect(summary.copied).toBe(0);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("reports dangling missions source-root symlinks as warnings without failing", async () => {
+    if (process.platform === "win32") return;
+    const fixture = await makeFixture();
+    const danglingMissions = join(fixture.root, "dangling-missions");
+    try {
+      await symlink(join(fixture.root, "nowhere-ms"), danglingMissions, "dir");
+      await writeFile(
+        join(fixture.localTree, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd })}\n`,
+      );
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot: danglingMissions,
+        machineId: "dangling-missions-machine",
+        now: 46_003,
+      });
+      expect(
+        summary.warnings.some((warning) => warning.includes("Ignored missing local missions root")),
+      ).toBe(true);
+      // The sessions tree still synchronizes.
+      expect(summary.copied).toBe(1);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("skips a nested symlink repeat into a real directory a top-level symlink tree already visited", async () => {
+    if (process.platform === "win32") return;
+    const fixture = await makeFixture();
+    const external = join(fixture.root, "external-tree-rw");
+    const cwdA = join(fixture.root, "a-project");
+    const cwdB = join(fixture.root, "b-project");
+    const nameA = defaultSessionDirName(cwdA);
+    const nameB = defaultSessionDirName(cwdB);
+    const portableA = portableSessionDirName(cwdA);
+    const portableB = portableSessionDirName(cwdB);
+    try {
+      await mkdir(external, { recursive: true });
+      await writeFile(
+        join(external, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: cwdA, value: "ext" })}\n`,
+      );
+      // Top-level symlink tree A is created first so the deterministic
+      // whole-root walk visits `external` through it before the ordinary
+      // tree B below. One global real-node walk state folds its visited
+      // identity in, so B's nested alias into the same real directory is
+      // skipped instead of re-collected.
+      await symlink(external, join(fixture.sessionsRoot, nameA), "dir");
+      const treeB = join(fixture.sessionsRoot, nameB);
+      await mkdir(treeB, { recursive: true });
+      await writeFile(
+        join(treeB, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s2", cwd: cwdB, value: "b" })}\n`,
+      );
+      await symlink(external, join(treeB, "alias"), "dir");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "cross-tree-dedup-machine",
+        now: 52_000,
+      });
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Skipped repeated session directory (symlink cycle or duplicate)"),
+        ),
+      ).toBe(true);
+      // Both trees sync; the repeated real directory is never double-collected
+      // under B's tree (that would make B map two different cwds and error).
+      expect(
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", portableA, "session.jsonl"), "utf8"),
+        ).value,
+      ).toBe("ext");
+      expect(
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", portableB, "session.jsonl"), "utf8"),
+        ).value,
+      ).toBe("b");
+      await expect(
+        readFile(join(fixture.targetDir, "sessions", portableB, "alias", "session.jsonl"), "utf8"),
+      ).rejects.toThrow();
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("writes target-to-local through an internal source symlink directory in nested layout", async () => {
+    const fixture = await makeFixture();
+    const external = join(fixture.root, "external-internal-dir");
+    const externalFile = join(external, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
+    const targetText = `${JSON.stringify({
+      cwd: `pi-session-sync://${fixture.portableName}`,
+      value: "target",
+    })}\n`;
+    try {
+      await mkdir(dirname(targetFile), { recursive: true });
+      await writeFile(targetFile, targetText);
+      // The local session-directory entry itself is a symlink to an external
+      // directory: the source scan follows it, so a target-only file must be
+      // written through it into the external directory.
+      await rm(fixture.localTree, { recursive: true, force: true });
+      await mkdir(external, { recursive: true });
+      await symlink(external, fixture.localTree, "dir");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "internal-symlink-target-to-local-machine",
+        now: 47_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(await readFile(targetFile, "utf8")).toBe(targetText);
+      expect(JSON.parse(await readFile(externalFile, "utf8")).value).toBe("target");
+      // The symlink leaf itself is preserved (never replaced by a regular file).
+      expect((await lstat(fixture.localTree)).isSymbolicLink()).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("writes target-to-local through an internal source symlink directory in flat layout", async () => {
+    const fixture = await makeFixture();
+    const flatRoot = join(fixture.root, "flat-internal-symlink-sessions");
+    const external = join(fixture.root, "flat-external");
+    const externalFile = join(external, "session.jsonl");
+    const portableName = portableSessionDirName(fixture.cwd);
+    const targetFile = join(fixture.targetDir, "sessions", portableName, "sub", "session.jsonl");
+    const targetText = `${JSON.stringify({
+      cwd: `pi-session-sync://${portableName}`,
+      value: "target",
+    })}\n`;
+    try {
+      await mkdir(dirname(targetFile), { recursive: true });
+      await writeFile(targetFile, targetText);
+      await mkdir(flatRoot);
+      await mkdir(external, { recursive: true });
+      // An internal flat sub-directory symlink points outside the root.
+      await symlink(external, join(flatRoot, "sub"), "dir");
+      const summary = await syncSessions({
+        sessionsRoot: flatRoot,
+        targetDir: fixture.targetDir,
+        layout: "flat",
+        machineId: "flat-internal-symlink-target-to-local-machine",
+        now: 47_001,
+      });
+      expect(summary.copied).toBe(1);
+      expect(await readFile(targetFile, "utf8")).toBe(targetText);
+      expect(JSON.parse(await readFile(externalFile, "utf8")).value).toBe("target");
+      expect((await lstat(join(flatRoot, "sub"))).isSymbolicLink()).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("deletes target-to-local through an internal source symlink directory", async () => {
+    const fixture = await makeFixture();
+    const external = join(fixture.root, "external-delete-dir");
+    const externalFile = join(external, "session.jsonl");
+    const localText = `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`;
+    try {
+      await rm(fixture.localTree, { recursive: true, force: true });
+      await mkdir(external, { recursive: true });
+      await writeFile(externalFile, localText);
+      await symlink(external, fixture.localTree, "dir");
+      const first = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "internal-symlink-delete-machine",
+        now: 48_000,
+      });
+      expect(first.copied).toBe(1);
+      // Target content goes away; the local-side symlinked directory content
+      // (unchanged) must propagate the delete through the internal symlink.
+      await rm(join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"));
+      const second = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "internal-symlink-delete-machine",
+        now: 49_000,
+      });
+      expect(second.deleted).toBe(1);
+      await expect(lstat(externalFile)).rejects.toThrow();
+      expect((await lstat(fixture.localTree)).isSymbolicLink()).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("writes target-to-local through a source leaf file symlink without replacing the link", async () => {
+    const fixture = await makeFixture();
+    const external = join(fixture.root, "external-leaf");
+    const externalTarget = join(external, "session.jsonl");
+    const localFile = join(fixture.localTree, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
+    try {
+      // Existing local leaf is a symlink to an external file: the scanner
+      // follows it, and the commit must write through to the external file
+      // (the symlink leaf itself is never replaced by a regular file).
+      await mkdir(dirname(targetFile), { recursive: true });
+      await mkdir(external, { recursive: true });
+      await writeFile(
+        externalTarget,
+        `${JSON.stringify({ cwd: fixture.cwd, value: "external-local" })}\n`,
+      );
+      await writeFile(
+        targetFile,
+        `${JSON.stringify({
+          cwd: `pi-session-sync://${fixture.portableName}`,
+          value: "newer-target",
+        })}\n`,
+      );
+      // The local leaf is older; the target content is newer, so the sync
+      // wants to write target→local through the symlink leaf.
+      await utimes(externalTarget, 1, 1);
+      await utimes(targetFile, 20, 20);
+      await symlink(externalTarget, localFile);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "leaf-symlink-machine",
+        now: 50_000,
+      });
+      expect(summary.copied).toBe(1);
+      // The extern pattern: the real file receives the target content, the
+      // symlink leaf is preserved.
+      expect((await lstat(localFile)).isSymbolicLink()).toBe(true);
+      expect(JSON.parse(await readFile(externalTarget, "utf8")).value).toBe("newer-target");
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("propagates deletions through a source leaf file symlink without removing the link", async () => {
+    const fixture = await makeFixture();
+    const external = join(fixture.root, "external-leaf-delete");
+    const externalTarget = join(external, "session.jsonl");
+    const localFile = join(fixture.localTree, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
+    try {
+      await mkdir(external, { recursive: true });
+      await writeFile(
+        externalTarget,
+        `${JSON.stringify({ cwd: fixture.cwd, value: "external-local" })}\n`,
+      );
+      await symlink(externalTarget, localFile);
+      const first = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "leaf-symlink-delete-machine",
+        now: 60_000,
+      });
+      expect(first.copied).toBe(1);
+      // Target content disappears; the local-side real file (unchanged) must
+      // propagate the delete through the leaf symlink to the external file.
+      await rm(targetFile);
+      const second = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "leaf-symlink-delete-machine",
+        now: 61_000,
+      });
+      expect(second.deleted).toBe(1);
+      await expect(lstat(externalTarget)).rejects.toThrow();
+      expect((await lstat(localFile)).isSymbolicLink()).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("warns for legacy/unknown direct targetDir entries without mutating them", async () => {
+    const fixture = await makeFixture();
+    const oldPortableDir = join(fixture.targetDir, fixture.portableName);
+    const oldLayoutFile = join(fixture.targetDir, "legacy-file.txt");
+    try {
+      await mkdir(oldPortableDir);
+      await writeFile(join(oldPortableDir, "session.jsonl"), "old-layout\n");
+      await writeFile(oldLayoutFile, "old\n");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 51_000,
+      });
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Ignored legacy/unknown target root entry"),
+        ),
+      ).toBe(true);
+      // Never mutated or deleted.
+      expect(await readFile(join(oldPortableDir, "session.jsonl"), "utf8")).toBe("old-layout\n");
+      expect(await readFile(oldLayoutFile, "utf8")).toBe("old\n");
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("records an error and skips a local source directory symlink into targetDir", async () => {
+    const fixture = await makeFixture();
+    try {
+      await writeFile(
+        join(fixture.localTree, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, value: "safe" })}\n`,
+      );
+      // An internal source directory symlink resolving into the target
+      // sessions root must be recorded as an error, skipped, and never
+      // followed/copied/deleted; other safe files continue syncing.
+      await symlink(join(fixture.targetDir, "sessions"), join(fixture.localTree, "evil"), "dir");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "targetdir-dir-symlink-machine",
+        now: 70_000,
+      });
+      expect(
+        summary.errors.some((error) =>
+          error.includes("Blocked local source symlink into targetDir"),
+        ),
+      ).toBe(true);
+      // The safe file still syncs.
+      expect(summary.copied).toBe(1);
+      expect(
+        JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
+        ).value,
+      ).toBe("safe");
+      // The symlink itself is never followed or replaced.
+      expect((await lstat(join(fixture.localTree, "evil"))).isSymbolicLink()).toBe(true);
+      // No logical file is ever derived from the blocked symlink tree.
+      await expect(
+        readFile(
+          join(fixture.targetDir, "sessions", fixture.portableName, "evil", "x.jsonl"),
+          "utf8",
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("records an error and skips a local source file symlink into targetDir", async () => {
+    const fixture = await makeFixture();
+    try {
+      await writeFile(
+        join(fixture.localTree, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, value: "safe" })}\n`,
+      );
+      // A real target file that the source leaf symlink would otherwise
+      // expose as local content.
+      const seedFile = join(fixture.targetDir, "sessions", fixture.portableName, "seed.jsonl");
+      await mkdir(dirname(seedFile), { recursive: true });
+      await writeFile(
+        seedFile,
+        `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}`, value: "seed" })}\n`,
+      );
+      await symlink(seedFile, join(fixture.localTree, "leaf.jsonl"));
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "targetdir-file-symlink-machine",
+        now: 70_001,
+      });
+      expect(
+        summary.errors.some((error) =>
+          error.includes("Blocked local source symlink into targetDir"),
+        ),
+      ).toBe(true);
+      expect((await lstat(join(fixture.localTree, "leaf.jsonl"))).isSymbolicLink()).toBe(true);
+      // The symlink target content was never copied into the target tree
+      // under the leaf's own logical path.
+      await expect(
+        readFile(join(fixture.targetDir, "sessions", fixture.portableName, "leaf.jsonl"), "utf8"),
+      ).rejects.toThrow();
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("records an error and skips a top-level local session symlink into targetDir", async () => {
+    if (process.platform === "win32") return;
+    const fixture = await makeFixture();
+    const evilName = defaultSessionDirName(join(fixture.root, "evil-project"));
+    try {
+      await writeFile(
+        join(fixture.localTree, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, value: "safe" })}\n`,
+      );
+      await symlink(fixture.targetDir, join(fixture.sessionsRoot, evilName), "dir");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        machineId: "targetdir-top-symlink-machine",
+        now: 70_002,
+      });
+      expect(
+        summary.errors.some((error) =>
+          error.includes("Blocked local source symlink into targetDir"),
+        ),
+      ).toBe(true);
+      // The safe tree still syncs and the symlink stays untouched.
+      expect(summary.copied).toBe(1);
+      expect((await lstat(join(fixture.sessionsRoot, evilName))).isSymbolicLink()).toBe(true);
+      const targetEntries = await readdir(join(fixture.targetDir, "sessions"));
+      expect(targetEntries).toContain(fixture.portableName);
+      expect(targetEntries).not.toContain(
+        portableSessionDirName(join(fixture.root, "evil-project")),
+      );
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("records an error and skips a local missions symlink into targetDir", async () => {
+    const fixture = await makeFixture();
+    const missionsRoot = join(fixture.root, "missions");
+    try {
+      await mkdir(missionsRoot, { recursive: true });
+      await writeFile(
+        join(fixture.localTree, "session.jsonl"),
+        `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd })}\n`,
+      );
+      const okFile = join(missionsRoot, "index", "ok.json");
+      await mkdir(dirname(okFile), { recursive: true });
+      await writeFile(okFile, `${JSON.stringify({ id: "ok", value: "safe" }, null, 2)}\n`);
+      await symlink(fixture.targetDir, join(missionsRoot, "evil"), "dir");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        machineId: "targetdir-missions-symlink-machine",
+        now: 70_003,
+      });
+      expect(
+        summary.errors.some((error) =>
+          error.includes("Blocked local source symlink into targetDir"),
+        ),
+      ).toBe(true);
+      // The safe missions file still mirrors; the blocked symlink is never
+      // followed or deleted.
+      expect(
+        JSON.parse(await readFile(join(fixture.targetDir, "missions", "index", "ok.json"), "utf8"))
+          .value,
+      ).toBe("safe");
+      expect((await lstat(join(missionsRoot, "evil"))).isSymbolicLink()).toBe(true);
+      await expect(
+        readFile(join(fixture.targetDir, "missions", "evil", "x.json"), "utf8"),
+      ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
     }

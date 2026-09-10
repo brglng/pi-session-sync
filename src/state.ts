@@ -23,6 +23,15 @@ export interface StateEntry {
   localSnapshots: Record<string, SideSnapshot | null>;
   target: SideSnapshot | null;
   tombstone: Tombstone | null;
+  /**
+   * Per-machine, per-file cwd label evidence for mission files: machine
+   * scope key → map of normalized local cwd path (that machine) → portable
+   * name. The semantic portable label must survive a target→local→target
+   * round trip, so each decoded target cwd records the label it carried;
+   * mission files only. Absent when no mission cwd was ever evidenced on
+   * any machine.
+   */
+  cwdEvidence?: Record<string, Record<string, string>>;
 }
 
 export interface StateScope {
@@ -124,11 +133,38 @@ function parseEntry(value: unknown): StateEntry {
       parseSnapshot(snapshot, `local snapshot for ${machineId}`),
     );
   }
+  const cwdEvidence = safeRecord<Record<string, string>>();
+  if (value.cwdEvidence !== undefined) {
+    if (!isRecord(value.cwdEvidence)) {
+      throw new Error("Invalid cwd evidence in pi-session-sync state");
+    }
+    for (const [machineKey, record] of Object.entries(value.cwdEvidence)) {
+      if (machineKey.length === 0) {
+        throw new Error("Invalid empty machine key in pi-session-sync cwd evidence");
+      }
+      if (!isRecord(record)) {
+        throw new Error(
+          `Invalid cwd evidence record for machine ${machineKey} in pi-session-sync state`,
+        );
+      }
+      const parsedRecord = safeRecord<string>();
+      for (const [cwd, portableName] of Object.entries(record)) {
+        if (cwd.length === 0 || typeof portableName !== "string" || portableName.length === 0) {
+          throw new Error(
+            `Invalid cwd evidence for machine ${machineKey} in pi-session-sync state`,
+          );
+        }
+        setOwnRecordValue(parsedRecord, cwd, portableName);
+      }
+      setOwnRecordValue(cwdEvidence, machineKey, parsedRecord);
+    }
+  }
   return {
     baselineHash,
     localSnapshots,
     target: parseSnapshot(value.target, "target"),
     tombstone: parseTombstone(value.tombstone),
+    ...(Object.keys(cwdEvidence).length > 0 ? { cwdEvidence } : {}),
   };
 }
 
@@ -213,12 +249,113 @@ function parseState(value: unknown): SyncState {
   return { version: 1, scopes, entries };
 }
 
-export async function loadState(path: string): Promise<SyncState | null> {
+export type LoadStateResult =
+  | { kind: "none" }
+  | { kind: "valid"; state: SyncState }
+  | { kind: "old"; warnings: string[] };
+
+/**
+ * Classify the topology of a parsed version-1 state object without parsing it
+ * strictly. Old/inapplicable state is recognized ONLY when the entire file is
+ * unambiguously old-shaped; any mixture of old-shaped and current-shaped
+ * content is malformed current state and must hard-error before scan/staging
+ * instead of being silently ignored as old (which would let a stale old layer
+ * or an overwrite path hide current entries).
+ *
+ * - Old-shaped entry keys are rootless (they predate the mandatory
+ *   `sessions/` / `missions/` root namespace).
+ * - Old-shaped scopes predate the normalized `namingConfig` field that every
+ *   current writer always persists; a version-1 scope without it is
+ *   structurally old-schema regardless of whether its maps are empty.
+ */
+function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mixed" | "current" {
+  // A malformed `entries` or `scopes` container is malformed CURRENT state no
+  // matter what the other container holds: only a file whose containers are
+  // both well-shaped can ever be classified as unambiguously old. Letting a
+  // broken container fall through as "old" would silently discard (and later
+  // overwrite) unknown content.
+  if (!isRecord(parsed.entries) || !isRecord(parsed.scopes)) return "mixed";
+  // A scope value that is not even an object is malformed by the same rule:
+  // it cannot be proven to be old-shaped content, so the file is never
+  // warn-and-ignored.
+  for (const rawScope of Object.values(parsed.scopes)) {
+    if (!isRecord(rawScope)) return "mixed";
+  }
+  let rootlessEntries = 0;
+  let namespacedEntries = 0;
+  for (const key of Object.keys(parsed.entries)) {
+    if (key.startsWith("sessions/") || key.startsWith("missions/")) namespacedEntries += 1;
+    else rootlessEntries += 1;
+  }
+  let oldScopes = 0;
+  let currentScopes = 0;
+  for (const rawScope of Object.values(parsed.scopes)) {
+    if (!isRecord(rawScope)) continue;
+    if (rawScope.namingConfig === undefined) oldScopes += 1;
+    else currentScopes += 1;
+  }
+  if (rootlessEntries === 0 && oldScopes === 0) return "current";
+  if (namespacedEntries > 0 || currentScopes > 0) return "mixed";
+  return "old";
+}
+
+/**
+ * Recognizable old/inapplicable state kept for the convenience of the current
+ * version's own users. Nothing in this version writes these shapes; they are
+ * recognized so they can be report-and-ignore without ever misclassifying a
+ * malformed current-format state file. A mixed current-plus-old topology is
+ * never "old": it is malformed current state and is rejected by the caller.
+ */
+function isRecognizedOldState(
+  parsed: Record<string, unknown>,
+): { kind: "old"; warnings: string[] } | "mixed" | null {
+  const message = (detail: string) => [`Ignored old/inapplicable pi-session-sync state: ${detail}`];
+
+  const topology = classifyOldStateTopology(parsed);
+  if (topology === "mixed") return "mixed";
+  if (topology === "current") return null;
+  // Unambiguously old topology: old rootless entries and/or old-schema scopes,
+  // with no current-shaped content anywhere in the file. Containers are
+  // verified well-shaped by the classifier before "old" is ever returned.
+  const details: string[] = [];
+  if (isRecord(parsed.entries)) {
+    const rootlessKeys = Object.keys(parsed.entries).filter(
+      (key) => !key.startsWith("sessions/") && !key.startsWith("missions/"),
+    );
+    if (rootlessKeys.length > 0) details.push("old rootless entries");
+  }
+  if (isRecord(parsed.scopes)) {
+    for (const [scopeKey, rawScope] of Object.entries(parsed.scopes)) {
+      if (isRecord(rawScope) && rawScope.namingConfig === undefined) {
+        details.push(`old rootless scope ${scopeKey}`);
+      }
+    }
+  }
+  return { kind: "old", warnings: message(details.join(", ") || "old rootless topology") };
+}
+
+/**
+ * Load and recognize the persisted state file.
+ *
+ * The current format is a real regular `version=1` JSON file whose entry keys
+ * carry a `sessions/` or `missions/` root namespace. Invalid JSON, a non-object
+ * top level, a missing `version`, an unsupported version, and a malformed
+ * current `version=1` structure are all hard errors that stop the sync before
+ * scanning or staging — malformed current state is never silently treated as
+ * empty and overwritten.
+ *
+ * The only warn-and-continue case is a recognizable OLD `version=1` shape: old
+ * rootless entry keys or old-schema scopes (which predate the normalized
+ * `namingConfig` field). Those are reported with a warning and ignored without
+ * migration or deletion. A symlink or non-regular file at the state path stays
+ * a hard error (safety, not format).
+ */
+export async function loadState(path: string): Promise<LoadStateResult> {
   let info: Awaited<ReturnType<typeof lstat>>;
   try {
     info = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "none" };
     throw new Error(`Cannot inspect pi-session-sync state ${path}: ${String(error)}`);
   }
   if (!info.isFile() || info.isSymbolicLink()) {
@@ -230,10 +367,34 @@ export async function loadState(path: string): Promise<SyncState | null> {
   } catch (error) {
     throw new Error(`Cannot read pi-session-sync state ${path}: ${String(error)}`);
   }
+  let parsed: unknown;
   try {
-    return parseState(JSON.parse(text) as unknown);
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`Invalid pi-session-sync state (invalid JSON): ${path}`);
+  }
+  if (!isRecord(parsed) || typeof parsed.version !== "number") {
+    throw new Error(`Invalid pi-session-sync state (non-object or missing version): ${path}`);
+  }
+  if (parsed.version !== 1) {
+    throw new Error(
+      `Invalid pi-session-sync state (unsupported version ${String(parsed.version)}): ${path}`,
+    );
+  }
+  const recognizedOld = isRecognizedOldState(parsed);
+  if (recognizedOld === "mixed") {
+    // Mixed current namespaced entries/scopes with any rootless/old malformed
+    // topology is malformed CURRENT state: hard error before any scan or
+    // staging, never warn-and-ignore and never overwrite with an empty state.
+    throw new Error(
+      `Invalid pi-session-sync state (mixed current and old/inapplicable topology): ${path}`,
+    );
+  }
+  if (recognizedOld !== null) return recognizedOld;
+  try {
+    return { kind: "valid", state: parseState(parsed) };
   } catch (error) {
-    throw new Error(`Invalid pi-session-sync state ${path}: ${String(error)}`);
+    throw new Error(`Invalid pi-session-sync state (${String(error)}): ${path}`);
   }
 }
 

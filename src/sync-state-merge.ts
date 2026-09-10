@@ -87,5 +87,52 @@ export function mergeStateEntries(key: string, first: StateEntry, second: StateE
       configurable: true,
     });
   }
-  return { baselineHash, localSnapshots, target, tombstone };
+  // Mission cwd label evidence merges per machine scope key: keys unique to
+  // one side union in; the same key on both sides must carry the same
+  // portable name or the spelling-duplicate pair is incompatible.
+  const cwdEvidence: Record<string, Record<string, string>> = Object.create(null) as Record<
+    string,
+    Record<string, string>
+  >;
+  for (const machineKey of [
+    ...new Set([...Object.keys(first.cwdEvidence ?? {}), ...Object.keys(second.cwdEvidence ?? {})]),
+  ].sort()) {
+    const firstRecord = first.cwdEvidence?.[machineKey] ?? {};
+    const secondRecord = second.cwdEvidence?.[machineKey] ?? {};
+    const mergedRecord = Object.create(null) as Record<string, string>;
+    for (const [cwd, portableName] of Object.entries(firstRecord)) {
+      const counterpart = secondRecord[cwd];
+      if (counterpart !== undefined && counterpart !== portableName) {
+        incompatible(`cwd evidence for machine ${machineKey} at ${cwd}`);
+      }
+      Object.defineProperty(mergedRecord, cwd, {
+        value: portableName,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    for (const [cwd, portableName] of Object.entries(secondRecord)) {
+      if (Object.hasOwn(mergedRecord, cwd)) continue;
+      Object.defineProperty(mergedRecord, cwd, {
+        value: portableName,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    Object.defineProperty(cwdEvidence, machineKey, {
+      value: mergedRecord,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return {
+    baselineHash,
+    localSnapshots,
+    target,
+    tombstone,
+    ...(Object.keys(cwdEvidence).length > 0 ? { cwdEvidence } : {}),
+  };
 }

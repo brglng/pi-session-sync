@@ -21,7 +21,8 @@ import {
 } from "./config.ts";
 import { loadMachineId } from "./machine.ts";
 import { defaultSessionDirName } from "./portable-name.ts";
-import { SyncFailure, syncSessions, validateSyncRoots } from "./sync.ts";
+import { SyncFailure, type syncSessions, validateSyncRoots } from "./sync.ts";
+import { syncSessionsWithValidatedRoots } from "./sync-internal.ts";
 
 interface RuntimeSyncLock {
   /**
@@ -82,13 +83,23 @@ function formatWarnings(warnings: string[]): string {
   return `\nWarnings (${warnings.length}):\n${warnings.map((warning) => `  ${warning}`).join("\n")}`;
 }
 
+function formatErrors(errors: string[]): string {
+  if (errors.length === 0) return "";
+  return `\nErrors (${errors.length}):\n${errors.map((error) => `  ${error}`).join("\n")}`;
+}
+
 function formatSummary(
   summary: Awaited<ReturnType<typeof syncSessions>>,
   configWarnings: string[],
 ): string {
   const warnings = uniqueWarnings([...configWarnings, ...summary.warnings]);
+  const errors = uniqueWarnings(summary.errors ?? []);
+  // Security errors (forbidden source symlinks into targetDir) are nonfatal:
+  // safe files keep syncing, but the user must see them as explicit errors,
+  // not buried among ordinary warnings.
   return [
     `Session sync complete: ${summary.copied} copied, ${summary.deleted} deleted, ${summary.filesScanned} files scanned.`,
+    formatErrors(errors),
     formatWarnings(warnings),
   ].join("");
 }
@@ -249,24 +260,41 @@ async function runSync(
     }
     const loaded = await loadConfig(agentDir);
     configWarnings = loaded.warnings;
-    await validateSyncRoots(sessions.path, loaded.config.targetDir);
+    // Validate exactly once: syncSessions re-runs overlap checks only when
+    // this pass is not threaded through. Re-validating after this call already
+    // created the target child directories would turn a forbidden source-root
+    // symlink race (its target resolves into a just-created child) into a hard
+    // command failure instead of the scanner's nonfatal blocked-source error.
+    const validatedRoots = await validateSyncRoots(
+      sessions.path,
+      loaded.config.targetDir,
+      join(agentDir, "missions"),
+    );
     const machineId = await loadMachineId(agentDir);
-    const summary = await syncSessions({
-      sessionsRoot: sessions.path,
-      targetDir: loaded.config.targetDir,
-      namingOptions: loaded.config,
-      layout: sessions.layout,
-      machineId,
-      ...(captured.currentSessionFile === undefined
-        ? {}
-        : { activeSessionFile: captured.currentSessionFile }),
-      ...(captured.sessionDir === undefined ? {} : { activeSessionDir: captured.sessionDir }),
-    });
+    const summary = await syncSessionsWithValidatedRoots(
+      {
+        sessionsRoot: sessions.path,
+        targetDir: loaded.config.targetDir,
+        missionsRoot: join(agentDir, "missions"),
+        namingOptions: loaded.config,
+        layout: sessions.layout,
+        machineId,
+        ...(captured.currentSessionFile === undefined
+          ? {}
+          : { activeSessionFile: captured.currentSessionFile }),
+        ...(captured.sessionDir === undefined ? {} : { activeSessionDir: captured.sessionDir }),
+      },
+      validatedRoots,
+    );
     if (summary.refreshSessionFile !== undefined) {
       const summaryWarnings = uniqueWarnings([...configWarnings, ...summary.warnings]);
+      const summaryErrors = uniqueWarnings(summary.errors ?? []);
+      // Nonfatal security errors (e.g. forbidden source symlinks into
+      // targetDir) keep the sync successful, but hosts must surface them at
+      // error severity instead of burying them among info/warnings.
       notify(
-        `Session sync committed; refreshing active session: ${summary.copied} copied, ${summary.deleted} deleted, ${summary.filesScanned} files scanned.${formatWarnings(summaryWarnings)}`,
-        "info",
+        `Session sync committed; refreshing active session: ${summary.copied} copied, ${summary.deleted} deleted, ${summary.filesScanned} files scanned.${formatErrors(summaryErrors)}${formatWarnings(summaryWarnings)}`,
+        summaryErrors.length > 0 ? "error" : "info",
       );
       if (captured.switchSession === undefined) {
         notify(
@@ -294,7 +322,11 @@ async function runSync(
       }
       return;
     }
-    notify(formatSummary(summary, configWarnings), "info");
+    const errors = uniqueWarnings(summary.errors ?? []);
+    // Nonfatal security errors (forbidden source symlinks into targetDir)
+    // keep the sync successful, but hosts must surface them at error
+    // severity instead of burying them among info/warnings.
+    notify(formatSummary(summary, configWarnings), errors.length > 0 ? "error" : "info");
   } catch (error) {
     const warnings = uniqueWarnings([
       ...configWarnings,

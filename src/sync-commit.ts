@@ -41,14 +41,18 @@ export async function moveStagedFile(source: string, destination: string): Promi
 
 export async function commitCopy(action: CopyAction): Promise<void> {
   if (action.stagedPath === undefined) throw new Error("Internal staging error");
-  await mkdir(dirname(action.destinationPath), { recursive: true });
-  await rm(action.destinationPath, { force: true });
-  await moveStagedFile(action.stagedPath, action.destinationPath);
-  await utimes(action.destinationPath, action.source.mtimeMs / 1000, action.source.mtimeMs / 1000);
+  // A local source leaf symlink resolves the write to its real file: the
+  // symlink itself is never replaced or removed.
+  const destination = action.resolvedPath ?? action.destinationPath;
+  await mkdir(dirname(destination), { recursive: true });
+  await rm(destination, { force: true });
+  await moveStagedFile(action.stagedPath, destination);
+  await utimes(destination, action.source.mtimeMs / 1000, action.source.mtimeMs / 1000);
 }
 
 export async function commitDelete(action: DeleteAction): Promise<void> {
-  await rm(action.path, { force: true });
+  const path = action.resolvedPath ?? action.path;
+  await rm(path, { force: true });
 }
 
 export async function removeEmptyDirectories(

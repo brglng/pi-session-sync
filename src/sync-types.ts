@@ -12,13 +12,30 @@ export interface SyncSummary {
   deleted: number;
   filesScanned: number;
   warnings: string[];
+  /**
+   * Nonfatal security errors reported while the sync continued: currently
+   * local source symlinks whose resolved target lies inside the physical
+   * targetDir tree (see FORBIDDEN_TARGET_SYMLINK_PREFIX). Distinct from
+   * warnings so hosts can surface them as errors without failing the sync.
+   */
+  errors: string[];
   statePath: string;
   refreshSessionFile?: string;
 }
 
+/**
+ * Prefix marking a nonfatal security error message: a local source symlink
+ * whose resolved target is targetDir itself or anything inside it. Such
+ * links are recorded, skipped, and never followed/copied/deleted; other safe
+ * files keep syncing. The orchestrator moves these messages from warnings
+ * into `SyncSummary.errors` so they stay user-visible as explicit errors.
+ */
+export const FORBIDDEN_TARGET_SYMLINK_PREFIX = "Blocked local source symlink into targetDir";
+
 export interface SyncOptions {
   sessionsRoot: string;
   targetDir: string;
+  missionsRoot?: string;
   layout?: SessionLayout;
   namingOptions?: Partial<PortableNameOptions>;
   homeLabel?: string;
@@ -29,6 +46,8 @@ export interface SyncOptions {
   activeSessionDir?: string;
   now?: number;
 }
+
+export type { ValidatedSyncRoots } from "./validated-roots.ts";
 
 export class SyncFailure extends Error {
   readonly warnings: string[];
@@ -43,6 +62,20 @@ export class SyncFailure extends Error {
 export interface DecisionContext {
   sessionsRoot: string;
   targetDir: string;
+  /**
+   * Fully resolved physical targetDir identity (ancestor aliases included),
+   * fixed once after targetDir validation. Source-symlink containment checks
+   * (forbidden scan targets and preflight destination containment) compare
+   * against this physical identity; intended target writes keep using the
+   * lexical target paths above.
+   */
+  physicalTargetDir: string;
+  /** Target sessions root `targetDir/sessions`. */
+  sessionsTargetRoot: string;
+  /** Local missions root `<agentDir>/missions`; undefined when disabled. */
+  missionsRoot?: string;
+  /** Target missions root `targetDir/missions`; undefined when disabled. */
+  missionsTargetRoot?: string;
   layout: SessionLayout;
   namingOptions: PortableNameOptions;
   machineId: string;
@@ -128,11 +161,25 @@ export interface CopyAction {
   destinationSide: "local" | "target";
   destinationPath: string;
   stagedPath?: string;
+  /**
+   * For a target→local write to a local source leaf file symlink, the real
+   * file the content must be written to (the symlink is preserved). Set only
+   * after preflight verified the scanned leaf still resolves to this path;
+   * commit writes here instead of `destinationPath`.
+   */
+  resolvedPath?: string;
 }
 
 export interface DeleteAction {
   side: "local" | "target";
   path: string;
+  /**
+   * For a local-side delete of a local source leaf file symlink, the real
+   * file to remove (the symlink itself is preserved). Set only after preflight
+   * verified the scanned leaf still resolves to this path; commit deletes here
+   * instead of `path`.
+   */
+  resolvedPath?: string;
 }
 
 export interface FileDecision {

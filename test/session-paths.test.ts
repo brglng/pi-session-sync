@@ -80,8 +80,11 @@ describe("session path conversion", () => {
     expect(uri).toBe(`pi-session-sync://${name}`);
     expect(syncUriToCwd(uri, options)).toBe("/var/www/project");
     expect(syncUriToPortableName(uri, options)).toBe(name);
-    expect(syncParentUriToCanonical(`${uri}/nested/parent.jsonl`, options)).toBe(
-      `${uri}/nested/parent.jsonl`,
+    expect(
+      syncParentUriToCanonical(`pi-session-sync://sessions/${name}/nested/parent.jsonl`, options),
+    ).toBe(`pi-session-sync://sessions/${name}/nested/parent.jsonl`);
+    expect(() => syncParentUriToCanonical(`${uri}/nested/parent.jsonl`, options)).toThrow(
+      /file URI namespace/,
     );
   });
 
@@ -109,7 +112,7 @@ describe("session path conversion", () => {
       const uri = localSessionPathToSyncUri(parent, sessionsRoot, (name) =>
         name === localName ? { portableName } : undefined,
       );
-      expect(uri).toBe(`pi-session-sync://${portableName}/nested/parent.jsonl`);
+      expect(uri).toBe(`pi-session-sync://sessions/${portableName}/nested/parent.jsonl`);
       expect(syncParentUriToCanonical(uri)).toBe(uri);
       expect(syncParentUriToLocalPath(uri, sessionsRoot)).toBe(parent);
     } finally {
@@ -135,7 +138,7 @@ describe("session path conversion", () => {
       ).toThrow(/Invalid relative session path/);
       expect(() =>
         syncParentUriToLocalPath(
-          `pi-session-sync://${portableName}/literal%5Cname.jsonl`,
+          `pi-session-sync://sessions/${portableName}/literal%5Cname.jsonl`,
           sessionsRoot,
         ),
       ).toThrow(/segment/);
@@ -159,7 +162,7 @@ describe("session path conversion", () => {
           (key) => (key === "alias/parent.jsonl" ? { portableName } : undefined),
           "flat",
         ),
-      ).toThrow(/symlink/);
+      ).not.toThrow(/symlink/);
       expect(() =>
         localSessionPathToSyncUri(
           join(sessionsRoot, "missing", "parent.jsonl"),
@@ -168,14 +171,14 @@ describe("session path conversion", () => {
           "flat",
           { portableName },
         ),
-      ).toThrow(/flat path is not mapped/);
+      ).toThrow(/not mapped/);
       expect(() =>
         syncParentUriToLocalPath(
-          `pi-session-sync://${portableName}/alias/parent.jsonl`,
+          `pi-session-sync://sessions/${portableName}/alias/parent.jsonl`,
           sessionsRoot,
           "flat",
         ),
-      ).toThrow(/symlink/);
+      ).not.toThrow(/symlink/);
     } finally {
       await rm(sessionsRoot, { recursive: true, force: true });
       await rm(external, { recursive: true, force: true });
@@ -193,7 +196,7 @@ describe("session path conversion", () => {
       ]) {
         expect(() =>
           localSessionPathToSyncUri(value, sessionsRoot, () => ({ portableName }), "flat"),
-        ).toThrow(/Windows-shaped/);
+        ).toThrow(/outside sessions root|Windows-shaped/);
       }
     } finally {
       await rm(sessionsRoot, { recursive: true, force: true });
@@ -210,10 +213,10 @@ describe("session path conversion", () => {
   it("rejects Unicode controls in parent URI segments and preserves Unicode names", () => {
     for (const encodedSegment of ["bad%01name.jsonl", "bad%7Fname.jsonl", "bad%C2%80name.jsonl"]) {
       expect(() =>
-        syncParentUriToCanonical(`pi-session-sync://${portableName}/${encodedSegment}`),
+        syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/${encodedSegment}`),
       ).toThrow(/segment/);
     }
-    const unicode = `pi-session-sync://${portableName}/%E5%AD%90%E7%9B%AE%E5%BD%95/%F0%9F%8C%8D.jsonl`;
+    const unicode = `pi-session-sync://sessions/${portableName}/%E5%AD%90%E7%9B%AE%E5%BD%95/%F0%9F%8C%8D.jsonl`;
     expect(syncParentUriToCanonical(unicode)).toBe(unicode);
   });
 
@@ -238,26 +241,26 @@ describe("session path conversion", () => {
   });
 
   it("validates case-insensitive scheme and canonical relative URI segments", () => {
-    const upper = `PI-SESSION-SYNC://${portableName}/file%20name.jsonl`;
+    const upper = `PI-SESSION-SYNC://sessions/${portableName}/file%20name.jsonl`;
     expect(isSyncUri("Pi-SeSsIoN-SyNc:malformed")).toBe(true);
     expect(syncParentUriToCanonical(upper)).toBe(
-      `pi-session-sync://${portableName}/file%20name.jsonl`,
+      `pi-session-sync://sessions/${portableName}/file%20name.jsonl`,
     );
     expect(() => syncParentUriToCanonical("pi-session-sync:malformed")).toThrow();
     expect(() =>
-      syncParentUriToCanonical(`pi-session-sync://${portableName}/file name.jsonl`),
+      syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/file name.jsonl`),
     ).toThrow();
     expect(() =>
-      syncParentUriToCanonical(`pi-session-sync://${portableName}/file?name.jsonl`),
+      syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/file?name.jsonl`),
     ).toThrow();
     expect(() =>
-      syncParentUriToCanonical(`pi-session-sync://${portableName}/file#name.jsonl`),
+      syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/file#name.jsonl`),
     ).toThrow();
     expect(() =>
-      syncParentUriToCanonical(`pi-session-sync://${portableName}/file%2ejsonl`),
+      syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/file%2ejsonl`),
     ).toThrow();
     expect(() =>
-      syncParentUriToCanonical(`pi-session-sync://${portableName}/%2Fetc%2Fpasswd`),
+      syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/%2Fetc%2Fpasswd`),
     ).toThrow();
   });
 
@@ -271,22 +274,22 @@ describe("session path conversion", () => {
   });
 
   it("rejects cross-platform-unsafe relative segments on every platform", () => {
-    const device = `pi-session-sync://${portableName}/con.md`;
+    const device = `pi-session-sync://sessions/${portableName}/con.md`;
     expect(() => syncParentUriToCanonical(device)).toThrow(/segment/);
-    const trailingDot = `pi-session-sync://${portableName}/notes.md.`;
+    const trailingDot = `pi-session-sync://sessions/${portableName}/notes.md.`;
     expect(() => syncParentUriToCanonical(trailingDot)).toThrow(/segment/);
-    const trailingSpace = `pi-session-sync://${portableName}/a%20`;
+    const trailingSpace = `pi-session-sync://sessions/${portableName}/a%20`;
     expect(() => syncParentUriToCanonical(trailingSpace)).toThrow(/segment/);
-    const colon = `pi-session-sync://${portableName}/a%3Ab.md`;
+    const colon = `pi-session-sync://sessions/${portableName}/a%3Ab.md`;
     expect(() => syncParentUriToCanonical(colon)).toThrow(/segment/);
     // Empty and traversal segments remain rejected after decoding.
     expect(() =>
-      syncParentUriToCanonical(`pi-session-sync://${portableName}/%2e%2e/x.jsonl`),
+      syncParentUriToCanonical(`pi-session-sync://sessions/${portableName}/%2e%2e/x.jsonl`),
     ).toThrow(/segment/);
   });
 
   it("rejects literal backslashes in relative URI segments on every platform", () => {
-    const backslash = `pi-session-sync://${portableName}/lit%5Ceral.jsonl`;
+    const backslash = `pi-session-sync://sessions/${portableName}/lit%5Ceral.jsonl`;
     expect(() => syncParentUriToCanonical(backslash)).toThrow(/segment/);
   });
 
@@ -307,7 +310,7 @@ describe("session path conversion", () => {
     expect(make("nested/con.md")).toThrow(/Invalid relative session path/);
     expect(make("nested/notes.md.")).toThrow(/Invalid relative session path/);
     expect(make("nested/a:b.md")).toThrow(/Invalid relative session path/);
-    expect(make("notes.md")()).toBe(`pi-session-sync://${portableName}/notes.md`);
+    expect(make("notes.md")()).toBe(`pi-session-sync://sessions/${portableName}/notes.md`);
     void root;
   });
 
@@ -324,44 +327,44 @@ describe("session path conversion", () => {
       const regular = join(tree, "nested", "parent.jsonl");
       await writeFile(regular, "{}\n");
       const uri = localSessionPathToSyncUri(regular, sessionsRoot, lookup);
-      expect(uri).toBe(`pi-session-sync://${portableName}/nested/parent.jsonl`);
+      expect(uri).toBe(`pi-session-sync://sessions/${portableName}/nested/parent.jsonl`);
       expect(syncParentUriToLocalPath(uri, sessionsRoot)).toBe(regular);
       const missing = join(tree, "nested", "missing.jsonl");
       expect(localSessionPathToSyncUri(missing, sessionsRoot, lookup)).toBe(
-        `pi-session-sync://${portableName}/nested/missing.jsonl`,
+        `pi-session-sync://sessions/${portableName}/nested/missing.jsonl`,
       );
       expect(
         syncParentUriToLocalPath(
-          `pi-session-sync://${portableName}/nested/missing.jsonl`,
+          `pi-session-sync://sessions/${portableName}/nested/missing.jsonl`,
           sessionsRoot,
         ),
       ).toBe(missing);
 
-      // An existing directory is rejected before staging in both directions.
+      // Existing directories and symlinks are valid generic path targets.
       const directory = join(tree, "nested", "dir.jsonl");
       await mkdir(directory);
-      expect(() => localSessionPathToSyncUri(directory, sessionsRoot, lookup)).toThrow(
-        /not a regular file/,
+      expect(localSessionPathToSyncUri(directory, sessionsRoot, lookup)).toBe(
+        `pi-session-sync://sessions/${portableName}/nested/dir.jsonl`,
       );
-      expect(() =>
+      expect(
         syncParentUriToLocalPath(
-          `pi-session-sync://${portableName}/nested/dir.jsonl`,
+          `pi-session-sync://sessions/${portableName}/nested/dir.jsonl`,
           sessionsRoot,
         ),
-      ).toThrow(/not a regular file/);
+      ).toBe(directory);
 
-      // An existing symlink is rejected before staging in both directions.
+      // An existing symlink is a valid generic path target.
       const link = join(tree, "nested", "link.jsonl");
       await symlink(regular, link);
-      expect(() => localSessionPathToSyncUri(link, sessionsRoot, lookup)).toThrow(
-        /not a regular file|symlink/,
+      expect(localSessionPathToSyncUri(link, sessionsRoot, lookup)).toBe(
+        `pi-session-sync://sessions/${portableName}/nested/link.jsonl`,
       );
-      expect(() =>
+      expect(
         syncParentUriToLocalPath(
-          `pi-session-sync://${portableName}/nested/link.jsonl`,
+          `pi-session-sync://sessions/${portableName}/nested/link.jsonl`,
           sessionsRoot,
         ),
-      ).toThrow(/not a regular file|symlink/);
+      ).toBe(link);
     } finally {
       await rm(sessionsRoot, { recursive: true, force: true });
     }

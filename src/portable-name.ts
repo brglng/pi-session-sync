@@ -615,6 +615,50 @@ export function portableNameKeyIdentity(
 }
 
 /**
+ * Return true only when `name` is the canonical strict spelling of a portable
+ * session directory name, regardless of whether its decoded path is valid on
+ * this platform. This is a pure spelling check: decode the percent-encoded
+ * remainder, re-encode with the strict rule (`*` and terminal dots are always
+ * percent-encoded), and require an exact round-trip. Legacy loose
+ * `encodeURIComponent` spellings (literal `*`, terminal dots) fail the
+ * round-trip. The check intentionally avoids local path validation so foreign
+ * Windows-shaped names that are strictly spelled are not misclassified as
+ * loose; the platform-level validity of the decoded path is decided by the
+ * full decoder at the call site.
+ */
+export function isStrictPortableSessionDirName(
+  name: string,
+  options: Partial<PortableNameOptions> | undefined = undefined,
+): boolean {
+  let normalizedOptions: PortableNameOptions;
+  let normalizedHome: string;
+  try {
+    normalizedOptions = normalizePortableNameOptions(options);
+    normalizedHome = normalizePrefix(homedir(), "home");
+  } catch {
+    return false;
+  }
+  for (const mapping of decodingMappings(normalizedHome, normalizedOptions)) {
+    if (!name.startsWith(mapping.label)) continue;
+    const encodedRemainder = name.slice(mapping.label.length);
+    let remainder: string;
+    try {
+      remainder = decodeURIComponent(encodedRemainder);
+    } catch {
+      continue;
+    }
+    if (`${mapping.label}${encodeRemainderStrict(remainder)}` !== name) continue;
+    if (process.platform === "win32") {
+      // Native Windows additionally accepts the canonical case-folded
+      // spelling of an otherwise strict name.
+      return canonicalPortableSessionDirName(name, options) === name;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
  * Return stable identity spelling for a portable name on native Windows.
  *
  * Windows paths are case-insensitive, but configured labels remain semantic and

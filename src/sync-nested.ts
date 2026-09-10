@@ -123,7 +123,7 @@ export function hasLiveNestedStateEntry(
   portableName: string,
   namingOptions: PortableNameOptions,
 ): boolean {
-  const canonicalPrefix = `${canonicalStatePortableName(portableName, namingOptions)}/`;
+  const canonicalPrefix = `sessions/${canonicalStatePortableName(portableName, namingOptions)}/`;
   return Object.entries(state.entries).some(
     ([key, entry]) =>
       canonicalStateLogicalKey(key, namingOptions).startsWith(canonicalPrefix) &&
@@ -148,7 +148,7 @@ export function nestedReplacementHasSafeEvidence(
 ): boolean {
   return replacement.files.some((file) => {
     const oldKey = canonicalStateLogicalKey(
-      `${persistedPortableName}/${file.relativePath}`,
+      `sessions/${persistedPortableName}/${file.relativePath}`,
       namingOptions,
     );
     const entry = stateEntryForKey(state, oldKey, namingOptions);
@@ -359,7 +359,7 @@ export function associateNestedIgnoredSymlinkReplacementGroups(
         continue;
       }
       const oldKey = canonicalStateLogicalKey(
-        `${historicalLabel}/${ignored.relativePath}`,
+        `sessions/${historicalLabel}/${ignored.relativePath}`,
         ctx.namingOptions,
       );
       const oldEntry = stateEntryForKey(state, oldKey, ctx.namingOptions);
@@ -630,7 +630,7 @@ export function staleNestedTargetKeysForReplacement(
           continue;
         }
         const newKey = canonicalStateLogicalKey(
-          `${replacement.portableName}/${file.relativePath}`,
+          `sessions/${replacement.portableName}/${file.relativePath}`,
           ctx.namingOptions,
         );
         const replacementFile = targetScan.files.get(newKey);
@@ -971,6 +971,7 @@ export async function retargetLiveNestedTargetParentEvidence(
       file.cwdValues = transformed.cwdValues;
       file.sessionCwdPresent = transformed.sessionCwdPresent ?? false;
       file.sessionHeaderValid = transformed.sessionHeaderValid ?? false;
+      file.sessionHeaderCwdDecodable = transformed.sessionHeaderCwdDecodable;
       file.parentSessionReferences = transformed.parentSessionReferences ?? [];
     } catch {
       // Keep the scanned evidence: the safe second transform must never

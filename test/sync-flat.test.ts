@@ -39,10 +39,14 @@ describe("bidirectional session sync flat layout", () => {
         now: 50_000,
       });
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, starName, "star.jsonl"), "utf8")),
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", starName, "star.jsonl"), "utf8"),
+        ),
       ).toEqual({ cwd: `pi-session-sync://${starName}` });
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, dotName, "dot.jsonl"), "utf8")),
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", dotName, "dot.jsonl"), "utf8"),
+        ),
       ).toEqual({ cwd: `pi-session-sync://${dotName}` });
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
@@ -53,10 +57,10 @@ describe("bidirectional session sync flat layout", () => {
 
       // Target-side edits round-trip back to the local flat root.
       await writeFile(
-        join(fixture.targetDir, starName, "star.jsonl"),
+        join(fixture.targetDir, "sessions", starName, "star.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${starName}`, value: "target" })}\n`,
       );
-      await utimes(join(fixture.targetDir, starName, "star.jsonl"), 60, 60);
+      await utimes(join(fixture.targetDir, "sessions", starName, "star.jsonl"), 60, 60);
       await syncSessions({
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
@@ -91,7 +95,14 @@ describe("bidirectional session sync flat layout", () => {
       });
       expect(
         await readFile(
-          join(fixture.targetDir, portableSessionDirName(cwd), "nested", "deep", "orphan.md"),
+          join(
+            fixture.targetDir,
+            "sessions",
+            portableSessionDirName(cwd),
+            "nested",
+            "deep",
+            "orphan.md",
+          ),
           "utf8",
         ),
       ).toBe("inherited orphan\n");
@@ -125,12 +136,26 @@ describe("bidirectional session sync flat layout", () => {
       });
       expect(
         await readFile(
-          join(fixture.targetDir, portableSessionDirName(directCwd), "nested", "orphan.md"),
+          join(
+            fixture.targetDir,
+            "sessions",
+            portableSessionDirName(directCwd),
+            "nested",
+            "orphan.md",
+          ),
           "utf8",
         ),
       ).toBe("direct orphan\n");
       await expect(
-        readFile(join(fixture.targetDir, portableSessionDirName(nestedCwd), "nested", "orphan.md")),
+        readFile(
+          join(
+            fixture.targetDir,
+            "sessions",
+            portableSessionDirName(nestedCwd),
+            "nested",
+            "orphan.md",
+          ),
+        ),
       ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
@@ -154,7 +179,7 @@ describe("bidirectional session sync flat layout", () => {
         now: 63_500,
       });
       await rm(rootFile);
-      await rm(join(fixture.targetDir, fixture.portableName, "root.jsonl"));
+      await rm(join(fixture.targetDir, "sessions", fixture.portableName, "root.jsonl"));
       await mkdir(dirname(descendantFile), { recursive: true });
       await writeFile(
         descendantFile,
@@ -170,12 +195,13 @@ describe("bidirectional session sync flat layout", () => {
       });
       const targetDescendant = join(
         fixture.targetDir,
+        "sessions",
         fixture.portableName,
         "nested",
         "orphan.jsonl",
       );
       expect(JSON.parse(await readFile(targetDescendant, "utf8")).parentSession).toBe(
-        `pi-session-sync://${fixture.portableName}/missing/parent.jsonl`,
+        `pi-session-sync://sessions/${fixture.portableName}/missing/parent.jsonl`,
       );
       await syncSessions({
         sessionsRoot: flatRoot,
@@ -186,7 +212,7 @@ describe("bidirectional session sync flat layout", () => {
       });
       expect(await readFile(targetDescendant, "utf8")).toContain("orphan");
       await expect(
-        readFile(join(fixture.targetDir, fixture.portableName, "root.jsonl")),
+        readFile(join(fixture.targetDir, "sessions", fixture.portableName, "root.jsonl")),
       ).rejects.toThrow();
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
@@ -223,9 +249,9 @@ describe("bidirectional session sync flat layout", () => {
         machineId: "nearest-parent-flat-machine",
         now: 63_375,
       });
-      const targetSource = join(fixture.targetDir, sourceName, "current", "main.jsonl");
+      const targetSource = join(fixture.targetDir, "sessions", sourceName, "current", "main.jsonl");
       expect(JSON.parse(await readFile(targetSource, "utf8")).parentSession).toBe(
-        `pi-session-sync://${parentName}/parent/deep/missing.jsonl`,
+        `pi-session-sync://sessions/${parentName}/parent/deep/missing.jsonl`,
       );
     } finally {
       await cleanup(fixture.root);
@@ -240,7 +266,7 @@ describe("bidirectional session sync flat layout", () => {
     const newCwd = join(fixture.root, "parent-only-new-project");
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const sourceFile = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceFile = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const reusedPath = "nested/reused.jsonl";
     const localSource = join(flatRoot, "main.jsonl");
     const localReused = join(flatRoot, reusedPath);
@@ -251,7 +277,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceFile,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${reusedPath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${reusedPath}`,
           value: "with-parent",
         })}\n`,
       );
@@ -303,7 +329,8 @@ describe("bidirectional session sync flat layout", () => {
       });
       const newName = portableSessionDirName(newCwd);
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, newName, reusedPath), "utf8"))?.cwd,
+        JSON.parse(await readFile(join(fixture.targetDir, "sessions", newName, reusedPath), "utf8"))
+          ?.cwd,
       ).toBe(`pi-session-sync://${newName}`);
     } finally {
       await cleanup(fixture.root);
@@ -318,9 +345,9 @@ describe("bidirectional session sync flat layout", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const relativePath = "nested/stale.jsonl";
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const sourceLocal = join(flatRoot, "main.jsonl");
-    const parentTarget = join(fixture.targetDir, parentName, relativePath);
+    const parentTarget = join(fixture.targetDir, "sessions", parentName, relativePath);
     const parentLocal = join(flatRoot, relativePath);
     try {
       await mkdir(flatRoot);
@@ -329,7 +356,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${relativePath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${relativePath}`,
         })}\n`,
       );
       await utimes(sourceTarget, 1, 1);
@@ -397,7 +424,7 @@ describe("bidirectional session sync flat layout", () => {
     const knownFile = join(fixture.localTree, "known.jsonl");
     const unknownTree = join(fixture.sessionsRoot, defaultSessionDirName(unknownCwd));
     const unknownLocalFile = join(unknownTree, "orphan.md");
-    const unknownTargetFile = join(fixture.targetDir, unknownName, "target.jsonl");
+    const unknownTargetFile = join(fixture.targetDir, "sessions", unknownName, "target.jsonl");
     try {
       await writeFile(knownFile, `${JSON.stringify({ cwd: fixture.cwd, value: "known" })}\n`);
       await utimes(knownFile, 1, 1);
@@ -407,7 +434,7 @@ describe("bidirectional session sync flat layout", () => {
         machineId: "nested-retry-mapping-machine",
         now: 1_000,
       });
-      await rm(join(fixture.targetDir, fixture.portableName, "known.jsonl"));
+      await rm(join(fixture.targetDir, "sessions", fixture.portableName, "known.jsonl"));
       await writeFile(knownFile, "{}\n");
       await utimes(knownFile, 5, 5);
       await mkdir(unknownTree, { recursive: true });
@@ -427,11 +454,14 @@ describe("bidirectional session sync flat layout", () => {
       });
 
       expect(
-        await readFile(join(fixture.targetDir, fixture.portableName, "known.jsonl"), "utf8"),
+        await readFile(
+          join(fixture.targetDir, "sessions", fixture.portableName, "known.jsonl"),
+          "utf8",
+        ),
       ).toBe("{}\n");
-      expect(await readFile(join(fixture.targetDir, unknownName, "orphan.md"), "utf8")).toBe(
-        "nested orphan\n",
-      );
+      expect(
+        await readFile(join(fixture.targetDir, "sessions", unknownName, "orphan.md"), "utf8"),
+      ).toBe("nested orphan\n");
       expect(JSON.parse(await readFile(join(unknownTree, "target.jsonl"), "utf8")).cwd).toBe(
         unknownCwd,
       );
@@ -450,8 +480,13 @@ describe("bidirectional session sync flat layout", () => {
     const unknownFile = join(flatRoot, unknownPath);
     const knownName = portableSessionDirName(fixture.cwd);
     const unknownName = portableSessionDirName(unknownCwd);
-    const knownTargetFile = join(fixture.targetDir, knownName, knownPath);
-    const unknownTargetFile = join(fixture.targetDir, unknownName, "unknown/target.jsonl");
+    const knownTargetFile = join(fixture.targetDir, "sessions", knownName, knownPath);
+    const unknownTargetFile = join(
+      fixture.targetDir,
+      "sessions",
+      unknownName,
+      "unknown/target.jsonl",
+    );
     try {
       await mkdir(dirname(knownFile), { recursive: true });
       await writeFile(knownFile, `${JSON.stringify({ cwd: fixture.cwd, value: "known" })}\n`);
@@ -471,7 +506,7 @@ describe("bidirectional session sync flat layout", () => {
       };
       const scope = Object.values(state.scopes).find((candidate) => candidate.flatFiles[knownPath]);
       if (scope === undefined) throw new Error("missing flat test mapping");
-      const key = `${knownName}/${knownPath}`;
+      const key = `sessions/${knownName}/${knownPath}`;
       const entry = state.entries[key];
       if (entry === undefined) throw new Error("missing flat test entry");
       entry.tombstone = { side: "target", at: 1_500 };
@@ -496,9 +531,9 @@ describe("bidirectional session sync flat layout", () => {
       });
 
       expect(await readFile(knownTargetFile, "utf8")).toBe("{}\n");
-      expect(await readFile(join(fixture.targetDir, unknownName, unknownPath), "utf8")).toBe(
-        "flat orphan\n",
-      );
+      expect(
+        await readFile(join(fixture.targetDir, "sessions", unknownName, unknownPath), "utf8"),
+      ).toBe("flat orphan\n");
       expect(JSON.parse(await readFile(join(flatRoot, "unknown/target.jsonl"), "utf8")).cwd).toBe(
         unknownCwd,
       );
@@ -515,7 +550,7 @@ describe("bidirectional session sync flat layout", () => {
     const newCwd = join(fixture.root, "live-parent-new-project");
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const sourceFile = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceFile = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const reusedPath = "nested/reused.jsonl";
     const localReused = join(flatRoot, reusedPath);
     try {
@@ -525,7 +560,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceFile,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${reusedPath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${reusedPath}`,
         })}\n`,
       );
       await utimes(sourceFile, 1, 1);
@@ -573,9 +608,9 @@ describe("bidirectional session sync flat layout", () => {
     const newCwd = join(fixture.root, "stale-parent-new-project");
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const sourceFile = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceFile = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const relativePath = "nested/stale.jsonl";
-    const oldTargetFile = join(fixture.targetDir, parentName, relativePath);
+    const oldTargetFile = join(fixture.targetDir, "sessions", parentName, relativePath);
     const localOldFile = join(flatRoot, relativePath);
     try {
       await mkdir(dirname(sourceFile), { recursive: true });
@@ -584,7 +619,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceFile,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${relativePath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${relativePath}`,
         })}\n`,
       );
       await utimes(sourceFile, 1, 1);
@@ -650,7 +685,9 @@ describe("bidirectional session sync flat layout", () => {
       const newName = portableSessionDirName(newCwd);
       expect(scope?.flatFiles[relativePath]).toBe(newName);
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, newName, relativePath), "utf8"))?.cwd,
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", newName, relativePath), "utf8"),
+        )?.cwd,
       ).toBe(`pi-session-sync://${newName}`);
     } finally {
       await cleanup(fixture.root);
@@ -665,7 +702,7 @@ describe("bidirectional session sync flat layout", () => {
     const newCwd = join(fixture.root, "stale-target-new-project");
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const targetSource = join(fixture.targetDir, sourceName, "main.jsonl");
+    const targetSource = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const reusedPath = "nested/reused.jsonl";
     const localSource = join(flatRoot, "main.jsonl");
     const localReused = join(flatRoot, reusedPath);
@@ -676,7 +713,7 @@ describe("bidirectional session sync flat layout", () => {
         targetSource,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${reusedPath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${reusedPath}`,
         })}\n`,
       );
       await utimes(targetSource, 1, 1);
@@ -699,12 +736,12 @@ describe("bidirectional session sync flat layout", () => {
         now: 3_000,
       });
       const newName = portableSessionDirName(newCwd);
-      expect(await readFile(join(fixture.targetDir, newName, reusedPath), "utf8")).toContain(
-        `pi-session-sync://${newName}`,
-      );
+      expect(
+        await readFile(join(fixture.targetDir, "sessions", newName, reusedPath), "utf8"),
+      ).toContain(`pi-session-sync://${newName}`);
       await expect(readFile(targetSource, "utf8")).rejects.toThrow();
       await expect(
-        readFile(join(fixture.targetDir, parentName, reusedPath), "utf8"),
+        readFile(join(fixture.targetDir, "sessions", parentName, reusedPath), "utf8"),
       ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
@@ -719,7 +756,7 @@ describe("bidirectional session sync flat layout", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const localMain = join(flatRoot, "nested", "main.jsonl");
-    const targetMain = join(fixture.targetDir, sourceName, "nested", "main.jsonl");
+    const targetMain = join(fixture.targetDir, "sessions", sourceName, "nested", "main.jsonl");
     try {
       await mkdir(join(flatRoot, "nested"), { recursive: true });
       await writeFile(
@@ -734,7 +771,7 @@ describe("bidirectional session sync flat layout", () => {
         targetMain,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/nested/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/nested/missing.jsonl`,
         })}\n`,
       );
       await syncSessions({
@@ -745,7 +782,7 @@ describe("bidirectional session sync flat layout", () => {
         now: 63_750,
       });
       expect(JSON.parse(await readFile(targetMain, "utf8")).parentSession).toBe(
-        `pi-session-sync://${parentName}/nested/missing.jsonl`,
+        `pi-session-sync://sessions/${parentName}/nested/missing.jsonl`,
       );
       expect(JSON.parse(await readFile(localMain, "utf8")).parentSession).toBe(
         join(flatRoot, "nested", "missing.jsonl"),
@@ -775,7 +812,7 @@ describe("bidirectional session sync flat layout", () => {
           machineId: "unresolved-local-parent-flat-machine",
           now: 63_500,
         }),
-      ).rejects.toThrow(/flat path is not mapped/);
+      ).rejects.toThrow(/Session path is not mapped/);
     } finally {
       await cleanup(fixture.root);
     }
@@ -788,15 +825,15 @@ describe("bidirectional session sync flat layout", () => {
     const parentCwd = join(fixture.root, "parent-project");
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const targetFile = join(fixture.targetDir, sourceName, "main.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     try {
       await mkdir(flatRoot, { recursive: true });
-      await mkdir(join(fixture.targetDir, sourceName), { recursive: true });
+      await mkdir(join(fixture.targetDir, "sessions", sourceName), { recursive: true });
       await writeFile(
         targetFile,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
         })}\n`,
       );
       await syncSessions({
@@ -814,7 +851,7 @@ describe("bidirectional session sync flat layout", () => {
         now: 65_000,
       });
       expect(await readFile(targetFile, "utf8")).toContain(
-        `parentSession":"pi-session-sync://${parentName}/missing.jsonl`,
+        `parentSession":"pi-session-sync://sessions/${parentName}/missing.jsonl`,
       );
     } finally {
       await cleanup(fixture.root);
@@ -827,14 +864,14 @@ describe("bidirectional session sync flat layout", () => {
     const parentCwd = join(fixture.root, "nested-parent-project");
     const treeName = portableSessionDirName(treeCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const targetFile = join(fixture.targetDir, treeName, "main.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", treeName, "main.jsonl");
     try {
       await mkdir(dirname(targetFile), { recursive: true });
       await writeFile(
         targetFile,
         `${JSON.stringify({
           cwd: `pi-session-sync://${treeName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
         })}\n`,
       );
       await utimes(targetFile, 1, 1);
@@ -863,7 +900,7 @@ describe("bidirectional session sync flat layout", () => {
         now: 3_000,
       });
       expect(JSON.parse(await readFile(targetFile, "utf8")).parentSession).toBe(
-        `pi-session-sync://${parentName}/missing.jsonl`,
+        `pi-session-sync://sessions/${parentName}/missing.jsonl`,
       );
     } finally {
       await cleanup(fixture.root);
@@ -878,10 +915,11 @@ describe("bidirectional session sync flat layout", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const replacementName = portableSessionDirName(replacementCwd);
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const sourceLocal = join(fixture.sessionsRoot, defaultSessionDirName(sourceCwd), "main.jsonl");
     const replacementTarget = join(
       fixture.targetDir,
+      "sessions",
       replacementName,
       "nested",
       "replacement.jsonl",
@@ -892,7 +930,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
         })}\n`,
       );
       await utimes(sourceTarget, 1, 1);
@@ -937,18 +975,18 @@ describe("bidirectional session sync flat layout", () => {
     const parentName = portableSessionDirName(parentCwd);
     const sourceTree = join(fixture.sessionsRoot, defaultSessionDirName(sourceCwd));
     const parentTree = join(fixture.sessionsRoot, defaultSessionDirName(parentCwd));
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const sourceLocal = join(sourceTree, "main.jsonl");
     const relativePath = "nested/stale.jsonl";
     const parentLocal = join(parentTree, relativePath);
-    const parentTarget = join(fixture.targetDir, parentName, relativePath);
+    const parentTarget = join(fixture.targetDir, "sessions", parentName, relativePath);
     try {
       await mkdir(dirname(sourceTarget), { recursive: true });
       await writeFile(
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
         })}\n`,
       );
       await utimes(sourceTarget, 1, 1);
@@ -1013,10 +1051,11 @@ describe("bidirectional session sync flat layout", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const replacementName = portableSessionDirName(replacementCwd);
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const sourceLocal = join(fixture.sessionsRoot, defaultSessionDirName(sourceCwd), "main.jsonl");
     const replacementTarget = join(
       fixture.targetDir,
+      "sessions",
       replacementName,
       "nested",
       "replacement.jsonl",
@@ -1027,7 +1066,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+          parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
           value: "old",
         })}\n`,
       );
@@ -1076,10 +1115,10 @@ describe("bidirectional session sync flat layout", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const replacementName = portableSessionDirName(replacementCwd);
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const sourceLocal = join(flatRoot, "main.jsonl");
     const relativePath = "nested/reused.jsonl";
-    const replacementTarget = join(fixture.targetDir, replacementName, relativePath);
+    const replacementTarget = join(fixture.targetDir, "sessions", replacementName, relativePath);
     try {
       await mkdir(flatRoot);
       await mkdir(dirname(sourceTarget), { recursive: true });
@@ -1087,7 +1126,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${relativePath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${relativePath}`,
         })}\n`,
       );
       await utimes(sourceTarget, 1, 1);
@@ -1135,10 +1174,10 @@ describe("bidirectional session sync flat layout", () => {
     const sourceName = portableSessionDirName(sourceCwd);
     const parentName = portableSessionDirName(parentCwd);
     const replacementName = portableSessionDirName(replacementCwd);
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
     const sourceLocal = join(flatRoot, "main.jsonl");
     const relativePath = "nested/reused.jsonl";
-    const replacementTarget = join(fixture.targetDir, replacementName, relativePath);
+    const replacementTarget = join(fixture.targetDir, "sessions", replacementName, relativePath);
     try {
       await mkdir(flatRoot);
       await mkdir(dirname(sourceTarget), { recursive: true });
@@ -1146,7 +1185,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${relativePath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${relativePath}`,
           value: "old",
         })}\n`,
       );
@@ -1198,8 +1237,8 @@ describe("bidirectional session sync flat layout", () => {
     const parentName = portableSessionDirName(parentCwd);
     const targetName = portableSessionDirName(targetCwd);
     const relativePath = "nested/reused.jsonl";
-    const sourceTarget = join(fixture.targetDir, sourceName, "main.jsonl");
-    const targetCollision = join(fixture.targetDir, targetName, relativePath);
+    const sourceTarget = join(fixture.targetDir, "sessions", sourceName, "main.jsonl");
+    const targetCollision = join(fixture.targetDir, "sessions", targetName, relativePath);
     try {
       await mkdir(flatRoot);
       await mkdir(dirname(sourceTarget), { recursive: true });
@@ -1207,7 +1246,7 @@ describe("bidirectional session sync flat layout", () => {
         sourceTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${sourceName}`,
-          parentSession: `pi-session-sync://${parentName}/${relativePath}`,
+          parentSession: `pi-session-sync://sessions/${parentName}/${relativePath}`,
         })}\n`,
       );
       await mkdir(dirname(targetCollision), { recursive: true });
@@ -1236,13 +1275,13 @@ describe("bidirectional session sync flat layout", () => {
     const parentCwd = join(fixture.root, "nested-collision:a");
     const treeName = portableSessionDirName(treeCwd);
     const parentName = portableSessionDirName(parentCwd);
-    const targetFile = join(fixture.targetDir, treeName, "main.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", treeName, "main.jsonl");
     try {
       expect(defaultSessionDirName(treeCwd)).toBe(defaultSessionDirName(parentCwd));
       await mkdir(dirname(targetFile), { recursive: true });
       const targetText = `${JSON.stringify({
         cwd: `pi-session-sync://${treeName}`,
-        parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+        parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
       })}\n`;
       await writeFile(targetFile, targetText);
       await expect(
@@ -1265,12 +1304,12 @@ describe("bidirectional session sync flat layout", () => {
     const cwd = join(homedir(), `pi-sync-parent-tree-same-cwd-${Date.now()}`);
     const treeName = portableSessionDirName(cwd);
     const parentName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const targetFile = join(fixture.targetDir, treeName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", treeName, "session.jsonl");
     const targetText = `${JSON.stringify({
       type: "session",
       id: "same-cwd-label-conflict",
       cwd: `pi-session-sync://${treeName}`,
-      parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+      parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
       value: "target",
     })}\n`;
     try {
@@ -1299,8 +1338,8 @@ describe("bidirectional session sync flat layout", () => {
     const oldName = portableSessionDirName(cwd);
     const replacementName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
     const localFile = join(fixture.sessionsRoot, localName, "session.jsonl");
-    const oldTarget = join(fixture.targetDir, oldName, "session.jsonl");
-    const replacementTarget = join(fixture.targetDir, replacementName, "session.jsonl");
+    const oldTarget = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const replacementTarget = join(fixture.targetDir, "sessions", replacementName, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -1318,7 +1357,7 @@ describe("bidirectional session sync flat layout", () => {
         type: "session",
         id: "stale",
         cwd: `pi-session-sync://${oldName}`,
-        parentSession: `pi-session-sync://${oldName}/missing.jsonl`,
+        parentSession: `pi-session-sync://sessions/${oldName}/missing.jsonl`,
         value: "stale",
       })}\n`;
       const replacementText = `${JSON.stringify({
@@ -1357,8 +1396,8 @@ describe("bidirectional session sync flat layout", () => {
     const oldName = portableSessionDirName(sourceCwd);
     const replacementName = `ROOT${encodeURIComponent(toPosixAbsolute(sourceCwd))}`;
     const parentName = portableSessionDirName(parentCwd);
-    const oldTarget = join(fixture.targetDir, oldName, "session.jsonl");
-    const replacementTarget = join(fixture.targetDir, replacementName, "session.jsonl");
+    const oldTarget = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const replacementTarget = join(fixture.targetDir, "sessions", replacementName, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -1372,7 +1411,7 @@ describe("bidirectional session sync flat layout", () => {
 
       const oldText = `${JSON.stringify({
         cwd: `pi-session-sync://${oldName}`,
-        parentSession: `pi-session-sync://${parentName}/missing.jsonl`,
+        parentSession: `pi-session-sync://sessions/${parentName}/missing.jsonl`,
         value: "stale-old",
       })}\n`;
       const replacementText = `${JSON.stringify({
@@ -1411,14 +1450,14 @@ describe("bidirectional session sync flat layout", () => {
       const firstPortable = portableSessionDirName(firstCwd);
       const secondPortable = portableSessionDirName(secondCwd);
       expect(defaultSessionDirName(firstCwd)).toBe(defaultSessionDirName(secondCwd));
-      await mkdir(join(fixture.targetDir, firstPortable));
-      await mkdir(join(fixture.targetDir, secondPortable));
+      await mkdir(join(fixture.targetDir, "sessions", firstPortable));
+      await mkdir(join(fixture.targetDir, "sessions", secondPortable));
       await writeFile(
-        join(fixture.targetDir, firstPortable, "first.jsonl"),
+        join(fixture.targetDir, "sessions", firstPortable, "first.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${firstPortable}` })}\n`,
       );
       await writeFile(
-        join(fixture.targetDir, secondPortable, "second.jsonl"),
+        join(fixture.targetDir, "sessions", secondPortable, "second.jsonl"),
         `${JSON.stringify({ cwd: `pi-session-sync://${secondPortable}` })}\n`,
       );
       await expect(

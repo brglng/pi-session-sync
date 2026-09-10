@@ -1,11 +1,11 @@
 /// <reference types="node" />
 
-import { lstatSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { SessionLayout } from "./config.ts";
 import {
   decodePortableSessionDirName,
   defaultSessionDirName,
+  isStrictPortableSessionDirName,
   type PortableNameOptions,
   portableSessionDirName,
   strictPortableNameIdentity,
@@ -13,6 +13,15 @@ import {
 } from "./portable-name.ts";
 
 export const SYNC_URI_PREFIX = "pi-session-sync://";
+
+export const SESSIONS_ROOT_NAMESPACE = "sessions";
+export const MISSIONS_ROOT_NAMESPACE = "missions";
+export const SESSIONS_FILE_URI_PREFIX = `${SYNC_URI_PREFIX}${SESSIONS_ROOT_NAMESPACE}/`;
+export const MISSIONS_FILE_URI_PREFIX = `${SYNC_URI_PREFIX}${MISSIONS_ROOT_NAMESPACE}/`;
+
+/** Logical state-key prefixes that namespace every synced file. */
+export const SESSIONS_LOGICAL_KEY_PREFIX = `${SESSIONS_ROOT_NAMESPACE}/`;
+export const MISSIONS_LOGICAL_KEY_PREFIX = `${MISSIONS_ROOT_NAMESPACE}/`;
 
 /**
  * Return Pi's default per-working-directory session directory name, rejecting
@@ -54,6 +63,23 @@ export function sameNativeName(first: string, second: string): boolean {
 
 export function isSyncUri(value: string): boolean {
   return /^pi-session-sync:/i.test(value);
+}
+
+/**
+ * True when the value is a sessions-namespaced sync URI with NO relative path
+ * (`pi-session-sync://sessions/<portableName>`): it names a session directory,
+ * never a session file. Invalid URIs return false; callers validate URI
+ * legality separately.
+ */
+export function isSessionsDirectorySyncUri(value: string): boolean {
+  if (!isSyncUri(value)) return false;
+  const prefix = value.match(/^pi-session-sync:\/\//i);
+  if (prefix === null) return false;
+  const rest = value.slice(prefix[0].length);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) return false;
+  if (rest.slice(0, slash).toLowerCase() !== SESSIONS_ROOT_NAMESPACE) return false;
+  return !rest.slice(slash + 1).includes("/");
 }
 
 /** Return true for absolute path spellings native to Windows but ambiguous on POSIX. */
@@ -119,6 +145,12 @@ export function syncUriToCwd(
   if (name.length === 0 || name.includes("/")) {
     throw new Error(`Invalid pi-session-sync cwd URI: ${value}`);
   }
+  // Current-format cwd URIs carry the strict canonical portable spelling.
+  // Legacy loose spellings (literal `*`, terminal dots) are old/inapplicable
+  // content and are rejected instead of being silently normalized.
+  if (!isStrictPortableSessionDirName(name, namingOptions)) {
+    throw new Error(`Legacy loose portable name in cwd URI: ${value}`);
+  }
   const decoded = decodePortableSessionDirName(name, namingOptions);
   if (decoded === null) {
     throw new Error(`Cannot decode pi-session-sync cwd URI: ${value}`);
@@ -141,6 +173,9 @@ export function syncUriToPortableName(
   if (name.length === 0 || name.includes("/")) {
     throw new Error(`Invalid pi-session-sync cwd URI: ${value}`);
   }
+  if (!isStrictPortableSessionDirName(name, namingOptions)) {
+    throw new Error(`Legacy loose portable name in cwd URI: ${value}`);
+  }
   const decoded = decodePortableSessionDirName(name, namingOptions);
   if (decoded === null) {
     throw new Error(`Cannot decode pi-session-sync cwd URI: ${value}`);
@@ -154,51 +189,6 @@ function isPathInsideOrEqual(root: string, candidate: string): boolean {
     value === "" ||
     (value !== ".." && !value.startsWith(`..${requireSeparator()}`) && !isAbsolute(value))
   );
-}
-
-function assertNoSymlinkPath(root: string, candidate: string): void {
-  const rootPath = resolve(root);
-  const candidatePath = resolve(candidate);
-  if (!isPathInsideOrEqual(rootPath, candidatePath)) {
-    throw new Error(`Path is outside sessions root: ${candidate}`);
-  }
-  let current = candidatePath;
-  let rootMissing = false;
-  while (true) {
-    let info: ReturnType<typeof lstatSync> | undefined;
-    try {
-      info = lstatSync(current);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    if (info?.isSymbolicLink()) {
-      throw new Error(`Path traverses a symlink: ${candidate}`);
-    }
-    if (info !== undefined && current !== candidatePath && !info.isDirectory()) {
-      throw new Error(`Path traverses a non-directory: ${candidate}`);
-    }
-    if (nativePathIdentity(current) === nativePathIdentity(rootPath)) {
-      if (info !== undefined) return;
-      rootMissing = true;
-    }
-    if (rootMissing && info !== undefined) return;
-    const parent = dirname(current);
-    if (parent === current) return;
-    current = parent;
-  }
-}
-
-function assertParentSessionRegularFile(candidate: string): void {
-  let info: ReturnType<typeof lstatSync> | undefined;
-  try {
-    info = lstatSync(candidate);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  if (info !== undefined && !info.isFile()) {
-    throw new Error(`parentSession path exists but is not a regular file: ${candidate}`);
-  }
 }
 
 function pathRelativeTo(root: string, candidate: string): string {
@@ -332,15 +322,7 @@ export function localSessionPathToSyncUri(
     }
     return mapping;
   };
-  if (process.platform !== "win32" && isWindowsShapedAbsolutePath(value)) {
-    throw new Error(`Windows-shaped absolute parentSession path is not valid on POSIX: ${value}`);
-  }
   const absolute = resolve(value);
-  assertNoSymlinkPath(sessionsRoot, absolute);
-  // A missing referenced file stays legal, but any existing final segment
-  // must be a real regular file; a directory, symlink, or special node would
-  // break the session copy later, so the sync stops before staging.
-  assertParentSessionRegularFile(absolute);
   const relativePath = toPosixRelative(pathRelativeTo(sessionsRoot, absolute));
   if (layout === "flat") {
     // Flat parent paths need their own exact or inherited directory mapping;
@@ -356,21 +338,52 @@ export function localSessionPathToSyncUri(
       }
     }
     if (mapping === undefined) {
-      throw new Error(`parentSession flat path is not mapped: ${relativePath}`);
+      throw new Error(`Session flat path is not mapped: ${relativePath}`);
     }
     const validMapping = assertMapping(mapping);
-    return `${SYNC_URI_PREFIX}${validMapping.portableName}/${encodeRelativeSegments(relativePath)}`;
+    return `${SESSIONS_FILE_URI_PREFIX}${validMapping.portableName}/${encodeRelativeSegments(relativePath)}`;
   }
   const [localName, ...rest] = relativePath.split("/");
   if (localName === undefined || rest.length === 0) {
-    throw new Error(`parentSession does not identify a session file: ${value}`);
+    throw new Error(`Session path does not identify a session file: ${value}`);
   }
   const mapping = lookup(localName) ?? fallback;
   if (mapping === undefined) {
-    throw new Error(`parentSession session directory is not mapped: ${localName}`);
+    throw new Error(`Session directory is not mapped: ${localName}`);
   }
   const validMapping = assertMapping(mapping);
-  return `${SYNC_URI_PREFIX}${validMapping.portableName}/${encodeRelativeSegments(rest.join("/"))}`;
+  return `${SESSIONS_FILE_URI_PREFIX}${validMapping.portableName}/${encodeRelativeSegments(rest.join("/"))}`;
+}
+
+/**
+ * Split a root-namespaced sessions file URI into its portable name and the
+ * percent-encoded relative path. Rootless `pi-session-sync://<name>/<rel>`
+ * spellings (the old incompatible file format) are rejected. A sessions
+ * directory URI (`sessions/<portableName>`) carries an empty relative path.
+ */
+function sessionsFileUriParts(value: string): { portableName: string; relativeEncoded: string } {
+  const rest = syncUriRemainder(value);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) throw new Error(`Invalid pi-session-sync file URI: ${value}`);
+  if (rest.slice(0, slash).toLowerCase() !== SESSIONS_ROOT_NAMESPACE) {
+    throw new Error(`Invalid pi-session-sync file URI namespace: ${value}`);
+  }
+  const inner = rest.slice(slash + 1);
+  const innerSlash = inner.indexOf("/");
+  if (innerSlash < 0) {
+    // Directory URI: no relative path.
+    if (inner.length === 0) {
+      throw new Error(`Invalid pi-session-sync sessions file URI: ${value}`);
+    }
+    return { portableName: inner, relativeEncoded: "" };
+  }
+  if (innerSlash === 0 || innerSlash === inner.length - 1) {
+    throw new Error(`Invalid pi-session-sync sessions file URI: ${value}`);
+  }
+  return {
+    portableName: inner.slice(0, innerSlash),
+    relativeEncoded: inner.slice(innerSlash + 1),
+  };
 }
 
 export function syncParentUriToLocalPath(
@@ -383,30 +396,26 @@ export function syncParentUriToLocalPath(
   const effectiveNamingOptions =
     namingOptions ??
     (typeof layoutOrNamingOptions === "string" ? undefined : layoutOrNamingOptions);
-  const rest = syncUriRemainder(value);
-  const slash = rest.indexOf("/");
-  if (slash <= 0 || slash === rest.length - 1) {
-    throw new Error(`Invalid pi-session-sync parentSession URI: ${value}`);
+  const parts = sessionsFileUriParts(value);
+  // Current-format sessions file URIs carry the strict canonical portable
+  // spelling; legacy loose spellings are old/inapplicable URI content.
+  if (!isStrictPortableSessionDirName(parts.portableName, effectiveNamingOptions)) {
+    throw new Error(`Legacy loose portable name in sync file URI: ${value}`);
   }
-  const portableName = rest.slice(0, slash);
-  const decoded = decodePortableSessionDirName(portableName, effectiveNamingOptions);
+  const decoded = decodePortableSessionDirName(parts.portableName, effectiveNamingOptions);
   if (decoded === null) {
-    throw new Error(`Cannot decode pi-session-sync parentSession URI: ${value}`);
+    throw new Error(`Cannot decode pi-session-sync file URI: ${value}`);
   }
-  const segments = decodeRelativeSegments(rest.slice(slash + 1));
+  const segments =
+    parts.relativeEncoded.length === 0 ? [] : decodeRelativeSegments(parts.relativeEncoded);
   const localRoot =
     layout === "flat"
       ? resolve(sessionsRoot)
       : join(sessionsRoot, generatedLocalSessionDirName(decoded.cwd));
   const localPath = resolve(localRoot, ...segments);
-  if (!isPathInsideOrEqual(localRoot, localPath) || !isPathInside(localRoot, localPath)) {
-    throw new Error(`parentSession path escapes session directory: ${value}`);
+  if (!isPathInsideOrEqual(localRoot, localPath)) {
+    throw new Error(`Session path escapes session directory: ${value}`);
   }
-  assertNoSymlinkPath(sessionsRoot, localPath);
-  // Same rule as the local-to-target direction: a referenced path that exists
-  // must be a real regular non-symlink file, in both target directions,
-  // before any staging happens.
-  assertParentSessionRegularFile(localPath);
   return localPath;
 }
 
@@ -414,17 +423,15 @@ export function syncParentUriToPortableName(
   value: string,
   namingOptions: Partial<PortableNameOptions> | undefined = undefined,
 ): string {
-  const rest = syncUriRemainder(value);
-  const slash = rest.indexOf("/");
-  if (slash <= 0 || slash === rest.length - 1) {
-    throw new Error(`Invalid pi-session-sync parentSession URI: ${value}`);
+  const parts = sessionsFileUriParts(value);
+  if (!isStrictPortableSessionDirName(parts.portableName, namingOptions)) {
+    throw new Error(`Legacy loose portable name in sync file URI: ${value}`);
   }
-  const portableName = rest.slice(0, slash);
-  const decoded = decodePortableSessionDirName(portableName, namingOptions);
+  const decoded = decodePortableSessionDirName(parts.portableName, namingOptions);
   if (decoded === null) {
-    throw new Error(`Cannot decode pi-session-sync parentSession URI: ${value}`);
+    throw new Error(`Cannot decode pi-session-sync file URI: ${value}`);
   }
-  decodeRelativeSegments(rest.slice(slash + 1));
+  if (parts.relativeEncoded.length > 0) decodeRelativeSegments(parts.relativeEncoded);
   return decoded.name;
 }
 
@@ -432,25 +439,24 @@ export function syncParentUriToCanonical(
   value: string,
   namingOptions: Partial<PortableNameOptions> | undefined = undefined,
 ): string {
-  const rest = syncUriRemainder(value);
-  const slash = rest.indexOf("/");
-  if (slash <= 0 || slash === rest.length - 1) {
-    throw new Error(`Invalid pi-session-sync parentSession URI: ${value}`);
+  const parts = sessionsFileUriParts(value);
+  if (!isStrictPortableSessionDirName(parts.portableName, namingOptions)) {
+    throw new Error(`Legacy loose portable name in sync file URI: ${value}`);
   }
-  const portableName = rest.slice(0, slash);
-  const decoded = decodePortableSessionDirName(portableName, namingOptions);
+  const decoded = decodePortableSessionDirName(parts.portableName, namingOptions);
   if (decoded === null) {
-    throw new Error(`Cannot decode pi-session-sync parentSession URI: ${value}`);
+    throw new Error(`Cannot decode pi-session-sync file URI: ${value}`);
   }
-  const segments = decodeRelativeSegments(rest.slice(slash + 1));
-  // Canonical hashing normalizes legacy loose spellings to the strict
-  // identity so equivalent absolute/sync parent representations hash the same.
   const canonicalName = strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name;
+  if (parts.relativeEncoded.length === 0) {
+    return `${SESSIONS_FILE_URI_PREFIX}${canonicalName}`;
+  }
+  const segments = decodeRelativeSegments(parts.relativeEncoded);
   // Case-insensitive filesystems fold relative segment case so that
   // case-variant spellings of the same parent session hash identically.
   const canonicalSegments =
     process.platform === "win32" ? segments.map((segment) => segment.toLowerCase()) : segments;
-  return `${SYNC_URI_PREFIX}${canonicalName}/${encodeRelativeSegments(canonicalSegments.join("/"))}`;
+  return `${SESSIONS_FILE_URI_PREFIX}${canonicalName}/${encodeRelativeSegments(canonicalSegments.join("/"))}`;
 }
 
 export function isPathInside(root: string, candidate: string): boolean {

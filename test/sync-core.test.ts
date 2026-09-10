@@ -40,7 +40,7 @@ describe("bidirectional session sync core", () => {
         now: 1_000,
       });
       expect(first.copied).toBe(2);
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       const targetSource = join(targetTree, "session.jsonl");
       const targetMarkdown = join(targetTree, "notes.md");
       const targetEntry = JSON.parse(await readFile(targetSource, "utf8")) as Record<
@@ -49,7 +49,7 @@ describe("bidirectional session sync core", () => {
       >;
       expect(targetEntry.cwd).toBe(`pi-session-sync://${fixture.portableName}`);
       expect(targetEntry.parentSession).toBe(
-        `pi-session-sync://${fixture.portableName}/parent.jsonl`,
+        `pi-session-sync://sessions/${fixture.portableName}/parent.jsonl`,
       );
       expect(await readFile(targetMarkdown, "utf8")).toContain(
         `cwd: pi-session-sync://${fixture.portableName}`,
@@ -86,8 +86,10 @@ describe("bidirectional session sync core", () => {
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { entries: Record<string, { tombstone: unknown }> };
       expect(
-        stateAfterEmptySync.entries[`${fixture.portableName}/notes.md`]?.tombstone === null ||
-          stateAfterEmptySync.entries[`${fixture.portableName}/notes.md`]?.tombstone === undefined,
+        stateAfterEmptySync.entries[`sessions/${fixture.portableName}/notes.md`]?.tombstone ===
+          null ||
+          stateAfterEmptySync.entries[`sessions/${fixture.portableName}/notes.md`]?.tombstone ===
+            undefined,
       ).toBe(false);
 
       await writeFile(markdown, "notes recreated\n");
@@ -134,7 +136,7 @@ describe("bidirectional session sync core", () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "notes.md");
     const parentPath = join(fixture.localTree, "parent.jsonl");
-    const target = join(fixture.targetDir, fixture.portableName, "notes.md");
+    const target = join(fixture.targetDir, "sessions", fixture.portableName, "notes.md");
     const localText = [
       "---",
       `cwd: ${fixture.cwd}`,
@@ -153,6 +155,9 @@ describe("bidirectional session sync core", () => {
         machineId: "markdown-parent-hash-machine",
         now: 1_000,
       });
+      // Markdown parentSession bytes stay unchanged in output: only cwd is
+      // rewritten, and only the canonical hash normalizes the local absolute
+      // parentSession and the sync URI to one portable representation.
       expect(await readFile(target, "utf8")).toBe(
         localText.replace(`cwd: ${fixture.cwd}`, `cwd: pi-session-sync://${fixture.portableName}`),
       );
@@ -166,7 +171,7 @@ describe("bidirectional session sync core", () => {
       expect(unchanged.copied).toBe(0);
       expect(unchanged.deleted).toBe(0);
 
-      const syncParent = `pi-session-sync://${fixture.portableName}/parent.jsonl`;
+      const syncParent = `pi-session-sync://sessions/${fixture.portableName}/parent.jsonl`;
       await writeFile(
         target,
         localText
@@ -201,15 +206,19 @@ describe("bidirectional session sync core", () => {
     try {
       await writeFile(source, localText);
       await utimes(source, 1, 1);
+      // Local source: an out-of-root absolute parentSession is a strict file
+      // error before staging; it is never silently preserved or copied.
       await expect(
         syncSessions({
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           now: 1_000,
         }),
-      ).rejects.toThrow(/outside sessions root/);
+      ).rejects.toThrow(/parentSession must reference a session file/);
+      // Markdown stays unchanged and no state or files are written.
       expect(await readFile(source, "utf8")).toBe(localText);
       await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+      expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
     } finally {
       await cleanup(fixture.root);
     }
@@ -218,7 +227,7 @@ describe("bidirectional session sync core", () => {
   it("accepts legal sync-URI Markdown parentSession in local files and preserves its bytes", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "notes.md");
-    const syncParent = `pi-session-sync://${fixture.portableName}/parent.jsonl`;
+    const syncParent = `pi-session-sync://sessions/${fixture.portableName}/parent.jsonl`;
     const localText = [
       "---",
       `cwd: ${fixture.cwd}`,
@@ -237,7 +246,7 @@ describe("bidirectional session sync core", () => {
         now: 1_000,
       });
       expect(first.copied).toBe(1);
-      const target = join(fixture.targetDir, fixture.portableName, "notes.md");
+      const target = join(fixture.targetDir, "sessions", fixture.portableName, "notes.md");
       expect(await readFile(target, "utf8")).toContain(`parentSession: ${syncParent}`);
       // Idempotent second sync: the canonical hash made both sides equal, so
       // the preserved URI does not cause a rewrite or a deletion.
@@ -263,7 +272,7 @@ describe("bidirectional session sync core", () => {
     const localText = [
       "---",
       `cwd: ${cwd}`,
-      `parentSession: pi-session-sync://${alternateName}/parent.jsonl`,
+      `parentSession: pi-session-sync://sessions/${alternateName}/parent.jsonl`,
       "description: keep-bytes",
       "---",
       "body",
@@ -284,7 +293,7 @@ describe("bidirectional session sync core", () => {
       // Markdown stays unchanged and no state or files are written.
       expect(await readFile(source, "utf8")).toBe(localText);
       await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-      expect(await readdir(fixture.targetDir)).toEqual([]);
+      expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
     } finally {
       await cleanup(fixture.root);
       await rm(cwd, { recursive: true, force: true });
@@ -297,8 +306,8 @@ describe("bidirectional session sync core", () => {
     const parentLocalName = defaultSessionDirName(parentCwd);
     const parentName = portableSessionDirName(parentCwd);
     const parentPath = join(fixture.sessionsRoot, parentLocalName, "missing-parent.jsonl");
-    const targetParentDir = join(fixture.targetDir, parentName);
-    const targetSourceDir = join(fixture.targetDir, fixture.portableName);
+    const targetParentDir = join(fixture.targetDir, "sessions", parentName);
+    const targetSourceDir = join(fixture.targetDir, "sessions", fixture.portableName);
     try {
       // The local sessions root is empty: every file below is target-only.
       await mkdir(targetParentDir, { recursive: true });
@@ -341,7 +350,7 @@ describe("bidirectional session sync core", () => {
     const sourceCwd = join(fixture.root, "target-flat-source");
     const sourceName = portableSessionDirName(sourceCwd);
     const missingParent = join(flatRoot, "nested", "missing.jsonl");
-    const targetFile = join(fixture.targetDir, sourceName, "nested", "main.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", sourceName, "nested", "main.jsonl");
     try {
       await mkdir(dirname(targetFile), { recursive: true });
       await writeFile(
@@ -405,7 +414,7 @@ describe("bidirectional session sync core", () => {
       // Delete the stale file on both sides; its exact mapping stays in state
       // with a tombstone.
       await rm(staleFile);
-      await rm(join(fixture.targetDir, staleName, "nested", "stale.jsonl"));
+      await rm(join(fixture.targetDir, "sessions", staleName, "nested", "stale.jsonl"));
       await syncSessions({
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
@@ -435,11 +444,14 @@ describe("bidirectional session sync core", () => {
       // wins; the tombstoned exact mapping must not override it.
       expect(
         JSON.parse(
-          await readFile(join(fixture.targetDir, liveName, "nested", "second.jsonl"), "utf8"),
+          await readFile(
+            join(fixture.targetDir, "sessions", liveName, "nested", "second.jsonl"),
+            "utf8",
+          ),
         ).parentSession,
-      ).toBe(`pi-session-sync://${liveName}/nested/stale.jsonl`);
+      ).toBe(`pi-session-sync://sessions/${liveName}/nested/stale.jsonl`);
       await expect(
-        readFile(join(fixture.targetDir, staleName, "nested", "second.jsonl"), "utf8"),
+        readFile(join(fixture.targetDir, "sessions", staleName, "nested", "second.jsonl"), "utf8"),
       ).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
@@ -453,8 +465,8 @@ describe("bidirectional session sync core", () => {
     const localFile = join(localTree, "session.jsonl");
     const oldName = portableSessionDirName(cwd);
     const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, newName, "session.jsonl");
+    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
+    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
     const options = {
       sessionsRoot: fixture.sessionsRoot,
       targetDir: fixture.targetDir,
@@ -537,8 +549,8 @@ describe("bidirectional session sync core", () => {
       };
       const scope = Object.values(state.scopes)[0];
       expect(scope?.directories[defaultSessionDirName(cwd)]).toBe(newName);
-      expect(state.entries[`${oldName}/session.jsonl`]?.tombstone).toBeDefined();
-      expect(state.entries[`${newName}/session.jsonl`]?.tombstone).toBe(null);
+      expect(state.entries[`sessions/${oldName}/session.jsonl`]?.tombstone).toBeDefined();
+      expect(state.entries[`sessions/${newName}/session.jsonl`]?.tombstone).toBe(null);
     } finally {
       await cleanup(fixture.root);
       await rm(cwd, { recursive: true, force: true });
@@ -572,9 +584,14 @@ describe("bidirectional session sync core", () => {
 
       // An empty alternate-label tree and an unknown-only alternate tree for
       // the same CWD must not block an unrelated sync/adoption.
-      await mkdir(join(fixture.targetDir, alternateName), { recursive: true });
-      await mkdir(join(fixture.targetDir, `${alternateName}-unknown`), { recursive: true });
-      await writeFile(join(fixture.targetDir, `${alternateName}-unknown`, "ignored.txt"), "x\n");
+      await mkdir(join(fixture.targetDir, "sessions", alternateName), { recursive: true });
+      await mkdir(join(fixture.targetDir, "sessions", `${alternateName}-unknown`), {
+        recursive: true,
+      });
+      await writeFile(
+        join(fixture.targetDir, "sessions", `${alternateName}-unknown`, "ignored.txt"),
+        "x\n",
+      );
       await mkdir(secondaryTree, { recursive: true });
       await writeFile(secondaryFile, `${JSON.stringify({ cwd: secondaryCwd, value: "other" })}\n`);
       await utimes(secondaryFile, 3, 3);
@@ -585,13 +602,18 @@ describe("bidirectional session sync core", () => {
       // removed while the unchanged live tree stays.
       await rm(localMarkdown);
       await syncSessions({ ...options, now: 5_000 });
-      await expect(lstat(join(fixture.targetDir, alternateName))).rejects.toThrow();
+      await expect(lstat(join(fixture.targetDir, "sessions", alternateName))).rejects.toThrow();
       expect(
-        JSON.parse(await readFile(join(fixture.targetDir, liveName, "session.jsonl"), "utf8")).cwd,
+        JSON.parse(
+          await readFile(join(fixture.targetDir, "sessions", liveName, "session.jsonl"), "utf8"),
+        ).cwd,
       ).toBe(`pi-session-sync://${liveName}`);
       // The unknown-only alternate tree with content stays ignored.
       expect(
-        await readFile(join(fixture.targetDir, `${alternateName}-unknown`, "ignored.txt"), "utf8"),
+        await readFile(
+          join(fixture.targetDir, "sessions", `${alternateName}-unknown`, "ignored.txt"),
+          "utf8",
+        ),
       ).toBe("x\n");
     } finally {
       await cleanup(fixture.root);
@@ -619,7 +641,7 @@ describe("bidirectional session sync core", () => {
       // The whole sync aborts before writes: the safe sibling was not copied
       // and no state file was created.
       await expect(
-        readFile(join(fixture.targetDir, fixture.portableName, "notes.md"), "utf8"),
+        readFile(join(fixture.targetDir, "sessions", fixture.portableName, "notes.md"), "utf8"),
       ).rejects.toThrow();
       await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
       expect(await readFile(safe, "utf8")).toBe(
@@ -672,7 +694,7 @@ describe("bidirectional session sync core", () => {
         }),
       ).rejects.toThrow(/Unsafe cross-platform/);
       await expect(
-        readFile(join(fixture.targetDir, fixture.portableName, filename), "utf8"),
+        readFile(join(fixture.targetDir, "sessions", fixture.portableName, filename), "utf8"),
       ).rejects.toThrow();
       await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
     } finally {
@@ -687,7 +709,7 @@ describe("bidirectional session sync core", () => {
     const localTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
     const localFile = join(localTree, "session.jsonl");
     const portableName = portableSessionDirName(cwd);
-    const targetFile = join(fixture.targetDir, portableName, "session.jsonl");
+    const targetFile = join(fixture.targetDir, "sessions", portableName, "session.jsonl");
     try {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "local" })}\n`);
@@ -738,7 +760,7 @@ describe("bidirectional session sync core", () => {
         );
         // Rejected before any state or file write.
         await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-        expect(await readdir(fixture.targetDir)).toEqual([]);
+        expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
       } finally {
         await rm(localTree, { recursive: true, force: true });
       }
@@ -749,14 +771,14 @@ describe("bidirectional session sync core", () => {
   it("uses target tree names for target-only sessions and warns on ignored entries", async () => {
     const fixture = await makeFixture();
     try {
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       await mkdir(targetTree);
       await writeFile(
         join(targetTree, "target.jsonl"),
         `${JSON.stringify({ type: "session", cwd: `pi-session-sync://${fixture.portableName}` })}\n`,
       );
-      await writeFile(join(fixture.targetDir, "README.txt"), "ignored\n");
-      await symlink(targetTree, join(fixture.targetDir, "linked"), "dir");
+      await writeFile(join(fixture.targetDir, "sessions", "README.txt"), "ignored\n");
+      await symlink(targetTree, join(fixture.targetDir, "sessions", "linked"), "dir");
       const summary = await syncSessions({
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
@@ -800,7 +822,7 @@ describe("bidirectional session sync core", () => {
         }),
       ).rejects.toThrow(/reserved/);
       await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-      expect(await readdir(fixture.targetDir)).toEqual([]);
+      expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
     } finally {
       await cleanup(fixture.root);
     }
@@ -826,7 +848,10 @@ describe("bidirectional session sync core", () => {
       expect(first.warnings.some((warning) => warning.includes(malformedRoot))).toBe(true);
       expect(first.warnings.some((warning) => warning.includes(unknownRoot))).toBe(true);
       await expect(
-        readFile(join(fixture.targetDir, fixture.portableName, "ignored.jsonl"), "utf8"),
+        readFile(
+          join(fixture.targetDir, "sessions", fixture.portableName, "ignored.jsonl"),
+          "utf8",
+        ),
       ).rejects.toThrow();
 
       await rm(validFile);
@@ -853,81 +878,116 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("rejects malformed target cwd before nested staging", async () => {
+  it("preserves malformed target cwd with a warning during nested staging", async () => {
     const fixture = await makeFixture();
     try {
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       const targetFile = join(targetTree, "malformed.jsonl");
       await mkdir(targetTree);
-      await writeFile(
-        targetFile,
-        `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}%00cwd` })}\n`,
+      const malformedCwd = `pi-session-sync://${fixture.portableName}%00cwd`;
+      const original = `${JSON.stringify({ cwd: malformedCwd })}\n`;
+      await writeFile(targetFile, original);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 10_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Invalid target cwd value preserved verbatim"),
+        ),
+      ).toBe(true);
+      // Placement comes from the target tree's portable name (nested).
+      const localFile = join(fixture.localTree, "malformed.jsonl");
+      const localContent = await readFile(localFile, "utf8");
+      expect(localContent).toBe(original);
+      expect((JSON.parse(localContent) as { cwd: string }).cwd).toBe(malformedCwd);
+      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).resolves.toContain(
+        "malformed.jsonl",
       );
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 10_000,
-        }),
-      ).rejects.toThrow();
-      await expect(readFile(join(fixture.localTree, "malformed.jsonl"), "utf8")).rejects.toThrow();
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-      expect(await readFile(targetFile, "utf8")).toContain("%00cwd");
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects malformed target cwd before flat staging", async () => {
+  it("preserves malformed target cwd with a warning during flat staging", async () => {
     const fixture = await makeFixture();
     const flatRoot = join(fixture.root, "malformed-flat-sessions");
     try {
       await mkdir(flatRoot);
-      const targetTree = join(fixture.targetDir, fixture.portableName);
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
       const targetFile = join(targetTree, "malformed.jsonl");
       await mkdir(targetTree);
-      await writeFile(
-        targetFile,
-        `${JSON.stringify({ cwd: `pi-session-sync://${fixture.portableName}%01cwd` })}\n`,
+      const malformedCwd = `pi-session-sync://${fixture.portableName}%01cwd`;
+      const original = `${JSON.stringify({ cwd: malformedCwd })}\n`;
+      await writeFile(targetFile, original);
+      const summary = await syncSessions({
+        sessionsRoot: flatRoot,
+        targetDir: fixture.targetDir,
+        layout: "flat",
+        now: 10_001,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Invalid target cwd value preserved verbatim"),
+        ),
+      ).toBe(true);
+      // Flat placement uses the tree's portable mapping: sessionsRoot/<rel>.
+      const localFile = join(flatRoot, "malformed.jsonl");
+      expect(await readFile(localFile, "utf8")).toBe(original);
+      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).resolves.toContain(
+        "malformed.jsonl",
       );
-      await expect(
-        syncSessions({
-          sessionsRoot: flatRoot,
-          targetDir: fixture.targetDir,
-          layout: "flat",
-          now: 10_001,
-        }),
-      ).rejects.toThrow();
-      await expect(readFile(join(flatRoot, "malformed.jsonl"), "utf8")).rejects.toThrow();
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-      expect(await readFile(targetFile, "utf8")).toContain("%01cwd");
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("rejects control characters in parent URI paths without writing state or files", async () => {
+  it("preserves control characters in parent URI values with a warning while copying", async () => {
     const fixture = await makeFixture();
-    const targetFile = join(fixture.targetDir, fixture.portableName, "bad-parent.jsonl");
+    const targetFile = join(
+      fixture.targetDir,
+      "sessions",
+      fixture.portableName,
+      "bad-parent.jsonl",
+    );
     const original = `${JSON.stringify({
       type: "session",
       id: "bad-parent",
       cwd: `pi-session-sync://${fixture.portableName}`,
-      parentSession: `pi-session-sync://${fixture.portableName}/bad%01name.jsonl`,
+      parentSession: `pi-session-sync://sessions/${fixture.portableName}/bad%01name.jsonl`,
     })}\n`;
     try {
       await mkdir(dirname(targetFile), { recursive: true });
       await writeFile(targetFile, original);
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 10_002,
-        }),
-      ).rejects.toThrow(/segment/);
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 10_002,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Invalid pi-session-sync URI preserved verbatim"),
+        ),
+      ).toBe(true);
       expect(await readFile(targetFile, "utf8")).toBe(original);
-      await expect(readFile(join(fixture.localTree, "bad-parent.jsonl"), "utf8")).rejects.toThrow();
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+      const localContent = await readFile(join(fixture.localTree, "bad-parent.jsonl"), "utf8");
+      // The valid cwd decodes to the local path; only the invalid parent URI
+      // is preserved verbatim.
+      const localEntry = JSON.parse(localContent) as {
+        cwd: string;
+        parentSession: string;
+      };
+      expect(localEntry.cwd).toBe(fixture.cwd);
+      expect(localEntry.parentSession).toBe(
+        `pi-session-sync://sessions/${fixture.portableName}/bad%01name.jsonl`,
+      );
+      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).resolves.toContain(
+        "bad-parent.jsonl",
+      );
     } finally {
       await cleanup(fixture.root);
     }
@@ -943,7 +1003,7 @@ describe("bidirectional session sync core", () => {
       for (const layout of ["nested", "flat"] as const) {
         const sessionsRoot = layout === "nested" ? fixture.sessionsRoot : flatRoot;
         for (const foreignName of foreignNames) {
-          const targetTree = join(fixture.targetDir, foreignName);
+          const targetTree = join(fixture.targetDir, "sessions", foreignName);
           const targetFile = join(targetTree, "foreign.jsonl");
           await mkdir(targetTree);
           await writeFile(
@@ -970,7 +1030,7 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("rejects foreign Windows-shaped extra-prefix target files before nested and flat commits", async () => {
+  it("rejects foreign Windows-shaped extra ROOT target names but preserves file-level cwd", async () => {
     if (process.platform === "win32") return;
     const fixture = await makeFixture();
     const flatRoot = join(fixture.root, "foreign-extra-flat-sessions");
@@ -981,47 +1041,72 @@ describe("bidirectional session sync core", () => {
     };
     try {
       await mkdir(flatRoot);
-      const cases = [
-        {
-          rootName: "ROOT%2Ftmp%2Fforeign-tree",
-          content: `${JSON.stringify({
-            type: "session",
-            id: "foreign",
-            cwd: "pi-session-sync://WIN%2Fproject",
-          })}\n`,
-        },
-        {
-          rootName: "WIN%2Fproject",
-          content: `${JSON.stringify({ type: "session", id: "foreign" })}\n`,
-        },
-      ];
+      // A target TREE whose own name decodes to foreign Windows syntax is
+      // rejected before any write; a file-level cwd that cannot decode under
+      // the configured labels is preserved verbatim with the new
+      // target-to-local leniency and copied back via the tree mapping.
+      const foreignTree = {
+        rootName: "WIN%2Fproject",
+        content: `${JSON.stringify({ type: "session", id: "foreign" })}\n`,
+      };
+      const decodableTree = {
+        rootName: "ROOT%2Ftmp%2Fforeign-tree",
+        content: `${JSON.stringify({
+          type: "session",
+          id: "foreign",
+          cwd: "pi-session-sync://WIN%2Fproject",
+        })}\n`,
+      };
       for (const layout of ["nested", "flat"] as const) {
         const sessionsRoot = layout === "nested" ? fixture.sessionsRoot : flatRoot;
-        for (const testCase of cases) {
-          const targetTree = join(fixture.targetDir, testCase.rootName);
-          const targetFile = join(targetTree, "foreign.jsonl");
-          await mkdir(targetTree);
-          await writeFile(targetFile, testCase.content);
-          await expect(
-            syncSessions({
-              sessionsRoot,
-              targetDir: fixture.targetDir,
-              layout,
-              namingOptions,
-              now: 10_200,
-            }),
-          ).rejects.toThrow(/native local absolute path|Cannot decode/);
-          expect(await readFile(targetFile, "utf8")).toBe(testCase.content);
-          await expect(
-            readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
-          ).rejects.toThrow();
-          const localFile = join(
-            layout === "nested" ? fixture.localTree : flatRoot,
-            "foreign.jsonl",
-          );
-          await expect(readFile(localFile, "utf8")).rejects.toThrow();
-          await rm(targetTree, { recursive: true, force: true });
-        }
+
+        const foreignTreePath = join(fixture.targetDir, "sessions", foreignTree.rootName);
+        const foreignFile = join(foreignTreePath, "foreign.jsonl");
+        await mkdir(foreignTreePath);
+        await writeFile(foreignFile, foreignTree.content);
+        await expect(
+          syncSessions({
+            sessionsRoot,
+            targetDir: fixture.targetDir,
+            layout,
+            namingOptions,
+            now: 10_200,
+          }),
+        ).rejects.toThrow(/native local absolute path/);
+        expect(await readFile(foreignFile, "utf8")).toBe(foreignTree.content);
+        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+        await rm(foreignTreePath, { recursive: true, force: true });
+
+        const decodableTreePath = join(fixture.targetDir, "sessions", decodableTree.rootName);
+        const decodableFile = join(decodableTreePath, "foreign.jsonl");
+        await mkdir(decodableTreePath);
+        await writeFile(decodableFile, decodableTree.content);
+        const summary = await syncSessions({
+          sessionsRoot,
+          targetDir: fixture.targetDir,
+          layout,
+          namingOptions,
+          now: 10_201,
+        });
+        expect(summary.copied).toBe(1);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.includes("Invalid target cwd value preserved verbatim"),
+          ),
+        ).toBe(true);
+        const localFile = join(
+          layout === "nested"
+            ? join(fixture.sessionsRoot, defaultSessionDirName("/tmp/foreign-tree"))
+            : flatRoot,
+          "foreign.jsonl",
+        );
+        expect(await readFile(localFile, "utf8")).toBe(decodableTree.content);
+        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).resolves.toContain(
+          "foreign.jsonl",
+        );
+        await rm(decodableTreePath, { recursive: true, force: true });
+        // Reset the shared state file so the next layout starts clean again.
+        await rm(join(fixture.targetDir, STATE_FILE_NAME), { force: true });
       }
     } finally {
       await cleanup(fixture.root);
