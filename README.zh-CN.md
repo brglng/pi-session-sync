@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-面向 [Pi coding agent](https://github.com/earendil-works/pi-mono) 的双向 session 同步扩展。它仅在 Pi 的有效本地 session 根目录与一个可移植目标目录之间同步 Pi 的 `.jsonl` 和 `.md` 文件。
+面向 [Pi coding agent](https://github.com/earendil-works/pi-mono) 的双向同步扩展。它在 Pi 的两个有效本地根目录（`sessions` 与 `<agentDir>/missions`）与一个可移植父目标目录之间同步 Pi 的 `.json`、`.jsonl` 和 `.md` 文件。
 
-本地路径会在目标目录中转换为 `pi-session-sync://` URI，反向同步时再还原为机器本地路径。
+两个根目录内的本地路径会在目标目录中转换为 `pi-session-sync://` URI，反向同步时再还原为机器本地路径：sessions 文件映射为 `pi-session-sync://sessions/<portableName>/<relativePath>`，missions 文件映射为 `pi-session-sync://missions/<relativePath>`，`cwd` 保持无根名的 `pi-session-sync://<portableName>` 形式。
 
 ## 使用指南
 
@@ -27,7 +27,8 @@ pi install npm:@brglng/pi-session-sync
 ```
 
 - 仅支持全局配置，不支持项目级配置。
-- `targetDir` 必填：使用绝对路径或 `~` 路径；目标必须是已存在的真实目录，且不能是符号链接。
+- `targetDir` 必填：使用绝对路径或 `~` 路径；父目录必须是已存在的真实目录，且不能是符号链接。
+- 同步目标为 `targetDir/sessions` 与 `targetDir/missions` 两个子树；子目录缺失时创建，且本身不能是符号链接。
 - `homeLabel` 默认为 `HOME`；`rootLabel` 默认为 `ROOT`；`extraPrefixes` 默认为 `{}`。
 - `extraPrefixes` 将绝对路径前缀映射为可移植标签。
 
@@ -40,6 +41,10 @@ pi install npm:@brglng/pi-session-sync
 ```
 
 - 同步只能手动执行，不提供自动后台同步。
+- 两个本机源根目录都允许是符号链接并跟随，源树内部的符号链接也跟随；缺失的源根目录忽略并提示 warning。本机源树中解析目标为 `targetDir` 本身或其内部目录/文件的符号链接属于安全错误：按物理真实路径（含祖先别名解析后）判定，作为与 warning 区分的非致命 error 显式记录并跳过该链接，不跟随、不复制、不删除其内容，其它安全文件继续同步。
+- `.json`、JSONL 及 Markdown frontmatter 中所有完整表示 sessions/missions 根内绝对路径的字符串都会被改写为 portable URI；根外路径、相对值与普通 ID 原样保留。任何以 `pi-session-sync:` 开头但并非合法根命名空间 URI 的值，在来自本机源时均视为文件错误；从 target 同步回本机时，非合法 URI 及无法解码为可移植路径的 `cwd`/路径字段会原样保留并提示 warning，不中止整次同步，本地落点由 target 树形 portableName 映射确定。
+- 当前格式只接受严格规范拼写的可移植名与 URI 可移植名部分。旧的宽松 `encodeURIComponent` 拼写（字面 `*`、末尾点号）属于过时内容：target → local 复制时原样保留并提示 warning，local → target 时作为文件错误拒绝。
+- local → target 的 `parentSession` 严格校验：绝对 parent 必须解析到 `sessionsRoot` 内的 sessions 文件 URI，Windows 风格/UNC、根外、missions 根、畸形或宽松拼写的 URI 都会在 staging 前作为文件错误停止同步。
 
 ### 运行时行为
 
@@ -86,9 +91,9 @@ pi install npm:@brglng/pi-session-sync
 
 ### 转换
 
-- 只同步 `.jsonl` 和 `.md`。JSONL 逐行解析，并递归转换值为字符串的 `cwd` 和 `parentSession` 字段；本地 `cwd` 转为 `pi-session-sync://<portableName>`，目标 URI 转回本地绝对路径。
+- 只同步 `.json`、`.jsonl` 和 `.md`。JSON 与 JSONL 严格解析；Markdown 读取开头标准 YAML frontmatter。所有完整表示 `sessionsRoot`/`missionsRoot` 内绝对路径的字符串值都会被递归改写：sessions 路径转为 `pi-session-sync://sessions/<portableName>/<relativePath>`，missions 路径转为 `pi-session-sync://missions/<relativePath>`，`cwd` 保持无根名的 `pi-session-sync://<portableName>` 形式；反向同步时 target URI 还原为本地绝对路径。
 - 只允许一个末尾换行符；内部换行或多余空行都会失败。
-- 凡是以 `pi-session-sync:` 开头的值，都必须是有效的 `pi-session-sync://` URI；方案名匹配不区分大小写。
+- 凡是以 `pi-session-sync:` 开头的值，都必须是有效的 `pi-session-sync://` URI；方案名匹配不区分大小写。（本机源严格校验；target → local 复制时非法值原样保留并提示 warning，不停止同步。）
 - 位于 `sessionsRoot` 内的本地绝对 JSONL `parentSession` 路径，会转为 `pi-session-sync://<portableName>/<relativePath>`；`relativePath` 相对于被引用的 session 目录。相对值保持不变，反向同步时 URI 会还原为本地路径。
 - 父级 URI 的相对路径必须使用 `/`、规范化的百分号编码和跨平台安全的路径段，且不得包含目录穿越。已有引用必须指向普通文件；尚未创建的引用目标也可以是有效引用。
 - POSIX 拒绝 Windows 驱动器路径和 UNC 风格的绝对父级路径。flat 布局中的绝对父级路径使用自身的精确映射或包含它的映射，绝不使用当前文件的映射。
@@ -96,12 +101,35 @@ pi install npm:@brglng/pi-session-sync
 - frontmatter 中的 `parentSession` 采用与 JSONL 等价的类型、URI、范围和 Windows 风格路径验证，但其中的字节内容保持不变。
 - 有效的 Markdown 绝对引用和 sync 引用会分别按映射和内容哈希进行规范化。
 - 修改 YAML AST 时，会保留标准的标签（tags）、锚点（anchors）、别名（aliases）、注释（comments）、标量值（scalar values）和分隔符空白（delimiter whitespace），以及有意义的尾随空白和换行。
-- 必要时，会在 `cwd` 使用位置克隆共享的标量锚点，以保护非 `cwd` 值和其余的锚点/别名图。
-- JavaScript 无法无损保留的 JSON 和 YAML 数值，会在暂存前被拒绝，绝不舍入或转换为 `null`。
+- 必要时，会在 `cwd` 使用位置克隆共享的标量锚点，以保护非 `cwd` 值和其余的锚点/别名图。当同一个标量锚点同时被 `parentSession` 字段与普通字段引用时，会在 `parentSession` 使用位置克隆，使 parentSession 语义不依赖字段顺序或共享标量的去重顺序；普通字段继续使用共享图并各自独立改写。
+- JSON 和 YAML 数值不再要求无损保留；本次变更不考虑任何数值变化，普通 JavaScript/YAML 解析与序列化造成的数值舍入均可接受。
+
+#### 转换示例
+
+session 的 `.jsonl`/`.json`/frontmatter（`cwd` 保持无根形式；其它所有路径字段均按通用字段规则处理）：
+
+```text
+// 本地                            // target
+{"cwd": "/home/u/work"}           {"cwd": "pi-session-sync://HOME/work"}
+{"recordPath": "/home/u/work"}    {"recordPath": "pi-session-sync://sessions/HOME/work/session.jsonl"}
+{"ownerSessionId": "/…"}          {"ownerSessionId": "pi-session-sync://sessions/HOME/work"}
+```
+
+missions 直接镜像其相对树形，不引入可移植名：
+
+```text
+// 本地                               // target
+{"missionPath": "/…/missions/index/abc.json"}
+      →                         {"missionPath": "pi-session-sync://missions/index/abc.json"}
+```
+
+`cwd` 以外的任意字段（`recordPath`、`ownerSessionId`、`sessionPath`、`artifactPaths` 等）都是通用字段，遵循同样的递归路径规则；它们是普通路径改写，通用字段中的 sessions URI 永远不会成为 `parentSession` 映射/重放/校验证据。只有字面 `parentSession` 键下的值才作为父级引用处理。`artifactPaths` 数组及其它嵌套值逐元素改写。
+
+target → local 复制时，非可移植值原样保留并提示 warning，不停止同步：本地副本保留 target 的原始拼写，同步正常完成。但下一次 local → target 同步会严格校验这些值：被保留的畸形值届时会作为文件错误停止同步（本地副本只有在 Pi 后续重写时才会被写回 target 树）；请在 target 侧修复或删除这些畸形值以恢复同步。
 
 ### 映射、状态与 tombstone（删除标记）
 
-- 目标目录树使用 `<targetDir>/<portableName>/...`；nested 布局下的本地子项保留相对路径。每个文件的逻辑 `cwd` 必须与其目录映射一致。
+- 目标目录树使用 `<targetDir>/sessions/<portableName>/...` 与 `<targetDir>/missions/<relativePath>`；nested 布局下的本地子项保留相对路径。每个文件的逻辑 `cwd` 必须与其目录映射一致。
 - nested 子项保留顶层 session 的 `cwd`。不含 `cwd` 的文件继承最近且无歧义的包含映射；找不到映射则出错。
 - flat 根目录按每个文件的 `cwd` 分组。JSONL 或 Markdown 中的有效父级引用，可以建立没有现存文件的仅父级映射。
 - 现存文件的映射优先于仅父级证据，但同一个解码后的 `cwd` 若对应不同的语义标签会失败，包括现存映射与仅父级引用之间的冲突。
@@ -120,12 +148,16 @@ pi install npm:@brglng/pi-session-sync
 
 ### 验证与提交边界
 
-- `sessionsRoot` 和 `targetDir` 必须是已存在的真实、非符号链接目录，且两者不得重叠。
+- `sessionsRoot` 允许是符号链接（本机源根目录跟随）；`targetDir` 必须是已存在的真实、非符号链接目录，且两者不得重叠。
 - 不检查目标目录祖先的符号链接，包括 macOS 的 `/var` 和 `/tmp` 别名。
-- 两个根目录下的符号链接文件和目录永远不会被跟随；它们会被忽略并发出警告。
+- 本机源树（根目录及内部）的符号链接跟随；目标根目录下的符号链接文件和目录永远不会被跟随，会被忽略并发出警告。
 - 未知条目、默认根目录文件和不支持的类型会被忽略并发出警告；不安全的相对路径段会报错。
+- local → target 的 `parentSession` 必须严格指向父会话文件：sessions 目录 URI（`pi-session-sync://sessions/<portableName>`，无相对路径）或被引用目标存在但不是普通文件，都会在 staging 前作为文件错误停止同步；被引用文件不存在时，只要 URI、范围与路径段规则通过仍然有效。绝对 parent 必须解析到 `sessionsRoot` 内；Windows 风格/UNC、根外、missions 根、畸形或宽松拼写的值同样在 staging 前停止同步。
 - 根目录、类型、包含关系、符号链接、跨平台路径段和状态检查都会在写入 session 前完成。
+- 遍历顺序确定：本机源与 missions 目录条目按排序后的顺序遍历，真实节点去重与映射优先级绝不依赖 readdir 顺序。
 - 状态文件必须位于 target root 下，且是实际存在的普通 version-1 JSON 文件。
+- 当前格式的状态文件若畸形（非法 JSON、版本不受支持、version-1 结构损坏，或当前命名空间条目/scope 与旧的无根名/旧 schema 拓扑混存），会在扫描和暂存之前停止整个同步，绝不静默当作空状态覆盖。`entries`/`scopes` 容器畸形或任一 scope 值畸形时，即使文件其余部分看似旧格式，也是硬错误。只有当状态文件的整体拓扑都可识别为旧格式（全部为无根名 entry key 和/或全部为旧 schema scope）时，才以 warning 形式忽略，且旧状态清单在磁盘上原样保留：不迁移、不删除、不静默替换，本次同步以空状态继续。
+- 旧的可移植名称宽松拼写及 targetDir 顶层的旧布局条目均属于过时数据：以 warning 忽略，绝不作为物理别名，也不通过它们执行任何读取、写入、删除或清理。
 - 所有选中文件都会先解析和验证，再将重写后的副本暂存到临时目录；序列化后的 next state 也必须在任何本机、target 或 state 目标发生写入前完整暂存到该目录。
 - 解析、验证、预检或暂存失败，会在提交 session/state 前停止整个同步；不会提交任何暂存结果。
 

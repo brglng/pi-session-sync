@@ -19,7 +19,7 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^(?:~(?:[/\\\\].*|$)|/.*|[A-Za-z]:[/\\\\].*|\\\\\\\\.*)$",
-      "description": "Cross-platform path-form superset: absolute target path or path beginning with ~. Runtime accepts only native-platform absolute/path forms after expansion."
+      "description": "Parent directory of the sessions and missions target subtrees (`targetDir/sessions`, `targetDir/missions`). Absolute target path or path beginning with ~; runtime accepts only native-platform absolute/path forms after expansion."
     },
     "homeLabel": {
       "$ref": "#/$defs/safeLabel",

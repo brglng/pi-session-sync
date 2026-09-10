@@ -2,7 +2,7 @@
 
 [Chinese](README.zh-CN.md)
 
-Bidirectional session synchronization extension for the [Pi coding agent](https://github.com/earendil-works/pi-mono). It synchronizes only Pi’s `.jsonl` and `.md` files between Pi’s effective local session root and one portable target directory.
+Bidirectional session synchronization extension for the [Pi coding agent](https://github.com/earendil-works/pi-mono). It synchronizes Pi’s `.json`, `.jsonl`, and `.md` files between Pi’s effective local session root (plus `<agentDir>/missions`) and one portable target directory.
 
 Local paths become `pi-session-sync://` URIs in the target and return to machine-local paths during reverse sync.
 
@@ -22,12 +22,13 @@ Create global file `~/.pi/agent/extensions/pi-session-sync/config.json`:
 
 ```json
 {
-  "targetDir": "~/sync/pi-sessions"
+  "targetDir": "~/sync/pi-sync"
 }
 ```
 
 - Project-level configuration is not supported.
 - `targetDir` is required: use an absolute or `~` path to an existing real, non-symlink directory.
+- The synchronization target roots are `targetDir/sessions` and `targetDir/missions`; the child roots are created when missing and must never be symlinks.
 - `homeLabel` defaults to `HOME`; `rootLabel` defaults to `ROOT`; `extraPrefixes` defaults to `{}`.
 - `extraPrefixes` maps absolute path prefixes to portable labels.
 
@@ -44,6 +45,10 @@ Start Pi, then run:
 ### What happens
 
 - An in-memory or `--no-session` session without an actual session directory is refused before fallback, machine-id, or state access.
+- Both source roots may be symlinks and all source-tree symlinks are followed (their targets may live outside the roots). A missing source root is skipped with a warning. A local source symlink whose resolved target is `targetDir` itself or anything inside it is a security error: it is recorded in `SyncSummary.errors` as a nonfatal error (distinct from ordinary warnings), skipped, and never followed, copied, or deleted; other safe files keep syncing.
+- Every string inside `.json`, JSONL, and Markdown frontmatter that is an absolute path under `sessionsRoot` or `missionsRoot` is rewritten as a portable URI; out-of-root paths, relative values, and identifiers stay unchanged. Values beginning with `pi-session-sync:` that are not legal root-namespaced URIs are file errors when the value comes from a local source. On target-to-local copies those malformed cwd/URI values are preserved verbatim with a warning instead of failing the sync, and the destination is chosen from the target tree's portable mapping.
+- Current-format portable names and URI portable-name parts use the canonical strict spelling only. Legacy loose `encodeURIComponent` spellings (literal `*`, terminal dots) are old/inapplicable content: target-to-local copies preserve them verbatim with a warning, and local-to-target passes reject them as file errors before any write.
+- Local-to-target `parentSession` values are strictly validated: an absolute parent must resolve inside `sessionsRoot` to a sessions file URI, and Windows-shaped/UNC, out-of-root, missions-root, malformed, or loose-URI spellings are file errors that stop the sync before staging.
 
 ## Technical reference
 
@@ -86,22 +91,45 @@ Start Pi, then run:
 
 ### Transforms
 
-- Only `.jsonl` and `.md` synchronize. JSONL parses line by line and recursively transforms string `cwd` and `parentSession` fields; local `cwd` becomes `pi-session-sync://<portableName>`, and target URI becomes local absolute path.
+- `.json`, `.jsonl`, and `.md` synchronize. JSON and JSONL parse strictly; Markdown reads standard YAML frontmatter. Every string value that is an absolute path under `sessionsRoot` or `missionsRoot` is recursively rewritten: sessions paths become `pi-session-sync://sessions/<portableName>/<relativePath>`, missions paths become `pi-session-sync://missions/<relativePath>`, and `cwd` keeps its rootless `pi-session-sync://<portableName>` form. Target URIs restore to local absolute paths on reverse sync.
+- JSON and YAML number precision is not preserved; ordinary parse/stringify rounding applies.
 - Only one terminal newline is allowed; internal or extra blank lines fail.
-- Any `pi-session-sync:` prefix must be a valid case-insensitive `pi-session-sync://` URI.
-- Local absolute JSONL `parentSession` paths inside `sessionsRoot` become `pi-session-sync://<portableName>/<relativePath>` relative to the referenced session directory; relative values remain unchanged and reverse URIs restore locally.
+- Any `pi-session-sync:` prefix must be a valid case-insensitive `pi-session-sync://` URI. (strict for local sources; target-to-local copies preserve invalid values verbatim with a warning).
+- Local absolute `parentSession` paths inside `sessionsRoot` become `pi-session-sync://sessions/<portableName>/<relativePath>`; relative values remain unchanged and reverse URIs restore locally. Old rootless file URIs are rejected.
 - Parent URI relative paths use `/`, canonical percent-encoded cross-platform-safe segments, and no traversal. Existing references must be regular files; not-yet-created references may be valid.
 - POSIX rejects Windows drive and UNC-shaped absolute parents. Flat absolute parents use their own exact or containing mapping, never the current file’s mapping.
 - Markdown reads only standard YAML frontmatter at file start, recursively rewrites `cwd`, and leaves the body unchanged. No frontmatter means no `cwd` mapping.
 - Frontmatter `parentSession` gets JSONL-equivalent type, URI, range, and Windows-shaped-path validation, but its bytes remain unchanged.
 - Valid Markdown absolute and sync references are canonicalized separately for mapping and content hashes.
 - YAML AST mutation preserves standard tags, anchors, aliases, comments, scalar values, delimiter whitespace, and significant trailing whitespace/newlines.
-- Shared scalar anchors are cloned at `cwd` use sites when needed, protecting non-`cwd` values and the remaining anchor/alias graph.
-- JSON and YAML numbers JavaScript cannot preserve losslessly are rejected before staging, never rounded or converted to `null`.
+- Shared scalar anchors are cloned at `cwd` use sites when needed, protecting non-`cwd` values and the remaining anchor/alias graph. A scalar anchor shared by a `parentSession` field and generic fields is cloned at the `parentSession` use site so parentSession semantics never depend on field order or visited-node dedup; the generic use sites keep the shared graph and may be rewritten independently.
+
+#### Conversion examples
+
+Session `.jsonl`/`.json`/frontmatter (`cwd` keeps its rootless form; every other path-valued field is a generic field):
+
+```text
+// local                         // target
+{"cwd": "/home/u/work"}          {"cwd": "pi-session-sync://HOME/work"}
+{"recordPath": "/home/u/work"}   {"recordPath": "pi-session-sync://sessions/HOME/work/session.jsonl"}
+{"ownerSessionId": "/…"}         {"ownerSessionId": "pi-session-sync://sessions/HOME/work"}
+```
+
+Missions mirror their tree directly, without portable names:
+
+```text
+// local                           // target
+{"missionPath": "/…/missions/index/abc.json"}
+      →                       {"missionPath": "pi-session-sync://missions/index/abc.json"}
+```
+
+Generic fields (any field name besides `cwd`) follow the same recursive path rules as `recordPath`/`ownerSessionId`/`sessionPath`/`artifactPaths` above; they are ordinary path rewrites, and a sessions URI in a generic field never becomes `parentSession` mapping/replay/validation evidence. Only values under the literal `parentSession` key are treated as parent references. `artifactPaths` arrays and other nested values are rewritten element-wise.
+
+On target-to-local copies, invalid portable values are preserved verbatim with a warning instead of failing the sync: the copied local file keeps the raw target spelling and the sync completes. Because the next local→target pass validates strictly, those preserved malformed values will then fail the next sync as file errors (the copied file is written back to the target tree only when Pi later rewrites it); remove or fix the malformed values on the target side to resume.
 
 ### Mappings, state, and tombstones
 
-- Target trees use `<targetDir>/<portableName>/...`; nested local children retain relative paths. Every file’s logical cwd must match its directory mapping.
+- Target session trees use `<targetDir>/sessions/<portableName>/...`; missions mirror `<targetDir>/missions/...` with their relative tree preserved. Logical state keys namespace missions files with a literal `missions/` prefix; mission entries share the single `targetDir/.pi-session-sync-state.json` with sessions entries. Every file’s logical cwd must match its directory mapping.
 - Nested children keep the top-level session cwd. Cwd-less files inherit the nearest unambiguous containing mapping; no mapping is an error.
 - Flat roots group each file by its `cwd`. Valid parent references from JSONL or Markdown may establish parent-only mappings without live files.
 - Live mapping wins over parent-only evidence, but different semantic labels for one decoded cwd fail, including live versus parent-only references.
@@ -120,12 +148,16 @@ Start Pi, then run:
 
 ### Validation and commit boundary
 
-- `sessionsRoot` and `targetDir` must be existing real, non-symlink directories and must not overlap.
+- `sessionsRoot` may be a symlink (source roots are followed); `targetDir` must be an existing real, non-symlink directory, and the two must not overlap.
 - Target ancestors are not inspected for symlinks, including macOS `/var` and `/tmp` aliases.
-- Symlinked files and directories below either root are never followed; they are ignored with warnings.
+- Source-tree symlinks (root and internal) are followed; symlinked files and directories below the target roots are never followed and are ignored with warnings. A local source symlink resolving into targetDir (compared against the physical, fully-resolved target identity so aliased ancestors are covered) is reported as a nonfatal ERROR, distinct from warnings, and is skipped without following, copying, or deleting; other safe files continue syncing.
 - Unknown entries, default-root files, and unsupported types are ignored with warnings; unsafe relative segments are errors.
+- Local → target `parentSession` strictly references a parent session FILE: a sessions-directory URI (`pi-session-sync://sessions/<portableName>` with no relative path) or a referenced target that exists as a non-regular file is a file error before staging. A missing referenced file stays valid when URI, range, and segment rules pass. Absolute parents must resolve inside `sessionsRoot`; Windows-shaped/UNC, out-of-root, missions-root, malformed, or loose-spelled values stop the sync before staging.
 - Root, type, containment, symlink, cross-platform segment, and state checks run before session writes.
+- Traversal is deterministic: source and mission directory entries are walked in sorted order, so real-node dedup and mapping precedence never depend on filesystem readdir order.
 - State file must be real regular version-1 JSON at target root.
+- Malformed current state — invalid JSON, unsupported versions, a malformed version-1 file, or a MIXTURE of current namespaced entries/scopes with old rootless/old-schema topology — stops the sync before scanning or staging and is never silently overwritten. A malformed `entries`/`scopes` container or a malformed scope value is a hard error even when the rest of the file looks old. Only a state file whose ENTIRE topology is recognizably old (all rootless entry keys and/or all old-schema scopes) is ignored with a warning, and its manifest is then preserved on disk unchanged: ignored without migration, deletion, or replacement, while the sync continues with an empty current state.
+- Legacy loose portable-name spellings and old top-level `targetDir` layout entries are old/inapplicable content: they are ignored with warnings, never become physical aliases, and no read, write, delete, or cleanup is routed through them.
 - All selected files are parsed and validated, then rewritten copies are staged in a temporary directory; the serialized next state is staged there too before any local, target, or state destination is mutated.
 - Parse, validation, preflight, or staging failure stops the entire sync before session/state commit; no staged result commits.
 
