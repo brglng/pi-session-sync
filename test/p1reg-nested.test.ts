@@ -173,7 +173,14 @@ describe("p1 regressions nested labels", () => {
     const cwd = join(root, "proto-key-project");
     const portableName = portableSessionDirName(cwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "proto-keys", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "proto-keys",
+        now,
+      });
     try {
       const constructorFile = join(sessionsRoot, "constructor.jsonl");
       const protoFile = join(sessionsRoot, "__proto__", "s.jsonl");
@@ -225,7 +232,14 @@ describe("p1 regressions nested labels", () => {
     const cwd = join(root, "proto-tostring-project");
     const portableName = portableSessionDirName(cwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "proto-tostring", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "proto-tostring",
+        now,
+      });
     try {
       const file = join(sessionsRoot, "toString.jsonl");
       await writeFile(file, `${JSON.stringify({ cwd })}\n`);
@@ -259,7 +273,13 @@ describe("p1 regressions nested labels", () => {
     const localTree = join(sessionsRoot, defaultSessionDirName(cwd));
     const localFile = join(localTree, "session.jsonl");
     const sync = (now: number, machineId: string) =>
-      syncSessions({ sessionsRoot, targetDir, machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId,
+        now,
+      });
     try {
       await mkdir(localTree, { recursive: true });
       await mkdir(targetDir, { recursive: true });
@@ -307,7 +327,14 @@ describe("p1 regressions nested labels", () => {
     const childName = portableSessionDirName(childCwd);
     const relativePath = "nested/stale.jsonl";
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "retire", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "retire",
+        now,
+      });
     try {
       const localFile = join(sessionsRoot, relativePath);
       await mkdir(dirname(localFile), { recursive: true });
@@ -423,6 +450,8 @@ describe("p1 regressions nested labels", () => {
       await utimes(targetC, 2, 2);
 
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "partial-scan-machine",
@@ -479,7 +508,12 @@ describe("p1 regressions nested labels", () => {
       );
       await utimes(sessionFile, 1, 1);
       await utimes(extraFile, 1, 1);
-      await syncSessions({ ...baseOptions, activeSessionFile: sessionFile, now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        ...baseOptions,
+        activeSessionFile: sessionFile,
+        now: 100_000,
+      });
 
       // Changed old-label target content (mtime 4) migrates onto the
       // replacement label; the replacement label target content is older.
@@ -523,7 +557,12 @@ describe("p1 regressions nested labels", () => {
       // whole: the active-file guard rejects the sync before any write, so
       // no replacement copy, old-key deletion, or state change survives.
       await expect(
-        syncSessions({ ...baseOptions, activeSessionFile: sessionFile, now: 400_000 }),
+        syncSessions({
+          missionsRoot: join(root, "missions"),
+          ...baseOptions,
+          activeSessionFile: sessionFile,
+          now: 400_000,
+        }),
       ).rejects.toThrow(/Cannot delete active session file/);
       const stateAfterRefusal = JSON.parse(
         await readFile(join(targetDir, STATE_FILE_NAME), "utf8"),
@@ -536,7 +575,11 @@ describe("p1 regressions nested labels", () => {
 
       // Without an active file, the blocked action must still block the whole
       // logical replacement: no copies, no deletions, no state change.
-      const blockedSummary = await syncSessions({ ...baseOptions, now: 400_000 });
+      const blockedSummary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        ...baseOptions,
+        now: 400_000,
+      });
       expect(blockedSummary.copied).toBe(0);
       expect(blockedSummary.deleted).toBe(0);
       expect(blockedSummary.refreshSessionFile).toBeUndefined();
@@ -721,7 +764,12 @@ describe("p1 regressions nested labels", () => {
     const oldTargetTree = join(targetDir, "sessions", oldName);
     const newTargetTree = join(targetDir, "sessions", newName);
     const baseOptions = { sessionsRoot, targetDir, machineId: "repl-firstseen-machine" };
-    const sync = (now: number) => syncSessions({ ...baseOptions, now });
+    const sync = (now: number) =>
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        ...baseOptions,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -864,7 +912,14 @@ describe("p1 regressions nested labels", () => {
     expect(strictPortableNameIdentity("ROOT%2Ftmp%2Fa.")).toBe("ROOT%2Ftmp%2Fa%2E");
     expect(decodePortableSessionDirName("ROOT%2Ftmp%2Fa*b")?.cwd).toBe("/tmp/a*b");
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -922,6 +977,8 @@ describe("p1 regressions nested labels", () => {
     const strictFile = join(targetDir, "sessions", strictName, "session.jsonl");
     const sync = (now: number) =>
       syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         layout: "flat",
@@ -1011,7 +1068,14 @@ describe("p1 regressions nested labels", () => {
     const targetFile = join(targetDir, "sessions", looseName, "session.jsonl");
     const machineId = "mixed-tombstone-machine";
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -1087,6 +1151,8 @@ describe("p1 regressions nested labels", () => {
     const strictFile = join(targetDir, "sessions", strictName, "session.jsonl");
     const sync = (now: number) =>
       syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         layout: "nested",
@@ -1207,7 +1273,14 @@ describe("p1 regressions nested labels", () => {
       await mkdir(dirname(targetFile), { recursive: true });
       await writeFile(targetFile, targetText);
       await expect(
-        syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now: 200_000 }),
+        syncSessions({
+          missionsRoot: join(root, "missions"),
+          sessionsRoot,
+          targetDir,
+          layout: "flat",
+          machineId,
+          now: 200_000,
+        }),
       ).rejects.toThrow(/Legacy loose portable name/);
       // No writes anywhere: both files keep their content and the state
       // manifest is untouched.
@@ -1269,7 +1342,14 @@ describe("p1 regressions nested labels", () => {
       await writeFile(join(targetDir, STATE_FILE_NAME), stateText);
       await writeFile(localFile, localText);
       await expect(
-        syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now: 200_000 }),
+        syncSessions({
+          missionsRoot: join(root, "missions"),
+          sessionsRoot,
+          targetDir,
+          layout: "flat",
+          machineId,
+          now: 200_000,
+        }),
       ).rejects.toThrow(/Legacy loose portable name/);
       expect(await readFile(localFile, "utf8")).toBe(localText);
       expect(await readFile(join(targetDir, STATE_FILE_NAME), "utf8")).toBe(stateText);
@@ -1297,7 +1377,14 @@ describe("p1 regressions nested labels", () => {
     const decoyFile = join(elsewhere, "session.jsonl");
     const machineId = "loose-symlink-machine";
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -1360,7 +1447,14 @@ describe("p1 regressions nested labels", () => {
     const strictFile = join(targetDir, "sessions", strictName, "session.jsonl");
     const machineId = "dup-roots-machine";
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -1423,7 +1517,14 @@ describe("p1 regressions nested labels", () => {
     const strictFile = join(targetDir, "sessions", strictName, "session.jsonl");
     const machineId = "alias-collision-machine";
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -1470,7 +1571,14 @@ describe("p1 regressions nested labels", () => {
     const strictFile = join(targetDir, "sessions", strictName, "session.jsonl");
     const machineId = "empty-alias-machine";
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId, now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId,
+        now,
+      });
     try {
       await mkdir(targetDir, { recursive: true });
       await mkdir(join(targetDir, "sessions"), { recursive: true });
@@ -1518,7 +1626,13 @@ describe("p1 regressions nested labels", () => {
     const pLocalDir = join(sessionsRoot, defaultSessionDirName(pCwd));
     const qLocalDir = join(sessionsRoot, defaultSessionDirName(qCwd));
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, machineId: "corpse-machine", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "corpse-machine",
+        now,
+      });
     try {
       await mkdir(pLocalDir, { recursive: true });
       await mkdir(qLocalDir, { recursive: true });
@@ -1620,6 +1734,8 @@ describe("p1 regressions nested labels", () => {
       await utimes(join(localTree1, "session.jsonl"), 1, 1);
       await utimes(join(localTree1, "extra.jsonl"), 1, 1);
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot: sessionsRoot1,
         targetDir,
         machineId: "m1",
@@ -1646,6 +1762,8 @@ describe("p1 regressions nested labels", () => {
         await utimes(join(targetDir, "sessions", newName, name), 2, 2);
       }
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot: sessionsRoot1,
         targetDir,
         machineId: "m1",
@@ -1657,6 +1775,8 @@ describe("p1 regressions nested labels", () => {
       );
       await utimes(join(localTree1, "session.jsonl"), 3, 3);
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot: sessionsRoot1,
         targetDir,
         machineId: "m1",
@@ -1670,6 +1790,8 @@ describe("p1 regressions nested labels", () => {
       await mkdir(localTree2, { recursive: true });
       await symlink(join(root, "outside"), join(localTree2, "extra.jsonl"));
       const blocked = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot: sessionsRoot2,
         targetDir,
         machineId: "m2",
@@ -1752,15 +1874,33 @@ describe("p1 regressions nested labels", () => {
         `${JSON.stringify({ cwd: `pi-session-sync://${oldName}`, value: "old" })}\n`,
       );
       await utimes(oldTargetFile, 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 100_000,
+      });
       await rm(join(targetDir, "sessions", oldName, "session.jsonl"));
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 200_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 200_000,
+      });
       await mkdir(join(sessionsRoot, collidingLocalName), { recursive: true });
       const currentFile = join(sessionsRoot, collidingLocalName, "session.jsonl");
       await writeFile(currentFile, `${JSON.stringify({ cwd: currentCwd, value: "current" })}\n`);
       await utimes(currentFile, 1, 1);
       await expect(
-        syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 300_000 }),
+        syncSessions({
+          missionsRoot: join(root, "missions"),
+          sessionsRoot,
+          targetDir,
+          machineId: "m1",
+          now: 300_000,
+        }),
       ).rejects.toThrow(/cwd does not match local Pi session directory/);
       // The local file survived untouched; no state write captured it.
       expect(JSON.parse(await readFile(currentFile, "utf8")).value).toBe("current");
@@ -1794,15 +1934,29 @@ describe("p1 regressions nested labels", () => {
         `${JSON.stringify({ cwd: `pi-session-sync://${name}`, value: "old" })}\n`,
       );
       await utimes(join(targetDir, "sessions", name, "session.jsonl"), 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 100_000,
+      });
       await rm(join(targetDir, "sessions", name, "session.jsonl"));
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 200_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 200_000,
+      });
       // Same cwd, pre-cutoff mtime: legitimate old-label reclassification.
       await mkdir(join(sessionsRoot, localName), { recursive: true });
       const localFile = join(sessionsRoot, localName, "session.jsonl");
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "old" })}\n`);
       await utimes(localFile, 1, 1);
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "m1",
@@ -2207,11 +2361,23 @@ describe("p1 regressions nested labels", () => {
       await writeFile(join(localTree, "b.jsonl"), `${JSON.stringify({ cwd, value: "b" })}\n`);
       await utimes(join(localTree, "a.jsonl"), 1, 1);
       await utimes(join(localTree, "b.jsonl"), 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 100_000,
+      });
       // Delete b locally and propagate the tombstone so b is a known old
       // state file with no live local counterpart.
       await rm(join(localTree, "b.jsonl"));
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 200_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 200_000,
+      });
       // Replace known target file b with symlink that has no local
       // counterpart. Ordinary same-label symlink handling skips only b;
       // unrelated sibling a remains eligible for normal synchronization.
@@ -2221,6 +2387,8 @@ describe("p1 regressions nested labels", () => {
       await writeFile(join(localTree, "a.jsonl"), `${JSON.stringify({ cwd, value: "a-v2" })}\n`);
       await utimes(join(localTree, "a.jsonl"), 3, 3);
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "m1",
@@ -2348,12 +2516,24 @@ describe("p1 regressions nested labels", () => {
       // First sync: one local file.
       await writeFile(join(localTree, "a.jsonl"), `${JSON.stringify({ cwd, value: "a" })}\n`);
       await utimes(join(localTree, "a.jsonl"), 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 100_000,
+      });
       // Delete local a.jsonl, propagate the tombstone, then replace target
       // a.jsonl with a symlink (no local counterpart). The scan ignores it;
       // no local file exists to trigger a decision for it.
       await rm(join(localTree, "a.jsonl"));
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 200_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 200_000,
+      });
       // Re-create target a.jsonl as a symlink. The target tree may have been
       // cleaned up as empty after the tombstone sync, so re-create it first.
       await mkdir(targetTree, { recursive: true });
@@ -2367,6 +2547,8 @@ describe("p1 regressions nested labels", () => {
       await writeFile(join(localTree, "b.jsonl"), `${JSON.stringify({ cwd, value: "b" })}\n`);
       await utimes(join(localTree, "b.jsonl"), 3, 3);
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "m1",
@@ -2421,7 +2603,13 @@ describe("p1 regressions nested labels", () => {
       );
       await utimes(join(localTree, "session.jsonl"), 1, 1);
       await utimes(join(localTree, "extra.jsonl"), 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 100_000,
+      });
 
       // Rename target tree to the replacement label and rewrite contents.
       await rename(join(targetDir, "sessions", oldName), newTargetTree);
@@ -2441,7 +2629,13 @@ describe("p1 regressions nested labels", () => {
         await utimes(join(newTargetTree, name), 1, 1);
       }
       // Sync 2: migration oldName -> newName.
-      await syncSessions({ sessionsRoot, targetDir, machineId: "m1", now: 200_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "m1",
+        now: 200_000,
+      });
       // Verify migration happened.
       const stateAfterMigration = JSON.parse(
         await readFile(join(targetDir, STATE_FILE_NAME), "utf8"),
@@ -2460,6 +2654,8 @@ describe("p1 regressions nested labels", () => {
       );
       await utimes(join(localTree, "session.jsonl"), 3, 3);
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "m1",
@@ -2576,6 +2772,70 @@ describe("p1 regressions nested labels", () => {
       expect(state.entries[oldAKey]).toEqual(oldAEntry);
       expect(state.entries[oldBKey]).toEqual(oldBEntry);
       expect(state.entries[replacementKey]).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a mission parent-only mapping after a missing sessions root round", async () => {
+    const root = await mkdtemp(join(tmpdir(), "p1reg-frozen-recover-nested-"));
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const missionsRoot = join(root, "missions");
+    const cwd = join(root, "session-cwd");
+    // The referenced session directory is a GHOST: no live tree exists on
+    // either side, so only the persisted mission-entry mapping can resolve it.
+    const ghostCwd = join(root, "ghost-cwd");
+    const cwdLocalName = defaultSessionDirName(cwd);
+    const localName = defaultSessionDirName(ghostCwd);
+    const portable = portableSessionDirName(ghostCwd);
+    const localTree = join(sessionsRoot, cwdLocalName);
+    const ghostLocalTree = join(sessionsRoot, localName);
+    const targetMission = join(targetDir, "missions", "index", "ghost.json");
+    const localMission = join(missionsRoot, "index", "ghost.json");
+    const ghostUri = `pi-session-sync://sessions/${portable}/ghost.jsonl`;
+    const sync = (now: number) =>
+      syncSessions({
+        missionsRoot,
+        sessionsRoot,
+        targetDir,
+        layout: "nested",
+        machineId: "frozen-recover-nested",
+        now,
+      });
+    try {
+      await mkdir(localTree, { recursive: true });
+      await mkdir(targetDir, { recursive: true });
+      await mkdir(join(targetDir, "sessions"), { recursive: true });
+      await mkdir(join(targetDir, "missions", "index"), { recursive: true });
+      await mkdir(missionsRoot, { recursive: true });
+      await writeFile(join(localTree, "s.jsonl"), `${JSON.stringify({ cwd })}\n`);
+      await sync(1_000);
+
+      // Target-only mission reference to a ghost session file that never
+      // exists on either side. The frozen round persists the derived nested
+      // localName mapping on the mission entry while the scope directory
+      // mapping stays verbatim.
+      await writeFile(targetMission, `${JSON.stringify({ parentSession: ghostUri })}\n`);
+      await rm(sessionsRoot, { recursive: true, force: true });
+      const frozen = await sync(2_000);
+      expect(
+        frozen.warnings.some((warning) => warning.includes("Ignored missing local sessions root")),
+      ).toBe(true);
+      const frozenLocal = JSON.parse(await readFile(localMission, "utf8")) as {
+        parentSession: string;
+      };
+      expect(frozenLocal.parentSession).toBe(join(ghostLocalTree, "ghost.jsonl"));
+
+      // Recovery: the first local missions scan must seed the persisted
+      // mission-entry nested localName mapping before it runs.
+      await mkdir(localTree, { recursive: true });
+      const recovered = await sync(3_000);
+      expect(recovered.errors).toEqual([]);
+      expect(await readFile(targetMission, "utf8")).toBe(
+        `${JSON.stringify({ parentSession: ghostUri })}\n`,
+      );
+      await expect(sync(4_000)).resolves.toBeDefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

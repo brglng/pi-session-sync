@@ -11,13 +11,28 @@ import { makeValidatedSyncRoots, type ValidatedSyncRoots } from "./validated-roo
  * scan reports a warning and the other tree still synchronizes); a symlinked
  * root is followed by the scanner. Any other non-directory is a configuration
  * error.
+ *
+ * BOTH local source roots are special: a root that EXISTS but cannot be
+ * inspected at all (EACCES/EPERM, or ENOTDIR through a non-directory
+ * ancestor) must not fail the whole two-root sync here. `deferUnreadable`
+ * lets the scanner classify that condition as an UNAVAILABLE root
+ * (`rootUnavailable`), which emits a root-specific warning and freezes only
+ * that tree while the other safe tree still synchronizes. A root whose lstat
+ * succeeds but is neither a directory nor a symlink stays a hard
+ * configuration error, and a symlinked root that RESOLVES to a non-directory
+ * is still rejected by the scanner before traversal.
  */
-async function inspectSourceRoot(rootPath: string, field: string): Promise<void> {
+async function inspectSourceRoot(
+  rootPath: string,
+  field: string,
+  deferUnreadable = false,
+): Promise<void> {
   let info: Awaited<ReturnType<typeof lstat>> | undefined;
   try {
     info = await lstat(rootPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    if (deferUnreadable) return;
     throw new Error(`Cannot inspect ${field} ${rootPath}: ${errorMessage(error)}`);
   }
   if (info !== undefined && !info.isDirectory() && !info.isSymbolicLink()) {
@@ -62,34 +77,42 @@ export async function collectTargetDirLegacyWarnings(
  *
  * `targetDir` itself must exist as a real, non-symlink directory (ancestor
  * symlinks remain allowed). Overlap validation covers both local source roots
- * (sessions and optionally missions) against the target parent and both target
- * child roots, and runs before any target child is created so a misconfiguration
+ * (sessions and missions) against the target parent and both target child
+ * roots, and runs before any target child is created so a misconfiguration
  * never writes. Missing source roots still participate in the lexical overlap
  * check: a source path that would land inside a target root is a configuration
  * error even when nothing exists there yet. The sessions child root
  * `targetDir/sessions` is created when missing and must never be a symlink or
- * a non-directory once present. `missionsRoot` is optional; when provided the
- * `targetDir/missions` child root is created under the same rules.
+ * a non-directory once present; the `targetDir/missions` child root is created
+ * under the same rules. `missionsRoot` is REQUIRED: phase-2 two-root
+ * validation/sync cannot be silently disabled by omitting it.
  *
  * The returned `physicalTargetRoot` is the fully resolved realpath of
  * `targetDir` (ancestor aliases included), fixed once here. Source-symlink
  * containment checks (forbidden source-link targets and preflight destination
  * containment) must compare against this physical identity; intended target
  * writes keep using the lexical target paths.
+ *
+ * Missing child roots are created HERE, as part of root validation, by design:
+ * this is the documented setup side-effect of the authoritative target-layout
+ * contract (“子目录不存在时创建”), and the creation timing after the real-path
+ * overlap checks is exactly what lets the scanners detect a source symlink
+ * whose target only resolves inside a freshly created target child (the
+ * forbidden-source race). File/state content still respects the strict
+ * staging boundary: any parse, validation, preflight, or staging failure
+ * leaves the created child roots EMPTY and never writes file or state bytes.
  */
 export async function validateSyncRoots(
   sessionsRoot: string,
   targetDir: string,
-  missionsRoot: string | undefined = undefined,
+  missionsRoot: string,
 ): Promise<ValidatedSyncRoots> {
   const sourcePath = resolve(sessionsRoot);
-  const missionsSourcePath = missionsRoot === undefined ? undefined : resolve(missionsRoot);
+  const missionsSourcePath = resolve(missionsRoot);
   const targetPath = resolve(targetDir);
 
-  await inspectSourceRoot(sourcePath, "sessionsRoot");
-  if (missionsSourcePath !== undefined) {
-    await inspectSourceRoot(missionsSourcePath, "missions root");
-  }
+  await inspectSourceRoot(sourcePath, "sessionsRoot", true);
+  await inspectSourceRoot(missionsSourcePath, "missions root", true);
 
   let targetInfo: Awaited<ReturnType<typeof lstat>>;
   try {
@@ -106,7 +129,7 @@ export async function validateSyncRoots(
   if (!targetInfo.isDirectory()) throw new Error(`targetDir must be a directory: ${targetPath}`);
 
   const sessionsChild = resolve(targetPath, "sessions");
-  const missionsChild = missionsRoot === undefined ? undefined : resolve(targetPath, "missions");
+  const missionsChild = resolve(targetPath, "missions");
 
   // Lexical overlap validation before creating any target child root. A
   // missing source root still participates lexically so a source path that
@@ -116,20 +139,10 @@ export async function validateSyncRoots(
   // versa) is caught before any directory is created.
   assertNoOverlap("Pi sessions root and target dir", sourcePath, targetPath);
   assertNoOverlap("Pi sessions root and target sessions root", sourcePath, sessionsChild);
-  if (missionsChild !== undefined) {
-    assertNoOverlap("Pi sessions root and target missions root", sourcePath, missionsChild);
-    assertNoOverlap("Missions root and target dir", missionsSourcePath as string, targetPath);
-    assertNoOverlap(
-      "Missions root and target sessions root",
-      missionsSourcePath as string,
-      sessionsChild,
-    );
-    assertNoOverlap(
-      "Missions root and target missions root",
-      missionsSourcePath as string,
-      missionsChild,
-    );
-  }
+  assertNoOverlap("Pi sessions root and target missions root", sourcePath, missionsChild);
+  assertNoOverlap("Missions root and target dir", missionsSourcePath, targetPath);
+  assertNoOverlap("Missions root and target sessions root", missionsSourcePath, sessionsChild);
+  assertNoOverlap("Missions root and target missions root", missionsSourcePath, missionsChild);
 
   // Real-path overlap validation: symlinked source roots and symlinked target
   // ancestors are resolved so a physical overlap (through symlinks) is caught
@@ -140,14 +153,12 @@ export async function validateSyncRoots(
   const realSessionsChild = await realPathWithMissingSuffix(sessionsChild);
   assertNoOverlap("Pi sessions root and target dir", realSource, realTarget);
   assertNoOverlap("Pi sessions root and target sessions root", realSource, realSessionsChild);
-  if (missionsSourcePath !== undefined) {
-    const realMissions = await realPathWithMissingSuffix(missionsSourcePath);
-    const realMissionsChild = await realPathWithMissingSuffix(missionsChild as string);
-    assertNoOverlap("Pi sessions root and target dir", realMissions, realTarget);
-    assertNoOverlap("Pi sessions root and target missions root", realSource, realMissionsChild);
-    assertNoOverlap("Missions root and target sessions root", realMissions, realSessionsChild);
-    assertNoOverlap("Missions root and target missions root", realMissions, realMissionsChild);
-  }
+  const realMissions = await realPathWithMissingSuffix(missionsSourcePath);
+  const realMissionsChild = await realPathWithMissingSuffix(missionsChild);
+  assertNoOverlap("Pi sessions root and target dir", realMissions, realTarget);
+  assertNoOverlap("Pi sessions root and target missions root", realSource, realMissionsChild);
+  assertNoOverlap("Missions root and target sessions root", realMissions, realSessionsChild);
+  assertNoOverlap("Missions root and target missions root", realMissions, realMissionsChild);
 
   // Inspect both target child roots BEFORE creating either one: a symlink or
   // non-directory conflict in one child must be detected before the other
@@ -171,8 +182,7 @@ export async function validateSyncRoots(
     return "ok";
   };
   const sessionsChildStatus = await inspectChild(sessionsChild);
-  const missionsChildStatus =
-    missionsChild === undefined ? undefined : await inspectChild(missionsChild);
+  const missionsChildStatus = await inspectChild(missionsChild);
 
   const ensureChildRoot = async (child: string, status: "missing" | "ok"): Promise<string> => {
     const childPath = resolve(child);
@@ -186,10 +196,7 @@ export async function validateSyncRoots(
   };
 
   const sessionsTargetRoot = await ensureChildRoot(sessionsChild, sessionsChildStatus);
-  const missionsTargetRoot =
-    missionsRoot === undefined
-      ? undefined
-      : await ensureChildRoot(missionsChild as string, missionsChildStatus as "missing" | "ok");
+  const missionsTargetRoot = await ensureChildRoot(missionsChild as string, missionsChildStatus);
 
   // Physical targetDir identity: resolved once after targetDir is validated.
   // At this point targetDir is a real, non-symlink directory, so realpath

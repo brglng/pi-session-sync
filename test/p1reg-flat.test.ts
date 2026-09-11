@@ -41,7 +41,13 @@ describe("p1 regressions flat mappings", () => {
     const newTargetFile = join(targetDir, "sessions", newName, "session.jsonl");
     const absoluteParent = join(sessionsRoot, localName, "parent.jsonl");
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, machineId: "repl-parent-machine", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "repl-parent-machine",
+        now,
+      });
     try {
       await mkdir(cwd, { recursive: true });
       await mkdir(targetDir, { recursive: true });
@@ -128,7 +134,14 @@ describe("p1 regressions flat mappings", () => {
     const oldName = portableSessionDirName(oldCwd);
     const newName = portableSessionDirName(newCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "reuse", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "reuse",
+        now,
+      });
     try {
       const nestedDir = join(sessionsRoot, "nested");
       await mkdir(nestedDir, { recursive: true });
@@ -195,7 +208,14 @@ describe("p1 regressions flat mappings", () => {
     const oldName = portableSessionDirName(oldCwd);
     const newName = portableSessionDirName(newCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "reuse", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "reuse",
+        now,
+      });
     try {
       const nestedDir = join(sessionsRoot, "nested");
       await mkdir(nestedDir, { recursive: true });
@@ -280,7 +300,14 @@ describe("p1 regressions flat mappings", () => {
     const firstName = portableSessionDirName(firstCwd);
     const secondName = portableSessionDirName(secondCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "two-stale", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "two-stale",
+        now,
+      });
     try {
       const nestedDir = join(sessionsRoot, "nested");
       await mkdir(nestedDir, { recursive: true });
@@ -341,7 +368,14 @@ describe("p1 regressions flat mappings", () => {
     const liveName = portableSessionDirName(liveCwd);
     const staleName = portableSessionDirName(staleCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "p1reg", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "p1reg",
+        now,
+      });
     try {
       // Sync a nested flat file so state records an exact stale mapping.
       const nestedDir = join(sessionsRoot, "nested");
@@ -412,7 +446,12 @@ describe("p1 regressions flat mappings", () => {
       const mdPath = join(localTree, "m.md");
       await writeFile(mdPath, localText);
       await utimes(mdPath, 1, 1);
-      const summary = await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       expect(summary.copied).toBe(1);
       expect(await readFile(mdPath, "utf8")).toBe(localText);
       // A legal local sync URI traversing a symlink is preserved as-is.
@@ -448,7 +487,12 @@ describe("p1 regressions flat mappings", () => {
       const mdPath = join(localTree, "m.md");
       await writeFile(mdPath, localText);
       await utimes(mdPath, 1, 1);
-      const summary = await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       expect(summary.copied).toBe(1);
       expect(await readFile(mdPath, "utf8")).toBe(localText);
     } finally {
@@ -489,7 +533,12 @@ describe("p1 regressions flat mappings", () => {
         })}\n`,
       );
       await utimes(join(targetChildTree, "child.jsonl"), 1, 1);
-      const summary = await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       expect(summary.copied).toBe(2);
       // Target-only absolute parent references resolve via the target tree
       // mapping and materialize locally as absolute in-root paths.
@@ -534,6 +583,8 @@ describe("p1 regressions flat mappings", () => {
       );
       await utimes(join(targetChildTree, "child.jsonl"), 1, 1);
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         layout: "flat",
@@ -568,7 +619,12 @@ describe("p1 regressions flat mappings", () => {
       const file = join(tree, "session.jsonl");
       await writeFile(file, `${JSON.stringify({ cwd })}\n`);
       await utimes(file, 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       const target = join(targetDir, "sessions", portableName, "session.jsonl");
       expect(JSON.parse(await readFile(target, "utf8")).cwd).toBe(
         `pi-session-sync://${portableName}`,
@@ -605,7 +661,13 @@ describe("p1 regressions flat mappings", () => {
         })}\n`,
       );
       await utimes(join(childTarget, "child.jsonl"), 1, 1);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "abs-state", now: 1_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "abs-state",
+        now: 1_000,
+      });
       const localChild = join(sessionsRoot, childLocalName, "child.jsonl");
       expect(JSON.parse(await readFile(localChild, "utf8")).parentSession).toBe(absoluteParent);
 
@@ -620,7 +682,13 @@ describe("p1 regressions flat mappings", () => {
         })}\n`,
       );
       await utimes(join(childTarget, "child.jsonl"), 2, 2);
-      await syncSessions({ sessionsRoot, targetDir, machineId: "abs-state", now: 2_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "abs-state",
+        now: 2_000,
+      });
       expect(JSON.parse(await readFile(localChild, "utf8")).parentSession).toBe(absoluteParent);
       // Target output keeps the absolute bytes (Markdown/JSONL byte-preservation).
       expect(
@@ -658,6 +726,8 @@ describe("p1 regressions flat mappings", () => {
       // No mapping evidence exists, but target-to-local is lenient: the
       // absolute parent value is preserved verbatim and the file still syncs.
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "abs-noevidence",
@@ -717,7 +787,12 @@ describe("p1 regressions flat mappings", () => {
         })}\n`,
       );
       await utimes(join(targetChildTree, "child.jsonl"), 1, 1);
-      const summary = await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       expect(summary.copied).toBe(2);
       // The absolute parent reference resolved through the live local nested
       // mapping: the child materializes locally and its parentSession is the
@@ -734,7 +809,12 @@ describe("p1 regressions flat mappings", () => {
           .cwd,
       ).toBe(`pi-session-sync://${parentName}`);
       // A second sync keeps the mapping stable.
-      await syncSessions({ sessionsRoot, targetDir, now: 2_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 2_000,
+      });
       expect(JSON.parse(await readFile(localChild, "utf8")).parentSession).toBe(absoluteParent);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -777,7 +857,12 @@ describe("p1 regressions flat mappings", () => {
       ].join("\n");
       await writeFile(join(targetChildTree, "child.md"), markdown);
       await utimes(join(targetChildTree, "child.md"), 1, 1);
-      const summary = await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       expect(summary.copied).toBe(2);
       // Target Markdown output is byte-identical: the absolute parentSession
       // spelling is preserved while the reference resolved through the live
@@ -790,7 +875,12 @@ describe("p1 regressions flat mappings", () => {
       expect(localChildMarkdown).toContain(`parentSession: ${absoluteParent}`);
       expect(localChildMarkdown).toContain(`cwd: ${childCwd}`);
       // A second sync keeps the mapping stable.
-      await syncSessions({ sessionsRoot, targetDir, now: 2_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 2_000,
+      });
       expect(await readFile(join(targetChildTree, "child.md"), "utf8")).toBe(markdown);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -825,7 +915,12 @@ describe("p1 regressions flat mappings", () => {
       })}\n`;
       await writeFile(targetFile, original);
       await utimes(targetFile, 1, 1);
-      const summary = await syncSessions({ sessionsRoot, targetDir, now: 1_000 });
+      const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        now: 1_000,
+      });
       expect(summary.copied).toBe(1);
       expect(
         summary.warnings.some((warning) =>
@@ -869,6 +964,8 @@ describe("p1 regressions flat mappings", () => {
       );
       await utimes(join(childTarget, "child.jsonl"), 1, 1);
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         layout: "flat",
@@ -888,6 +985,8 @@ describe("p1 regressions flat mappings", () => {
       );
       await utimes(join(childTarget, "child.jsonl"), 2, 2);
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         layout: "flat",
@@ -911,7 +1010,14 @@ describe("p1 regressions flat mappings", () => {
     const staleCwd = join(root, "stale-target-flat");
     const staleName = portableSessionDirName(staleCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "stale-target", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "stale-target",
+        now,
+      });
     try {
       // Seed live + stale files.
       const nestedDir = join(sessionsRoot, "nested");
@@ -969,7 +1075,14 @@ describe("p1 regressions flat mappings", () => {
     const staleCwd = join(root, "stale-kept-flat");
     const staleName = portableSessionDirName(staleCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "stale-kept", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "stale-kept",
+        now,
+      });
     try {
       const nestedDir = join(sessionsRoot, "nested");
       await mkdir(nestedDir, { recursive: true });
@@ -1027,7 +1140,14 @@ describe("p1 regressions flat mappings", () => {
     const staleCwd = join(root, "stale-conflict-flat");
     const staleName = portableSessionDirName(staleCwd);
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "stale-conflict", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "stale-conflict",
+        now,
+      });
     try {
       const nestedDir = join(sessionsRoot, "nested");
       await mkdir(nestedDir, { recursive: true });
@@ -1070,7 +1190,14 @@ describe("p1 regressions flat mappings", () => {
     const childName = portableSessionDirName(childCwd);
     const absoluteParent = join(sessionsRoot, "nested", "parent.jsonl");
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "abs-parent-live", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "abs-parent-live",
+        now,
+      });
     try {
       const childTarget = join(targetDir, "sessions", childName, "nested");
       await mkdir(childTarget, { recursive: true });
@@ -1122,7 +1249,14 @@ describe("p1 regressions flat mappings", () => {
     const childName = portableSessionDirName(childCwd);
     const absoluteParent = join(sessionsRoot, "nested", "parent.jsonl");
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "abs-parent-md", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "abs-parent-md",
+        now,
+      });
     try {
       const childTarget = join(targetDir, "sessions", childName, "nested");
       await mkdir(childTarget, { recursive: true });
@@ -1172,7 +1306,14 @@ describe("p1 regressions flat mappings", () => {
     const nameC = portableSessionDirName(cwdC);
     const absoluteParent = join(sessionsRoot, "nested", "same.jsonl");
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, layout: "flat", machineId: "path-reuse", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "path-reuse",
+        now,
+      });
     try {
       // Seed then tombstone mapping A at nested/same.jsonl.
       const local = join(sessionsRoot, "nested", "same.jsonl");
@@ -1439,6 +1580,71 @@ describe("p1 regressions flat mappings", () => {
       expect(reference?.mappedUri).toBe(`pi-session-sync://sessions/${newQPortable}/q.jsonl`);
       // The corpse file remains available for its own tombstone decision.
       expect(scan.files.has(`sessions/${oldParentPortable}/p.jsonl`)).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a mission parent-only mapping after a missing sessions root round", async () => {
+    const root = await mkdtemp(join(tmpdir(), "p1reg-frozen-recover-flat-"));
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const missionsRoot = join(root, "missions");
+    const cwd = join(root, "session-cwd");
+    const portable = portableSessionDirName(cwd);
+    const targetMission = join(targetDir, "missions", "index", "ghost.json");
+    const localMission = join(missionsRoot, "index", "ghost.json");
+    const ghostUri = `pi-session-sync://sessions/${portable}/ghost.jsonl`;
+    const sync = (now: number) =>
+      syncSessions({
+        missionsRoot,
+        sessionsRoot,
+        targetDir,
+        layout: "flat",
+        machineId: "frozen-recover-flat",
+        now,
+      });
+    try {
+      await mkdir(sessionsRoot, { recursive: true });
+      await mkdir(targetDir, { recursive: true });
+      await mkdir(join(targetDir, "sessions"), { recursive: true });
+      await mkdir(join(targetDir, "missions", "index"), { recursive: true });
+      await mkdir(missionsRoot, { recursive: true });
+      await writeFile(join(sessionsRoot, "s.jsonl"), `${JSON.stringify({ cwd })}\n`);
+      await sync(1_000);
+
+      // Target-only mission reference to a ghost session file that never
+      // exists on either side: the portable URI spelling is the only mapping
+      // evidence, and the frozen round persists it on the mission entry while
+      // the scope mapping fields stay verbatim.
+      await writeFile(targetMission, `${JSON.stringify({ parentSession: ghostUri })}\n`);
+      await rm(sessionsRoot, { recursive: true, force: true });
+      const frozen = await sync(2_000);
+      expect(
+        frozen.warnings.some((warning) => warning.includes("Ignored missing local sessions root")),
+      ).toBe(true);
+      // The target mission was mirrored locally with the URI decoded into the
+      // machine-local absolute spelling.
+      const frozenLocal = JSON.parse(await readFile(localMission, "utf8")) as {
+        parentSession: string;
+      };
+      expect(frozenLocal.parentSession).toBe(join(sessionsRoot, "ghost.jsonl"));
+
+      // Sessions root recovery: the surviving local mission copy carries an
+      // absolute path, so the first local missions scan MUST seed the
+      // persisted mission-entry mapping before it runs or it fails with
+      // "Session path is not mapped".
+      await mkdir(sessionsRoot, { recursive: true });
+      const recovered = await sync(3_000);
+      expect(recovered.errors).toEqual([]);
+      // The target mission keeps its portable URI spelling and the local copy
+      // stays byte-identical once canonicalized (no further copy needed).
+      expect(await readFile(targetMission, "utf8")).toBe(
+        `${JSON.stringify({ parentSession: ghostUri })}\n`,
+      );
+      // A repeated round stays stable instead of regressing on the absolute
+      // local spelling.
+      await expect(sync(4_000)).resolves.toBeDefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

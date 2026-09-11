@@ -68,7 +68,13 @@ describe("latest P1 symlink scope", () => {
         await writeFile(path, `${JSON.stringify({ type: "session", id: name, cwd, value })}\n`);
         await utimes(path, 1, 1);
       }
-      await syncSessions({ sessionsRoot, targetDir, machineId: "p1-latest", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "p1-latest",
+        now: 100_000,
+      });
       const stateBefore = await readFile(join(targetDir, STATE_FILE_NAME), "utf8");
 
       await rename(oldTree, newTree);
@@ -82,6 +88,8 @@ describe("latest P1 symlink scope", () => {
       await symlink(join(root, "outside"), join(newTree, "b.jsonl"));
 
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "p1-latest",
@@ -120,7 +128,13 @@ describe("latest P1 symlink scope", () => {
     const parentFile = join(parentTree, "parent.jsonl");
     const childFile = join(childTree, "child.jsonl");
     const sync = (now: number) =>
-      syncSessions({ sessionsRoot, targetDir, machineId: "p1-latest-history", now });
+      syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "p1-latest-history",
+        now,
+      });
     try {
       await mkdir(parentTree, { recursive: true });
       await mkdir(childTree, { recursive: true });
@@ -198,6 +212,8 @@ describe("latest P1 symlink scope", () => {
         await utimes(path, 1, 1);
       }
       await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "p1-latest-rollback",
@@ -252,6 +268,8 @@ describe("latest P1 symlink scope", () => {
         await utimes(path, 2, 2);
       }
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "p1-latest-rollback",
@@ -290,7 +308,13 @@ describe("latest P1 symlink scope", () => {
         await writeFile(path, `${JSON.stringify({ type: "session", id: name, cwd, value })}\n`);
         await utimes(path, 1, 1);
       }
-      await syncSessions({ sessionsRoot, targetDir, machineId: "p1-latest-local", now: 100_000 });
+      await syncSessions({
+        missionsRoot: join(root, "missions"),
+        sessionsRoot,
+        targetDir,
+        machineId: "p1-latest-local",
+        now: 100_000,
+      });
       await rm(join(localTree, "b.jsonl"));
       await symlink(join(root, "outside"), join(localTree, "b.jsonl"));
       await writeFile(
@@ -300,6 +324,8 @@ describe("latest P1 symlink scope", () => {
       await utimes(join(localTree, "a.jsonl"), 2, 2);
 
       const summary = await syncSessions({
+        missionsRoot: join(root, "missions"),
+
         sessionsRoot,
         targetDir,
         machineId: "p1-latest-local",

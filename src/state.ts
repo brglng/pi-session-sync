@@ -3,10 +3,13 @@
 import { lstat, readFile } from "node:fs/promises";
 import type { SessionLayout } from "./config.ts";
 import {
+  decodePortableSessionDirName,
+  isStrictPortableSessionDirName,
   normalizePortableNameOptions,
   type PortableNameOptions,
   portableNameOptionsFingerprint,
 } from "./portable-name.ts";
+import { isCrossPlatformSafePathSegment } from "./session-paths.ts";
 
 export interface SideSnapshot {
   hash: string;
@@ -32,6 +35,20 @@ export interface StateEntry {
    * any machine.
    */
   cwdEvidence?: Record<string, Record<string, string>>;
+  /**
+   * Per-machine per-owner session mapping evidence for mission files: machine
+   * scope key → (local session directory name (nested) or sessions-root
+   * relative path (flat) → portable name) this mission file's own references
+   * proved. Missions files are the owner of their parent-only session
+   * mappings, so keying the evidence by owner lets an UNAVAILABLE mission file
+   * (an ignored target symlink subtree) keep its derived mapping instead of
+   * retiring it while the content cannot be read. The machine scope key keeps
+   * one machine's local directory names from being validated or reused under
+   * another machine's home: the current machine re-derives its own localName
+   * from the portable label at lookup time, while other machines' records are
+   * preserved verbatim. Absent when no reference was evidenced.
+   */
+  missionSessionMappings?: Record<string, Record<string, string>>;
 }
 
 export interface StateScope {
@@ -40,6 +57,30 @@ export interface StateScope {
   namingConfig: PortableNameOptions;
   directories: Record<string, string>;
   flatFiles: Record<string, string>;
+  /**
+   * Generic (non-`parentSession`) sessions-URI mapping evidence for the
+   * nested layout: Pi local session directory name → portable name. Sourced
+   * from surviving target session files whose ordinary (non-cwd,
+   * non-parentSession) fields carry `pi-session-sync://sessions/...` URIs.
+   * It feeds ONLY the next local→target path resolver so generic references
+   * to missing session files/directories round-trip; it is never parentSession
+   * semantic, liveness, or retirement evidence.
+   */
+  genericDirectories?: Record<string, string>;
+  /**
+   * Generic (non-`parentSession`) sessions-URI mapping evidence for the flat
+   * layout: sessions-root relative path → portable name (see
+   * `genericDirectories`).
+   */
+  genericFlatFiles?: Record<string, string>;
+  /**
+   * Per-logical-file provenance for `genericDirectories` / `genericFlatFiles`:
+   * canonical sessions logical file key → the localName→portableName evidence
+   * that file's own references proved. It lets an unavailable (ignored target
+   * symlink) file's evidence be carried forward per owner instead of
+   * resurrecting or dropping unrelated scope-level mappings.
+   */
+  genericEvidence?: Record<string, Record<string, string>>;
 }
 
 export interface SessionScopeState {
@@ -159,12 +200,44 @@ function parseEntry(value: unknown): StateEntry {
       setOwnRecordValue(cwdEvidence, machineKey, parsedRecord);
     }
   }
+  const missionSessionMappings = safeRecord<Record<string, string>>();
+  if (value.missionSessionMappings !== undefined) {
+    if (!isRecord(value.missionSessionMappings)) {
+      throw new Error("Invalid mission session mappings in pi-session-sync state");
+    }
+    for (const [machineKey, rawRecord] of Object.entries(value.missionSessionMappings)) {
+      if (machineKey.length === 0) {
+        throw new Error("Invalid empty machine key in pi-session-sync mission session mappings");
+      }
+      if (!isRecord(rawRecord)) {
+        throw new Error(
+          `Invalid mission session mappings for machine ${machineKey} in pi-session-sync state`,
+        );
+      }
+      const parsedRecord = safeRecord<string>();
+      for (const [localName, portableName] of Object.entries(rawRecord)) {
+        if (
+          localName.length === 0 ||
+          !localName.split("/").every((segment) => isCrossPlatformSafePathSegment(segment)) ||
+          typeof portableName !== "string" ||
+          portableName.length === 0
+        ) {
+          throw new Error(`Invalid mission session mapping in pi-session-sync state: ${localName}`);
+        }
+        setOwnRecordValue(parsedRecord, localName, portableName);
+      }
+      if (Object.keys(parsedRecord).length > 0) {
+        setOwnRecordValue(missionSessionMappings, machineKey, parsedRecord);
+      }
+    }
+  }
   return {
     baselineHash,
     localSnapshots,
     target: parseSnapshot(value.target, "target"),
     tombstone: parseTombstone(value.tombstone),
     ...(Object.keys(cwdEvidence).length > 0 ? { cwdEvidence } : {}),
+    ...(Object.keys(missionSessionMappings).length > 0 ? { missionSessionMappings } : {}),
   };
 }
 
@@ -194,6 +267,81 @@ function parseNamingConfig(value: unknown, scopeKey: string): PortableNameOption
       `Invalid naming config in pi-session-sync state scope: ${scopeKey}: ${String(error)}`,
     );
   }
+}
+
+/**
+ * Parse and validate one persisted generic sessions-URI mapping record
+ * (`genericDirectories` / `genericFlatFiles`). Keys must be non-empty and
+ * cross-platform-safe (a single safe segment for nested directory names, safe
+ * segments for flat relative paths); values must be the strict canonical
+ * portable spelling decodable under the scope's own naming configuration.
+ * Referenced paths are never required to exist. Empty records are dropped so
+ * the optional fields stay absent when there is no evidence.
+ */
+function parseGenericMappingRecord(
+  value: unknown,
+  context: string,
+  namingConfig: PortableNameOptions,
+  allowSlashSeparatedKeys: boolean,
+): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`Invalid ${context} in pi-session-sync state`);
+  }
+  const record = safeRecord<string>();
+  for (const [name, portableName] of Object.entries(value)) {
+    if (name.length === 0) {
+      throw new Error(`Invalid empty key in ${context} in pi-session-sync state`);
+    }
+    const segments = allowSlashSeparatedKeys ? name.split("/") : [name];
+    if (!segments.every((segment) => isCrossPlatformSafePathSegment(segment))) {
+      throw new Error(`Invalid key in ${context} in pi-session-sync state: ${name}`);
+    }
+    if (typeof portableName !== "string" || portableName.length === 0) {
+      throw new Error(`Invalid ${context} in pi-session-sync state: ${name}`);
+    }
+    if (
+      !isStrictPortableSessionDirName(portableName, namingConfig) ||
+      decodePortableSessionDirName(portableName, namingConfig) === null
+    ) {
+      throw new Error(`Invalid portable name in ${context} in pi-session-sync state: ${name}`);
+    }
+    setOwnRecordValue(record, name, portableName);
+  }
+  return Object.keys(record).length > 0 ? record : undefined;
+}
+
+/**
+ * Parse and validate the per-logical-file generic evidence provenance record.
+ * Outer keys are `sessions/` logical file keys; inner records carry the same
+ * generic mapping contract as `genericDirectories` / `genericFlatFiles`.
+ * Empty records are dropped so the optional field stays absent.
+ */
+function parseGenericEvidence(
+  value: unknown,
+  context: string,
+  namingConfig: PortableNameOptions,
+  flatLayout: boolean,
+): Record<string, Record<string, string>> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`Invalid ${context} in pi-session-sync state`);
+  }
+  const result = safeRecord<Record<string, string>>();
+  for (const [key, rawRecord] of Object.entries(value)) {
+    if (!key.startsWith("sessions/")) {
+      throw new Error(`Invalid ${context} logical key in pi-session-sync state: ${key}`);
+    }
+    const record = parseGenericMappingRecord(
+      rawRecord,
+      `${context} for ${key}`,
+      namingConfig,
+      flatLayout,
+    );
+    if (record === undefined) continue;
+    setOwnRecordValue(result, key, record);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function parseState(value: unknown): SyncState {
@@ -233,12 +381,33 @@ function parseState(value: unknown): SyncState {
       }
       setOwnRecordValue(flatFiles, relativePath, portableName);
     }
+    const genericDirectories = parseGenericMappingRecord(
+      rawScope.genericDirectories,
+      `generic directory mapping in scope ${scopeKey}`,
+      namingConfig,
+      false,
+    );
+    const genericFlatFiles = parseGenericMappingRecord(
+      rawScope.genericFlatFiles,
+      `generic flat file mapping in scope ${scopeKey}`,
+      namingConfig,
+      true,
+    );
+    const genericEvidence = parseGenericEvidence(
+      rawScope.genericEvidence,
+      `generic evidence in scope ${scopeKey}`,
+      namingConfig,
+      rawScope.layout === "flat",
+    );
     setOwnRecordValue(scopes, scopeKey, {
       layout: rawScope.layout,
       sessionsRoot: rawScope.sessionsRoot,
       namingConfig,
       directories,
       flatFiles,
+      ...(genericDirectories === undefined ? {} : { genericDirectories }),
+      ...(genericFlatFiles === undefined ? {} : { genericFlatFiles }),
+      ...(genericEvidence === undefined ? {} : { genericEvidence }),
     });
   }
   const entries = safeRecord<StateEntry>();
@@ -289,11 +458,17 @@ function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mix
   }
   let oldScopes = 0;
   let currentScopes = 0;
+  let mixedScopes = 0;
   for (const rawScope of Object.values(parsed.scopes)) {
     if (!isRecord(rawScope)) continue;
-    if (rawScope.namingConfig === undefined) oldScopes += 1;
-    else currentScopes += 1;
+    if (rawScope.namingConfig !== undefined) currentScopes += 1;
+    else if (hasStage2ScopeFields(rawScope)) mixedScopes += 1;
+    else oldScopes += 1;
   }
+  // A scope that lacks the current `namingConfig` but already carries stage-2
+  // generic evidence fields is contradictory (mixed) content: hard-error
+  // instead of treating it as old and silently dropping the evidence.
+  if (mixedScopes > 0) return "mixed";
   if (rootlessEntries === 0 && oldScopes === 0) return "current";
   if (namespacedEntries > 0 || currentScopes > 0) return "mixed";
   return "old";
@@ -306,6 +481,21 @@ function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mix
  * malformed current-format state file. A mixed current-plus-old topology is
  * never "old": it is malformed current state and is rejected by the caller.
  */
+/**
+ * Stage-2 generic sessions-URI evidence fields never existed in the old schema.
+ * A scope that lacks `namingConfig` but carries any of them is therefore not
+ * unambiguously old-shaped: it is mixed/current content and must hard-error
+ * instead of being warn-and-ignored (which would silently drop the evidence
+ * and later overwrite it).
+ */
+function hasStage2ScopeFields(rawScope: Record<string, unknown>): boolean {
+  return (
+    rawScope.genericDirectories !== undefined ||
+    rawScope.genericFlatFiles !== undefined ||
+    rawScope.genericEvidence !== undefined
+  );
+}
+
 function isRecognizedOldState(
   parsed: Record<string, unknown>,
 ): { kind: "old"; warnings: string[] } | "mixed" | null {

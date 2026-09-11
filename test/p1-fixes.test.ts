@@ -60,6 +60,8 @@ describe("latest reviewer fixes", () => {
         // never be overwritten with an empty state.
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             now: 1_000,
@@ -93,6 +95,8 @@ describe("latest reviewer fixes", () => {
         await writeFile(statePath, seededState);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             now: 1_000,
@@ -121,6 +125,8 @@ describe("latest reviewer fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             now: 1_000,
@@ -175,6 +181,8 @@ describe("latest reviewer fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             now: 1_000,
@@ -214,6 +222,7 @@ describe("latest reviewer fixes", () => {
         );
         await utimes(targetFile, 100, 100);
         const summary = await syncSessions({
+          missionsRoot: join(root, "missions"),
           sessionsRoot,
           targetDir,
           layout: "nested",
@@ -268,6 +277,7 @@ describe("latest reviewer fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: join(root, "missions"),
             sessionsRoot,
             targetDir,
             layout: "nested",
@@ -312,6 +322,8 @@ describe("latest reviewer fixes", () => {
         await symlink(external, join(treeB, "alias"), "dir");
         await symlink(external, join(fixture.sessionsRoot, nameA), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "reverse-order-dedup-machine",
@@ -398,6 +410,8 @@ describe("latest reviewer fixes", () => {
         );
         await symlink(join(fixture.root, "nowhere-leaf"), join(fixture.localTree, "dead.jsonl"));
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "dangling-internal-machine",
@@ -431,6 +445,8 @@ describe("latest reviewer fixes", () => {
           `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd })}\n`,
         );
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: dangling,
           targetDir: fixture.targetDir,
           machineId: "dangling-root-machine",
@@ -496,14 +512,19 @@ describe("latest reviewer fixes", () => {
         const fabricated = {
           sessionsRoot: fixture.sessionsRoot,
           targetRoot: otherTarget,
-          missionsRoot: undefined,
+          missionsRoot: fixture.missionsRoot,
           physicalTargetRoot: otherTarget,
           sessionsTargetRoot: join(otherTarget, "sessions"),
-          missionsTargetRoot: undefined,
+          missionsTargetRoot: join(otherTarget, "missions"),
         };
         await expect(
           syncSessionsWithValidatedRoots(
-            { sessionsRoot: fixture.sessionsRoot, targetDir: fixture.targetDir, now: 1 },
+            {
+              missionsRoot: fixture.missionsRoot,
+              sessionsRoot: fixture.sessionsRoot,
+              targetDir: fixture.targetDir,
+              now: 1,
+            },
             fabricated,
           ),
         ).rejects.toThrow(/fabricated validated-root token/);
@@ -529,10 +550,19 @@ describe("latest reviewer fixes", () => {
           join(fixture.localTree, "session.jsonl"),
           `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, value: "x" })}\n`,
         );
-        const tokenForOtherTarget = await validateSyncRoots(fixture.sessionsRoot, otherTarget);
+        const tokenForOtherTarget = await validateSyncRoots(
+          fixture.sessionsRoot,
+          otherTarget,
+          fixture.missionsRoot,
+        );
         await expect(
           syncSessionsWithValidatedRoots(
-            { sessionsRoot: fixture.sessionsRoot, targetDir: fixture.targetDir, now: 2 },
+            {
+              missionsRoot: fixture.missionsRoot,
+              sessionsRoot: fixture.sessionsRoot,
+              targetDir: fixture.targetDir,
+              now: 2,
+            },
             tokenForOtherTarget,
           ),
         ).rejects.toThrow(/refusing to redirect/);
@@ -565,6 +595,7 @@ describe("latest reviewer fixes", () => {
         const options: SyncOptions = {
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
+          missionsRoot: fixture.missionsRoot,
           now: 3,
         };
         // Runtime forging surface: the public SyncOptions type no longer

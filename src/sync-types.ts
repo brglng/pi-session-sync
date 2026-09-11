@@ -35,7 +35,13 @@ export const FORBIDDEN_TARGET_SYMLINK_PREFIX = "Blocked local source symlink int
 export interface SyncOptions {
   sessionsRoot: string;
   targetDir: string;
-  missionsRoot?: string;
+  /**
+   * REQUIRED phase-2 local missions root (`<agentDir>/missions`). Two-root
+   * validation/sync cannot be silently disabled by omitting it; a missing or
+   * non-directory missions root is tolerated at scan time (warning) but must
+   * still be configured.
+   */
+  missionsRoot: string;
   layout?: SessionLayout;
   namingOptions?: Partial<PortableNameOptions>;
   homeLabel?: string;
@@ -92,6 +98,14 @@ export interface DecisionContext {
   staleNestedTargetKeys: Set<string>;
   excludedNestedTargetKeys: Set<string>;
   nestedReplacementSources: Map<string, ScannedFile>;
+  /**
+   * Live old-label target keys being retired by a nested label replacement,
+   * mapped to the canonical replacement label that supersedes them
+   * (old key -> replacement label). Their delete actions belong to that
+   * replacement group: a preflight-blocked group must leave these files on
+   * disk together with the rest of the reverted migration.
+   */
+  nestedStaleReplacementKeys: Map<string, string>;
   nestedReplacementConflicts: Set<string>;
   nestedReplacementParentMappings: Map<string, string>;
   /**
@@ -126,6 +140,13 @@ export interface DecisionContext {
   nestedReplacementSymlinkLabels: Set<string>;
   /** Logical keys associated with ignored replacement symlinks (key -> group label). */
   nestedReplacementSymlinkKeys: Map<string, string>;
+  /**
+   * Old logical keys whose nested state-key migration was rolled back because
+   * their replacement group was blocked by preflight. The restored old entry
+   * keeps its persisted generic mapping evidence, so the next state must carry
+   * that evidence forward even when the old physical file is absent this sync.
+   */
+  nestedBlockedReplacementRestoredKeys: Set<string>;
   /**
    * Historical nested directory labels captured before current target adoption.
    * Used for old-label tombstone canonicalization of cross-session references.

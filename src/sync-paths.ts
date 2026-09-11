@@ -111,7 +111,11 @@ function sessionLookupFor(
   if (layout === "flat") {
     let mapping = sessionLookup(relativePath);
     if (mapping !== undefined) return mapping;
-    for (let count = segments.length - 1; count >= 0; count -= 1) {
+    // The path itself is a candidate flat directory owner: a known mapping
+    // for `foo/known.jsonl` owns its containing directory `foo`, so a generic
+    // absolute value naming `foo` itself (and every deeper missing path under
+    // an owned directory) resolves consistently through the same inference.
+    for (let count = segments.length; count >= 1; count -= 1) {
       const directory = segments.slice(0, count).join("/");
       mapping = sessionLookup(directory);
       if (mapping !== undefined) return mapping;

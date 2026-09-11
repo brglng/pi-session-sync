@@ -54,6 +54,22 @@ export function machineScopeKeyFor(scopeKey: string, machineId: string): string 
   return `${scopeKey}::${machineId}`;
 }
 
+/**
+ * Recover the originating session layout embedded in a persisted machine
+ * scope key (see `machineScopeKeyFor`). Mission mapping evidence written under
+ * the nested layout keys Pi local directory names while flat-layout evidence
+ * keys sessions-root relative paths, so the two shapes are not interchangeable:
+ * a reader must only feed evidence whose recorded layout matches its own.
+ * Unknown/legacy key shapes return `undefined` and are never treated as
+ * compatible.
+ */
+export function layoutFromMachineScopeKey(machineKey: string): SessionLayout | undefined {
+  const separator = machineKey.indexOf(":");
+  if (separator <= 0) return undefined;
+  const prefix = machineKey.slice(0, separator);
+  return prefix === "nested" || prefix === "flat" ? prefix : undefined;
+}
+
 export function namingConfigMatches(
   configured: PortableNameOptions,
   expected: PortableNameOptions,

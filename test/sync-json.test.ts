@@ -32,6 +32,8 @@ describe("session JSON synchronization", () => {
         )}\n`,
       );
       const first = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "json-machine",
@@ -71,6 +73,8 @@ describe("session JSON synchronization", () => {
         2,
       );
       const restored = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "json-machine",
@@ -93,6 +97,8 @@ describe("session JSON synchronization", () => {
       await writeFile(badPath, "{not-json\n");
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "json-bad-machine",
@@ -113,6 +119,8 @@ describe("session JSON synchronization", () => {
         `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "generic-uri-machine",
@@ -137,6 +145,8 @@ describe("session JSON synchronization", () => {
         )}\n`,
       );
       const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "generic-uri-machine",
@@ -174,6 +184,8 @@ describe("session JSON synchronization", () => {
         )}\n`,
       );
       const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "json-lenient-machine",

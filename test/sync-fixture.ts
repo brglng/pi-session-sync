@@ -12,9 +12,11 @@ export async function makeFixture() {
   );
   const sessionsRoot = join(root, "sessions");
   const targetDir = join(root, "target");
+  const missionsRoot = join(root, "missions");
   await mkdir(sessionsRoot);
   await mkdir(targetDir);
   await mkdir(join(targetDir, "sessions"));
+  await mkdir(missionsRoot);
   const cwd = join(root, "project");
   const localTree = join(sessionsRoot, defaultSessionDirName(cwd));
   await mkdir(localTree, { recursive: true });
@@ -22,6 +24,10 @@ export async function makeFixture() {
     root,
     sessionsRoot,
     targetDir,
+    // Phase-2 missions root is REQUIRED on the public API: fixtures provide an
+    // empty missions dir so tests exercise the supported two-root sync without
+    // introducing missing-root warnings.
+    missionsRoot,
     cwd,
     localTree,
     portableName: portableSessionDirName(cwd),

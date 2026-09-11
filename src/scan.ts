@@ -121,6 +121,55 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Classify a failure resolving one LOCAL source symlink. Only a missing
+ * target (ENOENT) is a dangling link and only a symlink loop (ELOOP) is a
+ * cycle; both are nonfatal and skipped with a warning. Every other error
+ * (EACCES/EPERM/ENOTDIR/...) means the link's content cannot be classified at
+ * all: it must abort the scan before staging instead of being swallowed as a
+ * dangling link, which would let the target side be deleted as if the source
+ * content were absent. Mirrors the missions scanner classifier.
+ */
+function classifySymlinkResolutionFailure(error: unknown): "dangling" | "cycle" | undefined {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") return "dangling";
+  if (code === "ELOOP") return "cycle";
+  return undefined;
+}
+
+/**
+ * Classify a failure inspecting a LOCAL sessions root itself. A missing root
+ * (ENOENT) stays a missing root, a root symlink loop (ELOOP) is an unavailable
+ * cycle, and any other unreadable error (EACCES/EPERM/ENOTDIR/...) is an
+ * unavailable root: all three freeze the tree, but only the missing case
+ * reports the generic missing-root warning.
+ */
+function classifyRootAvailabilityFailure(error: unknown): "missing" | "cycle" | "unavailable" {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "ENOENT") return "missing";
+  if (code === "ELOOP") return "cycle";
+  return "unavailable";
+}
+
+/**
+ * Internal signal that a LOCAL sessions root EXISTS but its own realpath /
+ * readdir could not be classified (ELOOP or any other unreadable error). The
+ * throwing site has already pushed the root-specific warning; callers convert
+ * the signal into an empty `rootUnavailable` scan so the sessions tree freezes
+ * while the missions tree still synchronizes.
+ */
+class RootUnavailableError extends Error {}
+
+function rootAvailabilityWarning(
+  failure: "cycle" | "unavailable",
+  rootPath: string,
+  fallbackMessage: string,
+): string {
+  return failure === "cycle"
+    ? `Skipped local sessions root symlink cycle (unavailable): ${rootPath}`
+    : fallbackMessage;
+}
+
 export interface IgnoredSymlink {
   side: ScanSide;
   rootPath: string;
@@ -182,7 +231,43 @@ export interface ScanResult {
   parentDirectoryMappings: Map<string, LocalDirectoryMapping>;
   treeRoots: string[];
   knownDirectories: string[];
+  /**
+   * True when the scanned root was actually available (local source side).
+   * A missing or blocked local source root yields an empty scan with
+   * `rootPresent: false`: the caller must treat the tree as unavailable and
+   * suppress deletions/state changes for it instead of treating the absence
+   * as empty-tree evidence.
+   */
+  rootPresent: boolean;
+  /**
+   * True when the (local source) scan root ITSELF is a forbidden symlink
+   * into the physical targetDir and was blocked before any traversal. This
+   * is a distinct condition from a MISSING root: decisions still run for a
+   * blocked root so preflight can block the target-side mutations and the
+   * surviving evidence stays persisted, while a missing root freezes the
+   * whole tree (rootPresent false and blockedRoot false).
+   */
+  blockedRoot: boolean;
+  /**
+   * True when the (local source) sessions root EXISTS but could not be
+   * inspected or read (ELOOP/EACCES/EPERM/ENOTDIR/...) as opposed to a
+   * missing/dangling root. The scan already surfaced a root-specific warning
+   * for this case, so callers must not also report the root as missing. Like
+   * a missing root, an unavailable root freezes the tree (rootPresent false
+   * and blockedRoot false): no deletion, state, or commit evidence is derived
+   * from it. Mirrors `MissionScan.rootUnavailable`.
+   */
+  rootUnavailable: boolean;
   ignoredSymlinks: IgnoredSymlink[];
+  /**
+   * Canonical logical keys of TARGET-side session symlink entries the scan
+   * skipped (files AND directories), including TOP-LEVEL target session tree
+   * symlinks. A tracked target path replaced by an ignored symlink is
+   * UNAVAILABLE, not deleted: consumers must treat these as path PREFIXES so
+   * every state key EQUAL TO or BELOW one is preserved instead of being
+   * retired while its content cannot be read. Empty for local scans.
+   */
+  ignoredTargetSymlinkPaths: Set<string>;
   warnings: string[];
 }
 
@@ -270,6 +355,21 @@ function hashText(text: string): string {
 
 function nodeIdentity(info: { dev: number; ino: number }): string {
   return `${info.dev}:${info.ino}`;
+}
+
+/**
+ * Real-path identity for file de-duplication while following source symlinks.
+ * Unlike a device/inode identity this preserves ordinary HARD-LINKED files at
+ * different directory paths as distinct logical files, while still collapsing
+ * a symlink alias with the real file it points at. Falls back to the lexical
+ * path when realpath fails (the caller has already lstat'ed the entry).
+ */
+async function safeRealpath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
+  }
 }
 
 /**
@@ -480,12 +580,25 @@ async function collectTreeFiles(
   ): Promise<"ok" | "repeated"> => {
     if (followSymlinks) {
       let identityInfo: Awaited<ReturnType<typeof lstat>> | undefined;
+      let realDir: string | undefined;
       try {
-        const realDir = await realpath(physicalDirectory);
+        realDir = await realpath(physicalDirectory);
         identityInfo = await lstat(realDir);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return "ok";
         throw error;
+      }
+      // Containment is a property of every PHYSICAL directory reached after
+      // following an allowed source symlink, not just the immediate link
+      // target: a followed tree that contains the physical targetDir as a
+      // real descendant would otherwise read/rewrite/delete target-owned
+      // content. Reject the contained subtree (nonfatal error, never
+      // traversed, never copied) before any visited-identity dedup.
+      if (realDir !== undefined && isForbiddenSymlinkTarget(realDir, forbiddenSymlinkTarget)) {
+        warnings.push(
+          `Blocked local source symlink into targetDir: ${logicalDirectory} -> ${realDir}`,
+        );
+        return "repeated";
       }
       if (identityInfo !== undefined) {
         const identity = nodeIdentity(identityInfo);
@@ -537,15 +650,33 @@ async function collectTreeFiles(
         let realInfo: Awaited<ReturnType<typeof lstat>> | undefined;
         try {
           real = await realpath(physicalPath);
-        } catch {
-          warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
-          continue;
+        } catch (error) {
+          const failure = classifySymlinkResolutionFailure(error);
+          if (failure === "dangling") {
+            warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
+            continue;
+          }
+          if (failure === "cycle") {
+            warnings.push(`Skipped session symlink cycle (unavailable): ${logicalPath}`);
+            continue;
+          }
+          throw new Error(`Cannot resolve session symlink ${logicalPath}: ${errorMessage(error)}`);
         }
         try {
           realInfo = await lstat(real);
-        } catch {
-          warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
-          continue;
+        } catch (error) {
+          const failure = classifySymlinkResolutionFailure(error);
+          if (failure === "dangling") {
+            warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
+            continue;
+          }
+          if (failure === "cycle") {
+            warnings.push(`Skipped session symlink cycle (unavailable): ${logicalPath}`);
+            continue;
+          }
+          throw new Error(
+            `Cannot inspect session symlink target ${logicalPath}: ${errorMessage(error)}`,
+          );
         }
         if (realInfo === undefined) {
           warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
@@ -583,12 +714,17 @@ async function collectTreeFiles(
           continue;
         }
         if (realInfo.isFile()) {
-          const identity = nodeIdentity(realInfo);
-          if (walkState?.visitedFiles.has(identity) ?? false) {
+          // Hard links are DISTINCT logical files at different directory
+          // paths: only a real-path identity dedups true symlink aliases,
+          // never ordinary files that happen to share a device/inode. An
+          // ignored (unknown-extension) alias must NOT claim the real file
+          // identity: the real supported file still has to synchronize.
+          const supported = isSessionExtension(basename(logicalPath));
+          if (supported && (walkState?.visitedFiles.has(real) ?? false)) {
             warnings.push(`Skipped repeated session file (symlink duplicate): ${logicalPath}`);
             continue;
           }
-          walkState?.visitedFiles.add(identity);
+          if (supported) walkState?.visitedFiles.add(real);
           await collect(logicalPath, real, realInfo, real);
           continue;
         }
@@ -607,13 +743,13 @@ async function collectTreeFiles(
         warnings.push(`Ignored non-regular session path: ${logicalPath}`);
         continue;
       }
-      if (followSymlinks) {
-        const identity = nodeIdentity(info);
-        if (walkState?.visitedFiles.has(identity) ?? false) {
+      if (followSymlinks && isSessionExtension(basename(logicalPath))) {
+        const realFile = await safeRealpath(physicalPath);
+        if (walkState?.visitedFiles.has(realFile) ?? false) {
           warnings.push(`Skipped repeated session file (symlink duplicate): ${logicalPath}`);
           continue;
         }
-        walkState?.visitedFiles.add(identity);
+        walkState?.visitedFiles.add(realFile);
       }
       await collect(logicalPath, physicalPath, info);
     }
@@ -718,6 +854,117 @@ function mapLocalTree(
   return mappingFromState(tree.rootName, state, namingOptions);
 }
 
+async function resolveNestedClaimForRoot(
+  nestedTreeClaims: Map<string, NestedTreeClaim>,
+  realPath: string,
+  path: string,
+  entry: string,
+  trees: CandidateTree[],
+  warnings: string[],
+  state: SessionScopeState | undefined,
+  namingOptions: PortableNameOptions,
+): Promise<{ kind: "rehomed"; tree: CandidateTree } | { kind: "skipped" } | { kind: "unclaimed" }> {
+  const nestedClaim = nestedTreeClaims.get(realPath);
+  if (nestedClaim === undefined) return { kind: "unclaimed" };
+  const ownerIndex = trees.findIndex((tree) => tree.rootPath === nestedClaim.ownerRootPath);
+  if (ownerIndex === -1) {
+    // Stale claim (owning tree disappeared): never walk the shared real
+    // nodes a second time.
+    warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
+    return { kind: "skipped" };
+  }
+  const owner = trees[ownerIndex];
+  if (owner === undefined) {
+    warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
+    return { kind: "skipped" };
+  }
+  const prefix = `${nestedClaim.nestedPath}${sep}`;
+  // Files belonging to DEEPER nested claims (a different real directory
+  // reached through an alias inside this claimed subtree) are owned by
+  // their own claims and must not contribute to this claim's cwd
+  // decision: they are peeled off when their canonical root arrives.
+  const deeperClaims = [...nestedTreeClaims.values()].filter(
+    (claim) => claim.realPath !== nestedClaim.realPath && claim.nestedPath.startsWith(prefix),
+  );
+  const claimOwnFiles = owner.files.filter((file) => {
+    if (!file.absolutePath.startsWith(prefix)) return false;
+    return !deeperClaims.some((claim) => {
+      const deeperPrefix = `${claim.nestedPath}${sep}`;
+      return file.absolutePath.startsWith(deeperPrefix);
+    });
+  });
+  const sharedCwd = (() => {
+    try {
+      return uniqueCwd(
+        claimOwnFiles.flatMap((file) => file.cwdValues),
+        owner.rootPath,
+      );
+    } catch {
+      return undefined;
+    }
+  })();
+  const stateCompatibleEntry = (): boolean => {
+    try {
+      return state !== undefined && mappingFromState(entry, state, namingOptions) !== undefined;
+    } catch {
+      return false;
+    }
+  };
+  const preferredEntry =
+    (sharedCwd !== undefined && sameNativeName(defaultSessionDirName(sharedCwd), entry)) ||
+    (sharedCwd === undefined && stateCompatibleEntry());
+  if (!preferredEntry) {
+    warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
+    return { kind: "skipped" };
+  }
+  // Canonical arriving root: re-home the claimed files from the owner's
+  // live records under the alias to this root, rewrite deeper claims to
+  // keep pointing at the moved subtree, and consume the claim. The
+  // shared real nodes are never walked twice and the decision never
+  // depends on readdir order.
+  warnings.push(
+    `Skipped repeated session directory (symlink cycle or duplicate): ${nestedClaim.nestedPath}`,
+  );
+  const claimedFiles: CandidateFile[] = [];
+  owner.files = owner.files.filter((file) => {
+    if (!file.absolutePath.startsWith(prefix)) return true;
+    const suffix = file.absolutePath.slice(nestedClaim.nestedPath.length);
+    file.absolutePath = `${path}${suffix}`;
+    file.relativePath = relativePosix(path, file.absolutePath);
+    claimedFiles.push(file);
+    return false;
+  });
+  owner.directories = new Set(
+    [...owner.directories].filter(
+      (directory) => directory !== nestedClaim.nestedPath && !directory.startsWith(prefix),
+    ),
+  );
+  const rehomedIgnoredSymlinks: CandidateSymlink[] = [];
+  owner.ignoredSymlinks = owner.ignoredSymlinks.filter((symlink) => {
+    if (!symlink.absolutePath.startsWith(prefix)) return true;
+    const suffix = symlink.absolutePath.slice(nestedClaim.nestedPath.length);
+    symlink.absolutePath = `${path}${suffix}`;
+    rehomedIgnoredSymlinks.push(symlink);
+    return false;
+  });
+  for (const deeperClaim of deeperClaims) {
+    const suffix = deeperClaim.nestedPath.slice(nestedClaim.nestedPath.length);
+    deeperClaim.nestedPath = `${path}${suffix}`;
+    deeperClaim.ownerRootPath = path;
+  }
+  nestedTreeClaims.delete(realPath);
+  const tree: CandidateTree = {
+    rootPath: path,
+    rootName: entry,
+    realPath,
+    files: claimedFiles,
+    directories: deriveRootDirectories(path, claimedFiles),
+    ignoredSymlinks: rehomedIgnoredSymlinks,
+  };
+  if (claimedFiles.length > 0) trees.push(tree);
+  return { kind: "rehomed", tree };
+}
+
 async function discoverTreesUnsafe(
   rootPath: string,
   side: ScanSide,
@@ -727,6 +974,7 @@ async function discoverTreesUnsafe(
   walkState: SymlinkWalkState,
   forbiddenSymlinkTarget: string | undefined = undefined,
   state: SessionScopeState | undefined = undefined,
+  topLevelIgnoredSymlinks: string[] | undefined = undefined,
 ): Promise<CandidateTree[]> {
   let entries: string[];
   try {
@@ -734,7 +982,18 @@ async function discoverTreesUnsafe(
     // candidate processing overall, must not depend on readdir order.
     entries = (await readdir(rootPath)).sort();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" && side === "local") return [];
+    if (side === "local") {
+      const failure = classifyRootAvailabilityFailure(error);
+      if (failure === "missing") return [];
+      warnings.push(
+        rootAvailabilityWarning(
+          failure,
+          rootPath,
+          `Ignored unreadable local sessions root: ${rootPath}`,
+        ),
+      );
+      throw new RootUnavailableError();
+    }
     throw new Error(`Cannot read ${side} sessions root ${rootPath}: ${String(error)}`);
   }
   const trees: CandidateTree[] = [];
@@ -793,16 +1052,34 @@ async function discoverTreesUnsafe(
       let real: string;
       try {
         real = await realpath(path);
-      } catch {
-        warnings.push(`Ignored dangling local session symlink: ${path}`);
-        continue;
+      } catch (error) {
+        const failure = classifySymlinkResolutionFailure(error);
+        if (failure === "dangling") {
+          warnings.push(`Ignored dangling local session symlink: ${path}`);
+          continue;
+        }
+        if (failure === "cycle") {
+          warnings.push(`Skipped local session symlink cycle (unavailable): ${path}`);
+          continue;
+        }
+        throw new Error(`Cannot resolve local session symlink ${path}: ${errorMessage(error)}`);
       }
       let realInfo: Awaited<ReturnType<typeof lstat>> | undefined;
       try {
         realInfo = await lstat(real);
-      } catch {
-        warnings.push(`Ignored dangling local session symlink: ${path}`);
-        continue;
+      } catch (error) {
+        const failure = classifySymlinkResolutionFailure(error);
+        if (failure === "dangling") {
+          warnings.push(`Ignored dangling local session symlink: ${path}`);
+          continue;
+        }
+        if (failure === "cycle") {
+          warnings.push(`Skipped local session symlink cycle (unavailable): ${path}`);
+          continue;
+        }
+        throw new Error(
+          `Cannot inspect local session symlink target ${path}: ${errorMessage(error)}`,
+        );
       }
       if (realInfo === undefined) {
         warnings.push(`Ignored dangling local session symlink: ${path}`);
@@ -834,6 +1111,10 @@ async function discoverTreesUnsafe(
       // preflight into a file or through a symlink.
       if (info.isSymbolicLink()) {
         warnings.push(`Ignored symlink: ${path}`);
+        // A TOP-LEVEL target tree symlink hides a whole session tree. Record
+        // it so the orchestrator can preserve the logical keys it covers
+        // instead of retiring them while the content cannot be read.
+        if (side === "target") topLevelIgnoredSymlinks?.push(entry);
       } else {
         warnings.push(`Ignored unknown ${side} root item: ${path}`);
       }
@@ -910,14 +1191,16 @@ async function discoverTreesUnsafe(
 
   if (side === "local") {
     // Deterministic pre-order: every top-level source symlink tree is
-    // collected before any ordinary directory. Each symlink tree uses its own
-    // walk state (so several symlinks to one real directory are all fully
-    // collected and the deterministic real-path dedup below picks the
-    // survivor) and folds its visited real nodes into the one global state.
-    // Ordinary trees are then walked with the shared global state, so an
-    // ordinary tree's internal alias into a real directory claimed by a
-    // symlink tree is skipped instead of re-collected; real nodes are never
-    // revisited and readdir order never decides.
+    // collected before any ordinary directory. All symlink trees share the
+    // ONE global walk state, so a nested real directory or file reached
+    // through an internal alias of an earlier symlink tree is skipped as a
+    // repeated real node instead of being re-collected under a second tree
+    // (several symlinks to one real directory are still deduplicated BEFORE
+    // any recursive traversal by the claim check below). Ordinary trees are
+    // then walked with the same shared state, so an ordinary tree's internal
+    // alias into a real directory claimed by a symlink tree is skipped
+    // instead of re-collected; real nodes are never revisited and readdir
+    // order never decides.
     localSymlinkEntries.sort((first, second) =>
       first.entry < second.entry ? -1 : first.entry > second.entry ? 1 : 0,
     );
@@ -1011,31 +1294,58 @@ async function discoverTreesUnsafe(
         warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
         continue;
       }
-      // Collect with a per-tree walk state so a root entry aliasing an
-      // already-claimed real directory is still fully collectable once, and
-      // the deterministic claim rule above decides before any second walk.
-      // After collection every visited real node is folded back into the
-      // one global walk state so later trees skip nested repeats into
-      // real directories this tree already visited.
+      // A top-level source symlink root aliasing a directory claimed by a
+      // NESTED internal symlink inside an earlier-collected top-level tree is
+      // resolved through the same claim/canonical-representative selection
+      // BEFORE any recursive traversal: the claimed tree's already-collected
+      // evidence is re-homed under the canonical spelling (or the arriving
+      // alias is skipped) instead of walking the shared real nodes a second
+      // time. Only an unclaimed real directory falls through to a fresh walk.
+      const nestedClaimResolution = await resolveNestedClaimForRoot(
+        nestedTreeClaims,
+        real,
+        path,
+        entry,
+        trees,
+        warnings,
+        state,
+        namingOptions,
+      );
+      if (nestedClaimResolution.kind === "rehomed") {
+        // The re-homed canonical tree owns the real directory now: register
+        // it so later top-level symlink aliases and the ordinary-tree pass
+        // deduplicate against the canonical representative before traversal.
+        if (!symlinkClaims.has(real)) symlinkClaims.set(real, nestedClaimResolution.tree);
+        continue;
+      }
+      if (nestedClaimResolution.kind === "skipped") continue;
+      // Collect with the SHARED walk state. The root entry is still always
+      // collected (the walk root is exempt from the repeated-directory
+      // skip), and the deterministic claim rule above decides before any
+      // second walk. Sharing one state means a nested real directory or file
+      // reached through an internal alias of a previous symlink tree is
+      // skipped as a repeated real node instead of being collected again
+      // under this tree.
       const mode: TransformMode = "inspect-local";
-      const treeState = newSymlinkWalkState();
       const collected = await collectTreeFiles(
         path,
         mode,
         warnings,
         namingOptions,
-        treeState,
+        walkState,
         true,
         forbiddenSymlinkTarget,
         nestedTreeClaims,
       );
-      for (const identity of treeState.visitedDirectories) {
-        walkState.visitedDirectories.add(identity);
-      }
-      for (const identity of treeState.visitedFiles) {
-        walkState.visitedFiles.add(identity);
-      }
       if (collected.files.length === 0) {
+        // An ignored empty/unknown-only tree must not leave a real-directory
+        // claim behind: the tree is never added to `trees`, so a later alias
+        // resolving to a claimed real directory would be treated as a stale
+        // claim (owner gone) and never traversed. Drop this tree's own nested
+        // claims.
+        for (const [claimedReal, claim] of nestedTreeClaims) {
+          if (claim.ownerRootPath === path) nestedTreeClaims.delete(claimedReal);
+        }
         warnings.push(`Ignored unknown local root directory: ${path}`);
         continue;
       }
@@ -1145,109 +1455,17 @@ async function discoverTreesUnsafe(
       // recursive traversal — never collected through its own root walk (the
       // isRoot-always-collected rule would otherwise re-collect the shared
       // real nodes and cascade into an inner multi-cwd mapping failure).
-      const nestedClaim = nestedTreeClaims.get(realPath);
-      if (nestedClaim !== undefined) {
-        const ownerIndex = trees.findIndex((tree) => tree.rootPath === nestedClaim.ownerRootPath);
-        if (ownerIndex === -1) {
-          // Stale claim (owning tree disappeared): never walk the shared real
-          // nodes a second time.
-          warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
-          continue;
-        }
-        const owner = trees[ownerIndex];
-        if (owner === undefined) {
-          warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
-          continue;
-        }
-        const prefix = `${nestedClaim.nestedPath}${sep}`;
-        // Files belonging to DEEPER nested claims (a different real directory
-        // reached through an alias inside this claimed subtree) are owned by
-        // their own claims and must not contribute to this claim's cwd
-        // decision: they are peeled off when their canonical root arrives.
-        const deeperClaims = [...nestedTreeClaims.values()].filter(
-          (claim) => claim.realPath !== nestedClaim.realPath && claim.nestedPath.startsWith(prefix),
-        );
-        const claimOwnFiles = owner.files.filter((file) => {
-          if (!file.absolutePath.startsWith(prefix)) return false;
-          return !deeperClaims.some((claim) => {
-            const deeperPrefix = `${claim.nestedPath}${sep}`;
-            return file.absolutePath.startsWith(deeperPrefix);
-          });
-        });
-        const sharedCwd = (() => {
-          try {
-            return uniqueCwd(
-              claimOwnFiles.flatMap((file) => file.cwdValues),
-              owner.rootPath,
-            );
-          } catch {
-            return undefined;
-          }
-        })();
-        const stateCompatibleEntry = (): boolean => {
-          try {
-            return (
-              state !== undefined && mappingFromState(entry, state, namingOptions) !== undefined
-            );
-          } catch {
-            return false;
-          }
-        };
-        const preferredEntry =
-          (sharedCwd !== undefined && sameNativeName(defaultSessionDirName(sharedCwd), entry)) ||
-          (sharedCwd === undefined && stateCompatibleEntry());
-        if (!preferredEntry) {
-          warnings.push(`Skipped repeated session directory (symlink cycle or duplicate): ${path}`);
-          continue;
-        }
-        // Canonical arriving root: re-home the claimed files from the owner's
-        // live records under the alias to this root, rewrite deeper claims to
-        // keep pointing at the moved subtree, and consume the claim. The
-        // shared real nodes are never walked twice and the decision never
-        // depends on readdir order.
-        warnings.push(
-          `Skipped repeated session directory (symlink cycle or duplicate): ${nestedClaim.nestedPath}`,
-        );
-        const claimedFiles: CandidateFile[] = [];
-        owner.files = owner.files.filter((file) => {
-          if (!file.absolutePath.startsWith(prefix)) return true;
-          const suffix = file.absolutePath.slice(nestedClaim.nestedPath.length);
-          file.absolutePath = `${path}${suffix}`;
-          file.relativePath = relativePosix(path, file.absolutePath);
-          claimedFiles.push(file);
-          return false;
-        });
-        owner.directories = new Set(
-          [...owner.directories].filter(
-            (directory) => directory !== nestedClaim.nestedPath && !directory.startsWith(prefix),
-          ),
-        );
-        const rehomedIgnoredSymlinks: CandidateSymlink[] = [];
-        owner.ignoredSymlinks = owner.ignoredSymlinks.filter((symlink) => {
-          if (!symlink.absolutePath.startsWith(prefix)) return true;
-          const suffix = symlink.absolutePath.slice(nestedClaim.nestedPath.length);
-          symlink.absolutePath = `${path}${suffix}`;
-          rehomedIgnoredSymlinks.push(symlink);
-          return false;
-        });
-        for (const deeperClaim of deeperClaims) {
-          const suffix = deeperClaim.nestedPath.slice(nestedClaim.nestedPath.length);
-          deeperClaim.nestedPath = `${path}${suffix}`;
-          deeperClaim.ownerRootPath = path;
-        }
-        nestedTreeClaims.delete(realPath);
-        if (claimedFiles.length > 0) {
-          trees.push({
-            rootPath: path,
-            rootName: entry,
-            realPath,
-            files: claimedFiles,
-            directories: deriveRootDirectories(path, claimedFiles),
-            ignoredSymlinks: rehomedIgnoredSymlinks,
-          });
-        }
-        continue;
-      }
+      const nestedResolution = await resolveNestedClaimForRoot(
+        nestedTreeClaims,
+        realPath,
+        path,
+        entry,
+        trees,
+        warnings,
+        state,
+        namingOptions,
+      );
+      if (nestedResolution.kind !== "unclaimed") continue;
       const collected = await collectTreeFiles(
         path,
         "inspect-local",
@@ -1346,6 +1564,7 @@ async function discoverTrees(
   walkState: SymlinkWalkState,
   forbiddenSymlinkTarget: string | undefined = undefined,
   state: SessionScopeState | undefined = undefined,
+  topLevelIgnoredSymlinks: string[] | undefined = undefined,
 ): Promise<CandidateTree[]> {
   try {
     return await discoverTreesUnsafe(
@@ -1357,9 +1576,10 @@ async function discoverTrees(
       walkState,
       forbiddenSymlinkTarget,
       state,
+      topLevelIgnoredSymlinks,
     );
   } catch (error) {
-    if (error instanceof ScanFailure) throw error;
+    if (error instanceof ScanFailure || error instanceof RootUnavailableError) throw error;
     throw new ScanFailure(errorMessage(error), warnings);
   }
 }
@@ -1443,14 +1663,40 @@ async function collectFlatFiles(
     isRoot = false,
   ): Promise<"ok" | "repeated"> => {
     let identityInfo: Awaited<ReturnType<typeof lstat>> | undefined;
+    let realDir: string;
     try {
-      const realDir = await realpath(physicalDirectory);
+      realDir = await realpath(physicalDirectory);
       identityInfo = await lstat(realDir);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "ok";
+      const failure = classifyRootAvailabilityFailure(error);
+      if (failure === "missing") return "ok";
+      // The flat source ROOT is the sessions root: a root whose own realpath /
+      // lstat fails with ELOOP or any other unreadable error is unavailable and
+      // freezes the tree. Descendant directories stay hard failures.
+      if (isRoot) {
+        warnings.push(
+          rootAvailabilityWarning(
+            failure,
+            logicalDirectory,
+            `Ignored unreadable local sessions root: ${logicalDirectory}`,
+          ),
+        );
+        throw new RootUnavailableError();
+      }
       throw error;
     }
     if (followSymlinks && identityInfo !== undefined) {
+      // Containment is a property of every PHYSICAL directory reached after
+      // following an allowed source symlink, not just the immediate link
+      // target: a followed flat tree that contains the physical targetDir as
+      // a real descendant must be rejected before getting read/copied/
+      // deleted as source content.
+      if (isForbiddenSymlinkTarget(realDir, forbiddenSymlinkTarget)) {
+        warnings.push(
+          `Blocked local source symlink into targetDir: ${logicalDirectory} -> ${realDir}`,
+        );
+        return "repeated";
+      }
       const identity = nodeIdentity(identityInfo);
       if (walkState.visitedDirectories.has(identity)) {
         // The flat root itself is always walked even when a claimed real
@@ -1471,6 +1717,18 @@ async function collectFlatFiles(
       // depend on filesystem readdir order.
       entries = (await readdir(physicalDirectory)).sort();
     } catch (error) {
+      const failure = classifyRootAvailabilityFailure(error);
+      if (isRoot) {
+        if (failure === "missing") return "ok";
+        warnings.push(
+          rootAvailabilityWarning(
+            failure,
+            logicalDirectory,
+            `Ignored unreadable local sessions root: ${logicalDirectory}`,
+          ),
+        );
+        throw new RootUnavailableError();
+      }
       throw new Error(`Cannot read flat session directory ${logicalDirectory}: ${String(error)}`);
     }
     for (const entry of entries) {
@@ -1496,15 +1754,33 @@ async function collectFlatFiles(
         let realInfo: Awaited<ReturnType<typeof lstat>> | undefined;
         try {
           real = await realpath(physicalPath);
-        } catch {
-          warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
-          continue;
+        } catch (error) {
+          const failure = classifySymlinkResolutionFailure(error);
+          if (failure === "dangling") {
+            warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
+            continue;
+          }
+          if (failure === "cycle") {
+            warnings.push(`Skipped session symlink cycle (unavailable): ${logicalPath}`);
+            continue;
+          }
+          throw new Error(`Cannot resolve session symlink ${logicalPath}: ${errorMessage(error)}`);
         }
         try {
           realInfo = await lstat(real);
-        } catch {
-          warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
-          continue;
+        } catch (error) {
+          const failure = classifySymlinkResolutionFailure(error);
+          if (failure === "dangling") {
+            warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
+            continue;
+          }
+          if (failure === "cycle") {
+            warnings.push(`Skipped session symlink cycle (unavailable): ${logicalPath}`);
+            continue;
+          }
+          throw new Error(
+            `Cannot inspect session symlink target ${logicalPath}: ${errorMessage(error)}`,
+          );
         }
         if (realInfo === undefined) {
           warnings.push(`Ignored dangling session symlink: ${logicalPath}`);
@@ -1522,12 +1798,16 @@ async function collectFlatFiles(
           continue;
         }
         if (realInfo.isFile()) {
-          const identity = nodeIdentity(realInfo);
-          if (walkState.visitedFiles.has(identity)) {
+          // Hard links are DISTINCT logical files at different paths: only a
+          // real-path identity dedups true symlink aliases. An ignored
+          // (unknown-extension) alias must NOT claim the real file identity:
+          // the real supported file still has to synchronize.
+          const supported = isSessionExtension(basename(logicalPath));
+          if (supported && walkState.visitedFiles.has(real)) {
             warnings.push(`Skipped repeated session file (symlink duplicate): ${logicalPath}`);
             continue;
           }
-          walkState.visitedFiles.add(identity);
+          if (supported) walkState.visitedFiles.add(real);
           await collect(logicalPath, real, realInfo);
           continue;
         }
@@ -1546,13 +1826,13 @@ async function collectFlatFiles(
         warnings.push(`Ignored non-regular session path: ${logicalPath}`);
         continue;
       }
-      if (followSymlinks) {
-        const identity = nodeIdentity(info);
-        if (walkState.visitedFiles.has(identity)) {
+      if (followSymlinks && isSessionExtension(basename(logicalPath))) {
+        const realFile = await safeRealpath(physicalPath);
+        if (walkState.visitedFiles.has(realFile)) {
           warnings.push(`Skipped repeated session file (symlink duplicate): ${logicalPath}`);
           continue;
         }
-        walkState.visitedFiles.add(identity);
+        walkState.visitedFiles.add(realFile);
       }
       await collect(logicalPath, physicalPath, info);
     }
@@ -1688,6 +1968,7 @@ async function scanFlatLocalUnsafe(
   lookupExclusions: ReadonlySet<string> | undefined = undefined,
   missionsRoot: string | undefined = undefined,
   forbiddenSymlinkTarget: string | undefined = undefined,
+  genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
 ): Promise<ScanResult> {
   const collected = await collectFlatFiles(
     rootPath,
@@ -1766,6 +2047,9 @@ async function scanFlatLocalUnsafe(
         flatParentMappings: new Map(),
         parentDirectoryMappings: new Map(),
         treeRoots: [],
+        rootPresent: false,
+        blockedRoot: false,
+        rootUnavailable: false,
         knownDirectories: [...collected.directories],
         ignoredSymlinks: collected.ignoredSymlinks.map((symlink) => ({
           ...symlink,
@@ -1773,6 +2057,7 @@ async function scanFlatLocalUnsafe(
           rootPath,
           rootName: basename(rootPath),
         })),
+        ignoredTargetSymlinkPaths: new Set(),
         warnings,
       },
     );
@@ -1823,6 +2108,19 @@ async function scanFlatLocalUnsafe(
     if (hasLookupExclusion(relativePath) && !staleDirectoryKept(relativePath)) continue;
     lookupMappings.set(relativePath, mapping);
   }
+  // Persisted generic (non-parentSession) sessions-URI mapping evidence seeds
+  // the flat lookup LAST so generic references to missing session files keep
+  // rewriting on the next local→target pass. Generic evidence never overrides
+  // live, target, parent, or primary state mappings: it is ordinary
+  // path-rewrite fuel, never parentSession semantic, liveness, or retirement
+  // evidence.
+  if (genericExtraMappings !== undefined) {
+    for (const mapping of genericExtraMappings.values()) {
+      if (mappingForNativeName(lookupMappings, mapping.localName) === undefined) {
+        lookupMappings.set(mapping.localName, mapping);
+      }
+    }
+  }
   const lookupDirectoryMappings = collectFlatDirectoryMappings(lookupMappings, namingOptions);
   for (const [directory, mapping] of liveDirectoryMappings) {
     if (mappingForNativeName(lookupDirectoryMappings, directory) === undefined) {
@@ -1852,6 +2150,13 @@ async function scanFlatLocalUnsafe(
       // The stale OLD mapping must never resolve this path, even as a
       // directory-inference fallback when no current mapping owns it.
       if (staleDirectoryKept(stale.localName)) return stale;
+      const staleSelfDirectory = relativeDirectoryPath(localKey);
+      if (staleSelfDirectory !== localKey) {
+        const selfMapping = mappingForNativeName(lookupDirectoryMappings, localKey);
+        if (selfMapping !== undefined && !sameFlatMapping(selfMapping, stale, namingOptions)) {
+          return selfMapping;
+        }
+      }
       for (const directory of relativeDirectoryAncestors(localKey)) {
         const mapping = mappingForNativeName(lookupDirectoryMappings, directory);
         if (mapping !== undefined && !sameFlatMapping(mapping, stale, namingOptions)) {
@@ -1862,6 +2167,15 @@ async function scanFlatLocalUnsafe(
     }
     const exact = mappingForNativeName(lookupMappings, localKey);
     if (exact !== undefined) return exact;
+    // The key itself is a candidate flat directory owner: a known mapping for
+    // `foo/known.jsonl` owns its containing directory `foo`, so a reference
+    // naming `foo` itself resolves through the same unambiguous inference
+    // (with no exact file mapping at that path).
+    const selfDirectory = relativeDirectoryPath(localKey);
+    if (selfDirectory !== localKey) {
+      const selfMapping = mappingForNativeName(lookupDirectoryMappings, localKey);
+      if (selfMapping !== undefined) return selfMapping;
+    }
     for (const directory of relativeDirectoryAncestors(localKey)) {
       const mapping = mappingForNativeName(lookupDirectoryMappings, directory);
       if (mapping !== undefined) return mapping;
@@ -1920,6 +2234,9 @@ async function scanFlatLocalUnsafe(
     flatParentMappings: new Map(),
     parentDirectoryMappings: new Map(),
     treeRoots: [],
+    rootPresent: true,
+    blockedRoot: false,
+    rootUnavailable: false,
     knownDirectories: [...collected.directories],
     ignoredSymlinks: collected.ignoredSymlinks.map((symlink) => ({
       ...symlink,
@@ -1927,6 +2244,7 @@ async function scanFlatLocalUnsafe(
       rootPath,
       rootName: basename(rootPath),
     })),
+    ignoredTargetSymlinkPaths: new Set(),
     warnings,
   };
 }
@@ -1938,6 +2256,7 @@ async function scanFlatLocal(
   lookupExclusions: ReadonlySet<string> | undefined = undefined,
   missionsRoot: string | undefined = undefined,
   forbiddenSymlinkTarget: string | undefined = undefined,
+  genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
 ): Promise<ScanResult> {
   const warnings: string[] = [];
   // A source root symlink that resolves into the physical targetDir tree
@@ -1945,35 +2264,85 @@ async function scanFlatLocal(
   // pre-creation overlap checks cannot see) must never be scanned: its
   // content is the target tree the sync owns. It is recorded as a nonfatal
   // security error and the whole tree is skipped.
-  const blockedSourceRoot = await forbiddenSourceRootRealPath(rootPath, forbiddenSymlinkTarget);
+  let blockedSourceRoot: string | undefined;
+  try {
+    blockedSourceRoot = await forbiddenSourceRootRealPath(rootPath, forbiddenSymlinkTarget);
+  } catch (error) {
+    // The root itself could not be inspected (EACCES/EPERM/ENOTDIR/ELOOP on an
+    // ancestor): classify it as missing/cycle/unavailable instead of aborting
+    // the safe missions sync.
+    const failure = classifyRootAvailabilityFailure(error);
+    if (failure === "missing") {
+      warnings.push(`Ignored missing local sessions root: ${rootPath}`);
+      return emptyScanResult("local", "flat", warnings);
+    }
+    warnings.push(
+      rootAvailabilityWarning(
+        failure,
+        rootPath,
+        `Ignored unreadable local sessions root: ${rootPath}`,
+      ),
+    );
+    return emptyScanResult("local", "flat", warnings, false, true);
+  }
   if (blockedSourceRoot !== undefined) {
     warnings.push(
       `Blocked local source symlink into targetDir: ${rootPath} -> ${blockedSourceRoot}`,
     );
-    return emptyScanResult("local", "flat", warnings);
+    return emptyScanResult("local", "flat", warnings, true);
   }
   // A missing local source root is tolerated and reported as a warning; the
-  // other tree still synchronizes. A dangling source-root symlink is equally
-  // unusable and reported the same way.
+  // other tree still synchronizes. A root that EXISTS but is not a directory
+  // stays a hard error; a dangling source-root symlink is as unusable as a
+  // missing root. A root whose own inspect/resolve fails with ELOOP or any
+  // other unreadable error is UNAVAILABLE: it freezes the tree with a
+  // root-specific warning instead of aborting the safe missions sync.
   let rootInfo: Awaited<ReturnType<typeof lstat>> | undefined;
   try {
     rootInfo = await lstat(rootPath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    const failure = classifyRootAvailabilityFailure(error);
+    if (failure === "missing") {
       warnings.push(`Ignored missing local sessions root: ${rootPath}`);
       return emptyScanResult("local", "flat", warnings);
     }
-    throw error;
+    warnings.push(
+      rootAvailabilityWarning(
+        failure,
+        rootPath,
+        `Ignored unreadable local sessions root: ${rootPath}`,
+      ),
+    );
+    return emptyScanResult("local", "flat", warnings, false, true);
   }
   if (rootInfo !== undefined && !rootInfo.isDirectory() && !rootInfo.isSymbolicLink()) {
     throw new ScanFailure(`sessionsRoot must be a directory: ${rootPath}`, warnings);
   }
   if (rootInfo?.isSymbolicLink()) {
+    let realRootInfo: Awaited<ReturnType<typeof lstat>> | undefined;
     try {
-      await realpath(rootPath);
-    } catch {
-      warnings.push(`Ignored missing local sessions root: ${rootPath}`);
-      return emptyScanResult("local", "flat", warnings);
+      const realRoot = await realpath(rootPath);
+      realRootInfo = await lstat(realRoot);
+    } catch (error) {
+      const failure = classifyRootAvailabilityFailure(error);
+      if (failure === "missing") {
+        warnings.push(`Ignored missing local sessions root: ${rootPath}`);
+        return emptyScanResult("local", "flat", warnings);
+      }
+      warnings.push(
+        rootAvailabilityWarning(
+          failure,
+          rootPath,
+          `Ignored unreadable local sessions root: ${rootPath}`,
+        ),
+      );
+      return emptyScanResult("local", "flat", warnings, false, true);
+    }
+    // A source-root symlink resolving to a regular file (or any other
+    // non-directory) can never be scanned: reject it as a non-directory root
+    // before readdir would otherwise fail with an opaque ENOTDIR error.
+    if (realRootInfo !== undefined && !realRootInfo.isDirectory()) {
+      throw new ScanFailure(`sessionsRoot must be a directory: ${rootPath}`, warnings);
     }
   }
   try {
@@ -1985,8 +2354,14 @@ async function scanFlatLocal(
       lookupExclusions,
       missionsRoot,
       forbiddenSymlinkTarget,
+      genericExtraMappings,
     );
   } catch (error) {
+    // `collectFlatFiles` classified the flat SOURCE ROOT itself as unavailable
+    // (ELOOP or another unreadable error) and already pushed the warning.
+    if (error instanceof RootUnavailableError) {
+      return emptyScanResult("local", "flat", warnings, false, true);
+    }
     if (error instanceof ScanFailure) throw error;
     throw new ScanFailure(errorMessage(error), warnings);
   }
@@ -1996,10 +2371,15 @@ function emptyScanResult(
   side: ScanSide,
   layout: SessionLayout,
   warnings: string[] = [],
+  blockedRoot = false,
+  rootUnavailable = false,
 ): ScanResult {
   return {
     side,
     layout,
+    rootPresent: side === "target",
+    blockedRoot,
+    rootUnavailable,
     trees: [],
     files: new Map(),
     localMappings: new Map(),
@@ -2009,6 +2389,7 @@ function emptyScanResult(
     treeRoots: [],
     knownDirectories: [],
     ignoredSymlinks: [],
+    ignoredTargetSymlinkPaths: new Set(),
     warnings,
   };
 }
@@ -2029,6 +2410,7 @@ async function scanNestedSessions(
   historicalNestedMappings: ReadonlyMap<string, string> | undefined = undefined,
   missionsRoot: string | undefined = undefined,
   forbiddenSymlinkTarget: string | undefined = undefined,
+  genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
 ): Promise<ScanResult> {
   // A source root symlink that resolves into the physical targetDir tree
   // (including a target child CREATED during root validation, which the
@@ -2036,50 +2418,114 @@ async function scanNestedSessions(
   // content is the target tree the sync owns. It is recorded as a nonfatal
   // security error and the whole tree is skipped.
   if (side === "local") {
-    const blockedSourceRoot = await forbiddenSourceRootRealPath(rootPath, forbiddenSymlinkTarget);
+    let blockedSourceRoot: string | undefined;
+    try {
+      blockedSourceRoot = await forbiddenSourceRootRealPath(rootPath, forbiddenSymlinkTarget);
+    } catch (error) {
+      // The root itself could not be inspected (EACCES/EPERM/ENOTDIR/ELOOP on
+      // an ancestor): classify it as missing/cycle/unavailable instead of
+      // aborting the safe missions sync.
+      const failure = classifyRootAvailabilityFailure(error);
+      if (failure === "missing") {
+        warnings.push(`Ignored missing local sessions root: ${rootPath}`);
+        return emptyScanResult(side, layout, warnings);
+      }
+      warnings.push(
+        rootAvailabilityWarning(
+          failure,
+          rootPath,
+          `Ignored unreadable local sessions root: ${rootPath}`,
+        ),
+      );
+      return emptyScanResult(side, layout, warnings, false, true);
+    }
     if (blockedSourceRoot !== undefined) {
       warnings.push(
         `Blocked local source symlink into targetDir: ${rootPath} -> ${blockedSourceRoot}`,
       );
-      return emptyScanResult(side, layout, warnings);
+      return emptyScanResult(side, layout, warnings, true);
     }
   }
   // A missing local source root is tolerated and reported as a warning; the
   // other tree still synchronizes. A dangling source-root symlink is equally
-  // unusable and reported the same way.
+  // unusable and reported the same way. A root whose own inspect/resolve
+  // fails with ELOOP or any other unreadable error is UNAVAILABLE: it freezes
+  // the tree with a root-specific warning instead of aborting the safe
+  // missions sync.
   if (side === "local") {
     let rootInfo: Awaited<ReturnType<typeof lstat>> | undefined;
     try {
       rootInfo = await lstat(rootPath);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      const failure = classifyRootAvailabilityFailure(error);
+      if (failure === "missing") {
         warnings.push(`Ignored missing local sessions root: ${rootPath}`);
         return emptyScanResult(side, layout, warnings);
       }
-      throw error;
+      warnings.push(
+        rootAvailabilityWarning(
+          failure,
+          rootPath,
+          `Ignored unreadable local sessions root: ${rootPath}`,
+        ),
+      );
+      return emptyScanResult(side, layout, warnings, false, true);
     }
     if (rootInfo !== undefined && !rootInfo.isDirectory() && !rootInfo.isSymbolicLink()) {
       throw new Error(`sessionsRoot must be a directory: ${rootPath}`);
     }
     if (rootInfo?.isSymbolicLink()) {
+      let realRootInfo: Awaited<ReturnType<typeof lstat>> | undefined;
       try {
-        await realpath(rootPath);
-      } catch {
-        warnings.push(`Ignored missing local sessions root: ${rootPath}`);
-        return emptyScanResult(side, layout, warnings);
+        const realRoot = await realpath(rootPath);
+        realRootInfo = await lstat(realRoot);
+      } catch (error) {
+        const failure = classifyRootAvailabilityFailure(error);
+        if (failure === "missing") {
+          warnings.push(`Ignored missing local sessions root: ${rootPath}`);
+          return emptyScanResult(side, layout, warnings);
+        }
+        warnings.push(
+          rootAvailabilityWarning(
+            failure,
+            rootPath,
+            `Ignored unreadable local sessions root: ${rootPath}`,
+          ),
+        );
+        return emptyScanResult(side, layout, warnings, false, true);
+      }
+      // A source-root symlink resolving to a regular file (or any other
+      // non-directory) can never be scanned: reject it as a non-directory
+      // root before readdir would otherwise fail with an opaque ENOTDIR
+      // error.
+      if (realRootInfo !== undefined && !realRootInfo.isDirectory()) {
+        throw new Error(`sessionsRoot must be a directory: ${rootPath}`);
       }
     }
   }
-  const candidates = await discoverTrees(
-    rootPath,
-    side,
-    stateFileName,
-    warnings,
-    namingOptions,
-    newSymlinkWalkState(),
-    forbiddenSymlinkTarget,
-    state,
-  );
+  const topLevelIgnoredSymlinks: string[] = [];
+  let candidates: CandidateTree[];
+  try {
+    candidates = await discoverTrees(
+      rootPath,
+      side,
+      stateFileName,
+      warnings,
+      namingOptions,
+      newSymlinkWalkState(),
+      forbiddenSymlinkTarget,
+      state,
+      topLevelIgnoredSymlinks,
+    );
+  } catch (error) {
+    // `discoverTreesUnsafe` classified the sessions SOURCE ROOT itself as
+    // unavailable (ELOOP or another unreadable error) and already pushed the
+    // warning.
+    if (error instanceof RootUnavailableError) {
+      return emptyScanResult(side, layout, warnings, false, true);
+    }
+    throw error;
+  }
   const localMappings = new Map<string, LocalDirectoryMapping>();
   const flatMappings = new Map<string, LocalDirectoryMapping>();
   const flatParentMappings = new Map<string, LocalDirectoryMapping>();
@@ -2437,6 +2883,9 @@ async function scanNestedSessions(
       {
         side,
         layout,
+        rootPresent: false,
+        blockedRoot: false,
+        rootUnavailable: false,
         trees: [],
         files: new Map(),
         localMappings,
@@ -2446,6 +2895,7 @@ async function scanNestedSessions(
         treeRoots: [],
         knownDirectories: [],
         ignoredSymlinks: [],
+        ignoredTargetSymlinkPaths: new Set(),
         warnings,
       },
     );
@@ -2641,6 +3091,19 @@ async function scanNestedSessions(
       }
     }
   }
+  // Persisted generic (non-parentSession) sessions-URI mapping evidence seeds
+  // the resolver LAST so generic references to missing session
+  // files/directories keep rewriting on the next local→target pass. Generic
+  // evidence never overrides live, target, parent, or primary state mappings:
+  // it is ordinary path-rewrite fuel, never parentSession semantic, liveness,
+  // or retirement evidence.
+  if (genericExtraMappings !== undefined) {
+    for (const mapping of genericExtraMappings.values()) {
+      if (mappingForNativeName(allMappings, mapping.localName) === undefined) {
+        allMappings.set(mapping.localName, mapping);
+      }
+    }
+  }
   const mappingLookup = (localName: string): LocalDirectoryMapping | undefined => {
     const stale = layout === "flat" ? excludedStaleMapping(localName) : undefined;
     if (layout === "flat" && stale !== undefined) {
@@ -2813,9 +3276,51 @@ async function scanNestedSessions(
   }
 
   const treeRoots = candidates.map((candidate) => candidate.rootPath);
+  const builtIgnoredSymlinks = candidates.flatMap((candidate) => {
+    const tree = mappedTrees.get(candidate);
+    const cwd = tree?.cwd ?? candidate.cwdFromRoot;
+    const localName = cwd === undefined ? undefined : defaultSessionDirName(cwd);
+    const portableName = tree?.portableName ?? candidate.portableNameFromRoot;
+    return candidate.ignoredSymlinks.map((symlink) => ({
+      ...symlink,
+      side,
+      rootPath: candidate.rootPath,
+      rootName: candidate.rootName,
+      ...(localName === undefined ? {} : { localName }),
+      ...(portableName === undefined ? {} : { portableName }),
+    }));
+  });
+  // TARGET-side ignored symlinks (files AND directories, including top-level
+  // target tree roots) are UNAVAILABLE, not absent: expose their canonical
+  // logical path PREFIXES so a state owner equal to or below one is preserved
+  // rather than tombstoned while its content cannot be read. A top-level tree
+  // symlink hides every key under `sessions/<portableName>`.
+  const ignoredTargetSymlinkPaths = new Set<string>();
+  if (side === "target") {
+    for (const symlink of builtIgnoredSymlinks) {
+      if (symlink.portableName === undefined || symlink.relativePath.length === 0) continue;
+      ignoredTargetSymlinkPaths.add(
+        nativeNameIdentity(
+          `${SESSIONS_LOGICAL_KEY_PREFIX}${portableNameKeyIdentity(symlink.portableName, namingOptions)}/${canonicalLogicalRelativePath(symlink.relativePath)}`,
+        ),
+      );
+    }
+    for (const entry of topLevelIgnoredSymlinks) {
+      if (!isStrictPortableSessionDirName(entry, namingOptions)) continue;
+      if (decodePortableSessionDirName(entry, namingOptions) === null) continue;
+      ignoredTargetSymlinkPaths.add(
+        nativeNameIdentity(
+          `${SESSIONS_LOGICAL_KEY_PREFIX}${portableNameKeyIdentity(entry, namingOptions)}`,
+        ),
+      );
+    }
+  }
   return {
     side,
     layout,
+    rootPresent: true,
+    blockedRoot: false,
+    rootUnavailable: false,
     trees: [...mappedTrees.values()],
     files,
     localMappings,
@@ -2827,20 +3332,8 @@ async function scanNestedSessions(
       ...treeRoots,
       ...[...mappedTrees.values()].flatMap((tree) => [...tree.directories]),
     ],
-    ignoredSymlinks: candidates.flatMap((candidate) => {
-      const tree = mappedTrees.get(candidate);
-      const cwd = tree?.cwd ?? candidate.cwdFromRoot;
-      const localName = cwd === undefined ? undefined : defaultSessionDirName(cwd);
-      const portableName = tree?.portableName ?? candidate.portableNameFromRoot;
-      return candidate.ignoredSymlinks.map((symlink) => ({
-        ...symlink,
-        side,
-        rootPath: candidate.rootPath,
-        rootName: candidate.rootName,
-        ...(localName === undefined ? {} : { localName }),
-        ...(portableName === undefined ? {} : { portableName }),
-      }));
-    }),
+    ignoredSymlinks: builtIgnoredSymlinks,
+    ignoredTargetSymlinkPaths,
     warnings,
   };
 }
@@ -2895,6 +3388,14 @@ export interface ScanOptions {
    * keep syncing.
    */
   forbiddenSymlinkTarget?: string;
+  /**
+   * Persisted generic (non-`parentSession`) sessions-URI mapping evidence
+   * (nested local directory names or flat relative paths → portable name).
+   * It only feeds the local→target path resolver for ordinary path rewrites
+   * so generic references to missing session files/directories round-trip;
+   * it is never parentSession semantic, liveness, or retirement evidence.
+   */
+  genericExtraMappings?: ReadonlyMap<string, LocalDirectoryMapping>;
 }
 
 export async function scanSessions(
@@ -2924,6 +3425,7 @@ export async function scanSessions(
       options.lookupExclusions,
       options.missionsRoot,
       options.forbiddenSymlinkTarget,
+      options.genericExtraMappings,
     );
   }
   const warnings: string[] = [];
@@ -2944,6 +3446,7 @@ export async function scanSessions(
       options.historicalNestedMappings,
       options.missionsRoot,
       options.forbiddenSymlinkTarget,
+      options.genericExtraMappings,
     );
   } catch (error) {
     if (error instanceof ScanFailure) throw error;

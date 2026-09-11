@@ -37,6 +37,8 @@ describe("bidirectional session sync labels", () => {
       const source = join(fixture.localTree, "custom.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       const first = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         namingOptions,
@@ -72,6 +74,8 @@ describe("bidirectional session sync labels", () => {
         `${JSON.stringify({ cwd: `pi-session-sync://${portableName}` })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "root-label-machine",
@@ -82,6 +86,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "local" })}\n`);
       await utimes(localFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "root-label-machine",
@@ -113,6 +119,8 @@ describe("bidirectional session sync labels", () => {
       await utimes(localFile, 1, 1);
       await utimes(targetFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "root-existing-label-machine",
@@ -144,6 +152,8 @@ describe("bidirectional session sync labels", () => {
       const source = join(fixture.localTree, "case.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: mixedCwd })}\n`);
       const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "windows-case-mapping-machine",
@@ -182,6 +192,8 @@ describe("bidirectional session sync labels", () => {
       await utimes(targetFile, 2, 2);
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -193,6 +205,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(localFile, `${JSON.stringify({ cwd: upperCwd, value: "local-new" })}\n`);
       await utimes(localFile, 4, 4);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -231,6 +245,8 @@ describe("bidirectional session sync labels", () => {
       await mkdir(dirname(firstTargetFile), { recursive: true });
       await writeFile(firstSource, `${JSON.stringify({ cwd: fixture.cwd, value: "local" })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "windows-intermediate-target-machine",
@@ -245,6 +261,8 @@ describe("bidirectional session sync labels", () => {
         `${JSON.stringify({ cwd: `pi-session-sync://${secondName}`, value: "target" })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "windows-intermediate-local-machine",
@@ -276,6 +294,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "local" })}\n`);
       await utimes(localFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "semantic-label-machine",
@@ -289,6 +309,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(newTargetFile, targetText);
       await utimes(newTargetFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "semantic-label-machine",
@@ -337,7 +359,11 @@ describe("bidirectional session sync labels", () => {
       const localText = `${JSON.stringify({ cwd, value: "base" })}\n`;
       await writeFile(localFile, localText);
       await utimes(localFile, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       const statePath = join(fixture.targetDir, STATE_FILE_NAME);
       const stateBefore = await readFile(statePath, "utf8");
       const oldTargetBefore = await readFile(oldTargetFile, "utf8");
@@ -349,9 +375,13 @@ describe("bidirectional session sync labels", () => {
       await writeFile(newTargetFile, alternateText);
       await utimes(newTargetFile, 2, 2);
 
-      await expect(syncSessions({ ...options, now: 200_000 })).rejects.toThrow(
-        /Target portable trees collide|Logical destination path collision/,
-      );
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 200_000,
+        }),
+      ).rejects.toThrow(/Target portable trees collide|Logical destination path collision/);
       expect(await readFile(oldTargetFile, "utf8")).toBe(oldTargetBefore);
       expect(await readFile(newTargetFile, "utf8")).toBe(alternateText);
       expect(await readFile(statePath, "utf8")).toBe(stateBefore);
@@ -379,7 +409,11 @@ describe("bidirectional session sync labels", () => {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localFile, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       const statePath = join(fixture.targetDir, STATE_FILE_NAME);
       const stateBefore = await readFile(statePath, "utf8");
 
@@ -387,9 +421,13 @@ describe("bidirectional session sync labels", () => {
       await writeFile(alternateFile, "alternate orphan\n");
       await utimes(alternateFile, 2, 2);
 
-      await expect(syncSessions({ ...options, now: 200_000 })).rejects.toThrow(
-        /Target portable trees collide|Logical destination path collision/,
-      );
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 200_000,
+        }),
+      ).rejects.toThrow(/Target portable trees collide|Logical destination path collision/);
       expect(await readFile(alternateFile, "utf8")).toBe("alternate orphan\n");
       await expect(readFile(join(localTree, "nested", "orphan.md"), "utf8")).rejects.toThrow();
       expect(await readFile(statePath, "utf8")).toBe(stateBefore);
@@ -421,7 +459,11 @@ describe("bidirectional session sync labels", () => {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localFile, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       const replacementText = `${JSON.stringify({
         cwd: `pi-session-sync://${newName}`,
@@ -438,7 +480,11 @@ describe("bidirectional session sync labels", () => {
       await writeFile(oldTargetOrphan, orphanText);
       await utimes(oldTargetOrphan, 3, 3);
 
-      await syncSessions({ ...options, now: 300_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 300_000,
+      });
 
       await expect(readFile(oldTargetOrphan, "utf8")).rejects.toThrow();
       expect(await readFile(newTargetFile, "utf8")).toBe(replacementText);
@@ -475,9 +521,17 @@ describe("bidirectional session sync labels", () => {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localFile, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       await rm(localFile);
-      await syncSessions({ ...options, now: 200_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 200_000,
+      });
 
       // The old-label file reappears strictly after its tombstone with
       // changed content while a replacement label tree exists. That recovery
@@ -500,9 +554,13 @@ describe("bidirectional session sync labels", () => {
       await utimes(newTargetFile, 400, 400);
       const stateBeforeConflict = await readFile(statePath, "utf8");
 
-      await expect(syncSessions({ ...options, now: 400_000 })).rejects.toThrow(
-        /Post-tombstone old-label content changed during label adoption/,
-      );
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 400_000,
+        }),
+      ).rejects.toThrow(/Post-tombstone old-label content changed during label adoption/);
       expect(await readFile(oldTargetFile, "utf8")).toBe(oldText);
       expect(await readFile(newTargetFile, "utf8")).toBe(newText);
       await expect(readFile(join(localTree, "old.jsonl"), "utf8")).rejects.toThrow();
@@ -533,7 +591,11 @@ describe("bidirectional session sync labels", () => {
         targetDir: fixture.targetDir,
         machineId: "missing-semantic-label-machine",
       };
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       await rm(localFile);
       await rm(oldTargetTree, { recursive: true });
       await mkdir(dirname(newTargetFile), { recursive: true });
@@ -543,7 +605,11 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(newTargetFile, 300, 300);
 
-      await syncSessions({ ...options, now: 300_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 300_000,
+      });
 
       expect(JSON.parse(await readFile(newTargetFile, "utf8")).value).toBe("new");
       expect(JSON.parse(await readFile(localFile, "utf8"))).toEqual({ cwd, value: "new" });
@@ -577,7 +643,11 @@ describe("bidirectional session sync labels", () => {
         targetDir: fixture.targetDir,
         machineId: "stale-duplicate-label-machine",
       };
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       await rm(localFile);
       await writeFile(
         oldTargetFile,
@@ -591,7 +661,11 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(newTargetFile, 300, 300);
 
-      await syncSessions({ ...options, now: 300_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 300_000,
+      });
 
       await expect(readFile(oldTargetFile, "utf8")).rejects.toThrow();
       expect(JSON.parse(await readFile(newTargetFile, "utf8")).value).toBe("new");
@@ -617,6 +691,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localFile, 100, 100);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "stale-semantic-label-machine",
@@ -625,6 +701,8 @@ describe("bidirectional session sync labels", () => {
 
       await rm(localFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "stale-semantic-label-machine",
@@ -645,6 +723,8 @@ describe("bidirectional session sync labels", () => {
       await utimes(newTargetFile, 300, 300);
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "stale-semantic-label-machine",
@@ -695,9 +775,17 @@ describe("bidirectional session sync labels", () => {
         targetDir: fixture.targetDir,
         machineId: "stale-local-semantic-label-machine",
       };
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       await rm(localFile);
-      await syncSessions({ ...options, now: 200_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 200_000,
+      });
       await expect(readFile(oldTargetFile, "utf8")).rejects.toThrow();
 
       await mkdir(dirname(staleLocalFile), { recursive: true });
@@ -721,7 +809,13 @@ describe("bidirectional session sync labels", () => {
       const staleOldTargetText = await readFile(oldTargetFile, "utf8");
       const liveTargetText = await readFile(liveTargetFile, "utf8");
       await writeFile(invalidTargetFile, "{\n");
-      await expect(syncSessions({ ...options, now: 300_000 })).rejects.toThrow();
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 300_000,
+        }),
+      ).rejects.toThrow();
       expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe(
         stateBeforeError,
       );
@@ -730,7 +824,11 @@ describe("bidirectional session sync labels", () => {
       expect(await readFile(liveTargetFile, "utf8")).toBe(liveTargetText);
       await rm(invalidTargetFile);
 
-      await syncSessions({ ...options, now: 300_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 300_000,
+      });
 
       await expect(readFile(staleTargetFile, "utf8")).rejects.toThrow();
       expect(JSON.parse(await readFile(liveTargetFile, "utf8")).value).toBe("live-target");
@@ -757,7 +855,11 @@ describe("bidirectional session sync labels", () => {
         `${JSON.stringify({ cwd: `pi-session-sync://${newName}`, value: "live-again" })}\n`,
       );
       await utimes(staleTargetFile, 500, 500);
-      await syncSessions({ ...options, now: 500_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 500_000,
+      });
       expect(JSON.parse(await readFile(staleLocalFile, "utf8")).value).toBe("live-again");
       expect(JSON.parse(await readFile(staleTargetFile, "utf8")).value).toBe("live-again");
     } finally {
@@ -785,7 +887,11 @@ describe("bidirectional session sync labels", () => {
         targetDir: fixture.targetDir,
         machineId: "coexisting-semantic-label-machine",
       };
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       await writeFile(
         oldTargetFile,
@@ -799,7 +905,11 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(newTargetFile, 3, 3);
 
-      await syncSessions({ ...options, now: 400_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 400_000,
+      });
 
       await expect(readFile(oldTargetFile, "utf8")).rejects.toThrow();
       expect(JSON.parse(await readFile(newTargetFile, "utf8")).value).toBe("new-label");
@@ -837,9 +947,17 @@ describe("bidirectional session sync labels", () => {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localFile, 100, 100);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       await rm(localFile);
-      await syncSessions({ ...options, now: 200_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 200_000,
+      });
 
       // Complete label adoption while the local session.jsonl is still absent.
       // The replacement tree uses a different relative path so the reappearing
@@ -851,7 +969,11 @@ describe("bidirectional session sync labels", () => {
       await mkdir(dirname(newLiveFile), { recursive: true });
       await writeFile(newLiveFile, liveText);
       await utimes(newLiveFile, 250, 250);
-      await syncSessions({ ...options, now: 250_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 250_000,
+      });
       expect(JSON.parse(await readFile(join(localTree, "live.jsonl"), "utf8"))).toEqual({
         cwd,
         value: "new-label",
@@ -866,9 +988,13 @@ describe("bidirectional session sync labels", () => {
       await utimes(localFile, 300_500, 300_500);
       const stateBeforeConflict = await readFile(statePath, "utf8");
 
-      await expect(syncSessions({ ...options, now: 400_000 })).rejects.toThrow(
-        /Post-tombstone old-label content changed during label adoption/,
-      );
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 400_000,
+        }),
+      ).rejects.toThrow(/Post-tombstone old-label content changed during label adoption/);
       expect(await readFile(localFile, "utf8")).toBe(recreated);
       expect(JSON.parse(await readFile(newLiveFile, "utf8"))).toEqual({
         cwd: `pi-session-sync://${newName}`,
@@ -901,9 +1027,17 @@ describe("bidirectional session sync labels", () => {
       await mkdir(localTree, { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localFile, 100, 100);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
       await rm(localFile);
-      await syncSessions({ ...options, now: 200_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 200_000,
+      });
 
       // Complete label adoption while the local session.jsonl is still absent.
       const liveText = `${JSON.stringify({
@@ -913,7 +1047,11 @@ describe("bidirectional session sync labels", () => {
       await mkdir(dirname(newLiveFile), { recursive: true });
       await writeFile(newLiveFile, liveText);
       await utimes(newLiveFile, 250, 250);
-      await syncSessions({ ...options, now: 250_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 250_000,
+      });
       expect(JSON.parse(await readFile(join(localTree, "live.jsonl"), "utf8"))).toEqual({
         cwd,
         value: "new-label",
@@ -926,7 +1064,11 @@ describe("bidirectional session sync labels", () => {
       const touched = `${JSON.stringify({ cwd, value: "base" })}\n`;
       await writeFile(localFile, touched);
       await utimes(localFile, 300_500, 300_500);
-      await syncSessions({ ...options, now: 400_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 400_000,
+      });
       await expect(readFile(localFile, "utf8")).rejects.toThrow();
       expect(JSON.parse(await readFile(newLiveFile, "utf8"))).toEqual({
         cwd: `pi-session-sync://${newName}`,
@@ -967,7 +1109,11 @@ describe("bidirectional session sync labels", () => {
       await utimes(sourceLocal, 1, 1);
       await writeFile(parentLocal, `${JSON.stringify({ cwd: parentCwd, value: "parent" })}\n`);
       await utimes(parentLocal, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       // Remove the parent session on both sides so its state mapping is
       // retired and absent from the next-scope directories. The old target
@@ -994,7 +1140,11 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(replacementTarget, 400, 400);
 
-      await syncSessions({ ...options, now: 600_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 600_000,
+      });
 
       // The replacement migrated the old-label content and preserved the
       // validated parent URI captured as mappedUri evidence during the target
@@ -1057,7 +1207,11 @@ describe("bidirectional session sync labels", () => {
       await writeFile(sourceExtra, `${JSON.stringify({ cwd, value: "extra-base" })}\n`);
       await utimes(sourceLocal, 1, 1);
       await utimes(sourceExtra, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       const stateBeforeBlocked = await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8");
 
@@ -1089,7 +1243,11 @@ describe("bidirectional session sync labels", () => {
       await utimes(replacementTarget, 400, 400);
       await symlink(join(fixture.root, "outside-target"), replacementExtra);
 
-      const summary = await syncSessions({ ...options, now: 600_000 });
+      const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 600_000,
+      });
       expect(summary.copied).toBe(0);
       expect(summary.deleted).toBe(0);
       expect(
@@ -1132,7 +1290,11 @@ describe("bidirectional session sync labels", () => {
         targetDir: fixture.targetDir,
         machineId: "newer-old-semantic-label-machine",
       };
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       await writeFile(
         oldTargetFile,
@@ -1146,7 +1308,11 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(newTargetFile, 2, 2);
 
-      await syncSessions({ ...options, now: 400_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 400_000,
+      });
 
       await expect(readFile(oldTargetFile, "utf8")).rejects.toThrow();
       expect(JSON.parse(await readFile(newTargetFile, "utf8")).value).toBe("newer-old");
@@ -1180,7 +1346,11 @@ describe("bidirectional session sync labels", () => {
       await mkdir(sourceTree, { recursive: true });
       await writeFile(sourceLocal, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(sourceLocal, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       await writeFile(
         oldTarget,
@@ -1201,7 +1371,11 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(replacementTarget, 2, 2);
 
-      await syncSessions({ ...options, now: 400_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 400_000,
+      });
 
       await expect(readFile(oldTarget, "utf8")).rejects.toThrow();
       const replacementEntry = JSON.parse(await readFile(replacementTarget, "utf8")) as Record<
@@ -1233,7 +1407,11 @@ describe("bidirectional session sync labels", () => {
       await mkdir(dirname(parentLocal), { recursive: true });
       await writeFile(parentLocal, `${JSON.stringify({ value: "orphan" })}\n`);
       await utimes(parentLocal, 4, 4);
-      await syncSessions({ ...options, now: 500_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 500_000,
+      });
       expect(
         await readFile(join(fixture.targetDir, "sessions", parentName, "orphan.jsonl"), "utf8"),
       ).toBe(`${JSON.stringify({ value: "orphan" })}\n`);
@@ -1251,6 +1429,8 @@ describe("bidirectional session sync labels", () => {
     try {
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "empty-target-tree-machine",
@@ -1260,6 +1440,8 @@ describe("bidirectional session sync labels", () => {
       await rm(targetFile);
       await writeFile(ignoredTargetFile, "ignored target content\n");
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "empty-target-tree-machine",
@@ -1289,6 +1471,8 @@ describe("bidirectional session sync labels", () => {
     try {
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "symlink-mapping-machine",
@@ -1299,6 +1483,8 @@ describe("bidirectional session sync labels", () => {
       await rm(targetFile);
       await symlink(externalFile, targetFile, "file");
       const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "symlink-mapping-machine",
@@ -1341,6 +1527,8 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(targetSource, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1356,6 +1544,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(externalFile, "external target content\n");
       await symlink(externalFile, targetMappedPath, "file");
       const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1377,6 +1567,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(localMappedPath, `${JSON.stringify({ value: "cwdless" })}\n`);
       await utimes(localMappedPath, 3, 3);
       const blocked = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1396,6 +1588,8 @@ describe("bidirectional session sync labels", () => {
 
       await rm(targetMappedPath);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1424,6 +1618,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(localPath, `${JSON.stringify({ cwd, value: "base" })}\n`);
       await utimes(localPath, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1436,6 +1632,8 @@ describe("bidirectional session sync labels", () => {
       await symlink(externalDirectory, join(flatRoot, "nested"), "dir");
       await rm(targetPath);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1450,6 +1648,8 @@ describe("bidirectional session sync labels", () => {
       );
       await utimes(targetPath, 1, 1);
       const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1487,6 +1687,8 @@ describe("bidirectional session sync labels", () => {
         `${JSON.stringify({ cwd: `pi-session-sync://${portableName}` })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cwdless-target-label-machine",
@@ -1508,6 +1710,8 @@ describe("bidirectional session sync labels", () => {
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       const initialOptions = { homeLabel: "USER", rootLabel: "SYSTEM", extraPrefixes: {} };
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         namingOptions: initialOptions,
@@ -1517,6 +1721,8 @@ describe("bidirectional session sync labels", () => {
       const targetName = portableSessionDirName(fixture.cwd, initialOptions);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           namingOptions: { ...initialOptions, homeLabel: "CHANGED" },
@@ -1536,6 +1742,8 @@ describe("bidirectional session sync labels", () => {
     const fixture = await makeFixture();
     try {
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         now: 40_000,
@@ -1557,6 +1765,8 @@ describe("bidirectional session sync labels", () => {
       for (const now of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             now,

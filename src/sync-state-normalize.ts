@@ -104,4 +104,110 @@ export function normalizeStateScopePortableNames(
   }
   scope.directories = directories;
   scope.flatFiles = flatFiles;
+  // Generic evidence records normalize exactly like the primary mappings;
+  // spelling-variant duplicates merge under native-name identity and must be
+  // portable-compatible or the state is rejected.
+  const normalizedGenericDirectories = normalizeGenericScopeRecord(
+    scope.genericDirectories,
+    namingOptions,
+    "generic directory mapping",
+  );
+  if (normalizedGenericDirectories === undefined) {
+    delete scope.genericDirectories;
+  } else {
+    scope.genericDirectories = normalizedGenericDirectories;
+  }
+  const normalizedGenericFlatFiles = normalizeGenericScopeRecord(
+    scope.genericFlatFiles,
+    namingOptions,
+    "generic flat file mapping",
+  );
+  if (normalizedGenericFlatFiles === undefined) {
+    delete scope.genericFlatFiles;
+  } else {
+    scope.genericFlatFiles = normalizedGenericFlatFiles;
+  }
+  const normalizedGenericEvidence = normalizeGenericEvidence(scope.genericEvidence, namingOptions);
+  if (normalizedGenericEvidence === undefined) {
+    delete scope.genericEvidence;
+  } else {
+    scope.genericEvidence = normalizedGenericEvidence;
+  }
+}
+
+/**
+ * Normalize the per-logical-file generic evidence provenance: canonicalize
+ * outer logical keys and inner portable spellings, merging spelling-variant
+ * duplicates under native-name identity (conflicting labels are a state
+ * error, never first-wins).
+ */
+function normalizeGenericEvidence(
+  evidence: Record<string, Record<string, string>> | undefined,
+  namingOptions: PortableNameOptions,
+): Record<string, Record<string, string>> | undefined {
+  if (evidence === undefined) return undefined;
+  const normalized: Record<string, Record<string, string>> = Object.create(null) as Record<
+    string,
+    Record<string, string>
+  >;
+  for (const [rawKey, rawRecord] of Object.entries(evidence)) {
+    const key = canonicalStateLogicalKey(rawKey, namingOptions);
+    const record = normalizeGenericScopeRecord(
+      rawRecord,
+      namingOptions,
+      `generic evidence ${rawKey}`,
+    );
+    if (record === undefined) continue;
+    const existing = normalized[key];
+    if (existing === undefined) {
+      normalized[key] = record;
+      continue;
+    }
+    for (const [localName, portableName] of Object.entries(record)) {
+      const existingName = Object.keys(existing).find(
+        (candidate) => nativeNameIdentity(candidate) === nativeNameIdentity(localName),
+      );
+      if (existingName === undefined) {
+        existing[localName] = portableName;
+        continue;
+      }
+      if (
+        !nativeCompatiblePortableMappings(
+          existing[existingName] as string,
+          portableName,
+          namingOptions,
+        )
+      ) {
+        throw new Error(`Conflicting state generic evidence for ${rawKey}`);
+      }
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeGenericScopeRecord(
+  record: Record<string, string> | undefined,
+  namingOptions: PortableNameOptions,
+  context: string,
+): Record<string, string> | undefined {
+  if (record === undefined) return undefined;
+  const normalized: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const [rawKey, rawPortableName] of Object.entries(record)) {
+    const portableName = canonicalStatePortableName(rawPortableName, namingOptions);
+    const existingKey = Object.keys(normalized).find(
+      (candidate) => nativeNameIdentity(candidate) === nativeNameIdentity(rawKey),
+    );
+    if (
+      existingKey !== undefined &&
+      !nativeCompatiblePortableMappings(
+        normalized[existingKey] as string,
+        portableName,
+        namingOptions,
+      )
+    ) {
+      throw new Error(`Conflicting state ${context} for ${rawKey}`);
+    }
+    normalized[existingKey ?? rawKey] = portableName;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }

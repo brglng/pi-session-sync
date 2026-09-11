@@ -363,15 +363,36 @@ export function associateNestedIgnoredSymlinkReplacementGroups(
         ctx.namingOptions,
       );
       const oldEntry = stateEntryForKey(state, oldKey, ctx.namingOptions);
+      // Only a LIVE persisted baseline proves continuity. A tombstone-only
+      // old-label path is a retired corpse: it must never mark the new label
+      // as a replacement group and thereby block a valid first-seen sync.
+      const liveOldEntry =
+        oldEntry !== undefined && oldEntry.tombstone === null && oldEntry.target !== null;
       const knownOldStatePath = keysForLabelAndLocalName(historicalLabel, localName).some((key) => {
         const parsed = parseLogicalKey(key, ctx.namingOptions);
-        return relativePathUnder(parsed.relativePath, ignored.relativePath);
+        if (!relativePathUnder(parsed.relativePath, ignored.relativePath)) return false;
+        const entry = stateEntryForKey(state, key, ctx.namingOptions);
+        if (entry !== undefined && entry.tombstone === null && entry.target !== null) return true;
+        // A scanned file at this path is live physical evidence; a state key
+        // without a live entry is tombstone-only and proves nothing.
+        return (initialLocalScan?.files.has(key) ?? false) || (targetScan.files.has(key) ?? false);
       });
-      const localCounterpart = [...(initialLocalScan?.files.values() ?? [])].find(
-        (file) =>
-          nestedFileMatchesMapping(file, localName, historicalLabel, ctx.namingOptions) &&
-          relativePathUnder(file.relativePath, ignored.relativePath),
-      );
+      const localCounterpart = [...(initialLocalScan?.files.values() ?? [])].find((file) => {
+        if (
+          !nestedFileMatchesMapping(file, localName, historicalLabel, ctx.namingOptions) ||
+          !relativePathUnder(file.relativePath, ignored.relativePath)
+        ) {
+          return false;
+        }
+        // Stale tombstone content (unchanged since its tombstone) is old-label
+        // corpse evidence; only a genuine post-tombstone recovery proves
+        // continuity.
+        const entry = stateEntryForKey(state, file.key, ctx.namingOptions);
+        if (entry !== undefined && entry.tombstone !== null) {
+          return isPostTombstoneChangedContent(file, entry, localSnapshotFor(entry, ctx.machineId));
+        }
+        return true;
+      });
       const replacementTree = targetScan.trees.find((tree) => tree.rootPath === ignored.rootPath);
       const safeReplacementEvidence =
         replacementTree !== undefined &&
@@ -382,11 +403,11 @@ export function associateNestedIgnoredSymlinkReplacementGroups(
           targetScan,
           ctx.namingOptions,
         );
-      // A known live/tombstoned state path or pre-adoption local file is
-      // direct continuity evidence. A regular sibling can prove migration when
-      // its old state counterpart disappeared or changed safely.
+      // A known LIVE state path or pre-adoption local file is direct
+      // continuity evidence. A regular sibling can prove migration when its
+      // old state counterpart disappeared or changed safely.
       if (
-        oldEntry !== undefined ||
+        liveOldEntry ||
         knownOldStatePath ||
         localCounterpart !== undefined ||
         safeReplacementEvidence
@@ -606,6 +627,21 @@ export function staleNestedTargetKeysForReplacement(
       ) {
         continue;
       }
+      const replacementGroupLabel = canonicalStatePortableName(
+        replacement.portableName,
+        ctx.namingOptions,
+      );
+      // Retire an old-label target file and, when it still has a LIVE state
+      // baseline, associate its delete with the replacement group. A blocked
+      // group must keep the old file on disk; tombstone corpses and untracked
+      // leftovers retire independently of the replacement decision.
+      const retireOldTargetKey = (key: string): void => {
+        stale.add(key);
+        const entry = stateEntryForKey(state, key, ctx.namingOptions);
+        if (entry !== undefined && entry.tombstone === null && entry.target !== null) {
+          ctx.nestedStaleReplacementKeys.set(key, replacementGroupLabel);
+        }
+      };
       for (const file of persistedTree.files) {
         const entry = stateEntryForKey(state, file.key, ctx.namingOptions);
         // Only live state entries have a baseline that can prove label migration.
@@ -619,7 +655,7 @@ export function staleNestedTargetKeysForReplacement(
         // recovered onto the replacement label.
         if (entry?.tombstone !== null && entry?.tombstone !== undefined) {
           if (!isPostTombstoneChangedContent(file, entry, localSnapshotFor(entry, ctx.machineId))) {
-            stale.add(file.key);
+            retireOldTargetKey(file.key);
           } else {
             ctx.nestedTombstoneConflicts.add(file.key);
           }
@@ -639,7 +675,7 @@ export function staleNestedTargetKeysForReplacement(
         // label instead of treating it as disposable stale content.
         const changedContent = file.hash !== entry.target.hash;
         if (!changedContent) {
-          stale.add(file.key);
+          retireOldTargetKey(file.key);
           continue;
         }
 
@@ -651,7 +687,7 @@ export function staleNestedTargetKeysForReplacement(
           Number.NEGATIVE_INFINITY,
         );
         if (newestMtime > file.mtimeMs) {
-          stale.add(file.key);
+          retireOldTargetKey(file.key);
           continue;
         }
         const equalMtimeContentDiffers = candidates.some(
@@ -663,10 +699,13 @@ export function staleNestedTargetKeysForReplacement(
         );
         if (equalMtimeContentDiffers) {
           ctx.nestedReplacementConflicts.add(newKey);
-          stale.add(file.key);
+          retireOldTargetKey(file.key);
           continue;
         }
         stale.add(file.key);
+        if (entry.tombstone === null && entry.target !== null) {
+          ctx.nestedStaleReplacementKeys.set(file.key, replacementGroupLabel);
+        }
         if (newestMtime < file.mtimeMs) {
           ctx.nestedReplacementSources.set(newKey, file);
         }
@@ -854,6 +893,11 @@ export function nestedReplacementDecision(
     sessionCwdPresent: transformed.sessionCwdPresent ?? false,
     sessionHeaderValid: transformed.sessionHeaderValid ?? false,
     parentSessionReferences: transformed.parentSessionReferences ?? [],
+    // The replacement pass re-encodes the OLD label's generic path
+    // references under the destination label; the synthetic copy's evidence
+    // must come from this transformed output, never from the old scan's
+    // stale label/content.
+    genericPathReferences: transformed.genericPathReferences ?? [],
   };
   const localSource: ScannedFile = {
     ...targetSource,
@@ -973,6 +1017,11 @@ export async function retargetLiveNestedTargetParentEvidence(
       file.sessionHeaderValid = transformed.sessionHeaderValid ?? false;
       file.sessionHeaderCwdDecodable = transformed.sessionHeaderCwdDecodable;
       file.parentSessionReferences = transformed.parentSessionReferences ?? [];
+      // Generic (non-cwd) path references carry the same label evidence as
+      // parentSession: the live-only re-transform must refresh them so
+      // generic evidence records the live label, not the stale one captured
+      // before classification.
+      file.genericPathReferences = transformed.genericPathReferences ?? [];
     } catch {
       // Keep the scanned evidence: the safe second transform must never
       // silently drop an otherwise valid file decision.

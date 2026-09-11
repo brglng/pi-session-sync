@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -242,6 +242,77 @@ describe("missions and generic JSON path synchronization", () => {
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as { entries: Record<string, unknown> };
       expect(Object.keys(state.entries)).toContain("missions/index/a.json");
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("cleans empty mission descendant directories for a committed both-deleted tombstone", async () => {
+    const fixture = await makeFixture();
+    const missionsRoot = fixture.missionsRoot;
+    try {
+      await writeMission(missionsRoot, "index/a.json", { value: "a" });
+      const first = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        now: 1_000,
+      });
+      expect(first.copied).toBe(1);
+      const targetIndexDir = join(fixture.targetDir, "missions", "index");
+      // Both copies vanish: the next sync records the both-deleted tombstone
+      // with NO delete actions, so the emptied descendant directories must be
+      // seeded from the logical key (mirroring sessions tombstone cleanup).
+      await rm(join(missionsRoot, "index", "a.json"), { force: true });
+      await rm(join(targetIndexDir, "a.json"), { force: true });
+      const second = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        now: 2_000,
+      });
+      expect(second.deleted).toBe(0);
+      await expect(lstat(join(missionsRoot, "index"))).rejects.toThrow();
+      await expect(lstat(targetIndexDir)).rejects.toThrow();
+      // The configured roots are never removed by empty-directory cleanup.
+      expect((await lstat(missionsRoot)).isDirectory()).toBe(true);
+      expect((await lstat(join(fixture.targetDir, "missions"))).isDirectory()).toBe(true);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("cleans mission descendants through a symlinked local missions root", async () => {
+    const fixture = await makeFixture();
+    const realMissions = join(fixture.root, "real-missions");
+    const missionsRoot = join(fixture.root, "missions-link");
+    try {
+      await mkdir(realMissions, { recursive: true });
+      await symlink(realMissions, missionsRoot, "dir");
+      await writeMission(realMissions, "index/a.json", { value: "a" });
+      const first = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        now: 1_000,
+      });
+      expect(first.copied).toBe(1);
+      const targetIndexDir = join(fixture.targetDir, "missions", "index");
+      await rm(join(realMissions, "index", "a.json"), { force: true });
+      await rm(join(targetIndexDir, "a.json"), { force: true });
+      await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        now: 2_000,
+      });
+      // The local root element is a permitted symlink (root-only); the empty
+      // descendant dir behind it is still cleaned, and the symlink root stays.
+      await expect(lstat(join(realMissions, "index"))).rejects.toThrow();
+      await expect(lstat(join(missionsRoot, "index"))).rejects.toThrow();
+      expect((await lstat(realMissions)).isDirectory()).toBe(true);
+      expect((await lstat(missionsRoot)).isSymbolicLink()).toBe(true);
+      await expect(lstat(targetIndexDir)).rejects.toThrow();
     } finally {
       await cleanup(fixture.root);
     }
@@ -1109,7 +1180,7 @@ describe("missions and generic JSON path synchronization", () => {
     }
   });
 
-  it("session-only sync preserves process-cwd absolute paths without a missions root", async () => {
+  it("never rewrites a process-cwd absolute path as a missions URI", async () => {
     const fixture = await makeFixture();
     try {
       const processPath = join(process.cwd(), "some-dir", "thing.json");
@@ -1124,17 +1195,18 @@ describe("missions and generic JSON path synchronization", () => {
       );
       const missionsRoot = join(fixture.root, "missions");
       await writeMission(missionsRoot, "index/ref.json", { sessionPath: processPath });
-      // Without missionsRoot the missions tree is not synchronized and the
-      // resolver must never substitute a process-cwd root: an absolute path
-      // under the process cwd must stay verbatim in the synced session file
-      // instead of being rewritten as a `pi-session-sync://missions/...` URI.
+      // An absolute path under the process cwd is outside both synced roots
+      // and must stay verbatim in the synced session file instead of being
+      // rewritten as a `pi-session-sync://missions/...` URI, even though the
+      // missions root is configured.
       const summary = await syncSessions({
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
+        missionsRoot,
         machineId: "no-missions-machine",
         now: 5_000,
       });
-      expect(summary.copied).toBe(1);
+      expect(summary.copied).toBe(2);
       const target = JSON.parse(
         await readFile(
           join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),

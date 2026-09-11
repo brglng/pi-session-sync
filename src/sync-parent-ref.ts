@@ -1,9 +1,18 @@
 /// <reference types="node" />
 
 import { isAbsolute, relative, resolve } from "node:path";
-import { decodePortableSessionDirName, defaultSessionDirName } from "./portable-name.ts";
+import {
+  decodePortableSessionDirName,
+  defaultSessionDirName,
+  isStrictPortableSessionDirName,
+} from "./portable-name.ts";
 import { flatMappingIdentityKey, type ScannedFile, type ScanResult } from "./scan.ts";
-import { isSyncUri, nativeNameIdentity, syncParentUriToPortableName } from "./session-paths.ts";
+import {
+  isSyncUri,
+  nativeNameIdentity,
+  SESSIONS_FILE_URI_PREFIX,
+  syncParentUriToPortableName,
+} from "./session-paths.ts";
 import type { SyncState } from "./state.ts";
 import { resolveExistingEntry, resolveInitialEntry } from "./sync-decision-core.ts";
 import { scannedFlatFile } from "./sync-flat.ts";
@@ -21,6 +30,239 @@ import {
 import { parseLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
 import { canonicalStatePortableName } from "./sync-state-normalize.ts";
 import { type DecisionContext, type FileDecision, SyncFailure } from "./sync-types.ts";
+
+/**
+ * Merge one piece of generic sessions-URI mapping evidence into a mapping map,
+ * reusing a native-name-equivalent existing key. Incompatible labels for the
+ * same localName are a genuine evidence conflict and throw.
+ */
+export function mergeGenericMapping(
+  mappings: Map<string, string>,
+  localName: string,
+  portableName: string,
+  ctx: DecisionContext,
+): void {
+  const existing = mappingForNativeName(mappings, localName);
+  if (existing === undefined) {
+    mappings.set(
+      [...mappings.keys()].find(
+        (candidate) => nativeNameIdentity(candidate) === nativeNameIdentity(localName),
+      ) ?? localName,
+      portableName,
+    );
+  } else if (!nativeCompatiblePortableMappings(existing, portableName, ctx.namingOptions)) {
+    throw new Error(
+      `Conflicting generic session mapping evidence for ${localName}: ${existing} and ${portableName}`,
+    );
+  }
+}
+
+/**
+ * Whether the content a decision keeps for one side is the side's OWN scanned
+ * content: a deletion or copy that preflight blocked keeps the side's on-disk
+ * content intact, so its evidence still counts.
+ */
+function sideContentRemoved(
+  side: ScannedFile["side"],
+  key: string,
+  decisions: ReadonlyMap<string, FileDecision> | undefined,
+  blockedDeletes: ReadonlySet<FileDecision["deletes"][number]> | undefined,
+  blockedCopies: ReadonlySet<FileDecision["copies"][number]> | undefined,
+): boolean {
+  const decision = decisions?.get(key);
+  if (decision === undefined) return false;
+  return (
+    decision.deletes.some(
+      (action) =>
+        action.side === side && (blockedDeletes === undefined || !blockedDeletes.has(action)),
+    ) ||
+    decision.copies.some(
+      (action) =>
+        action.destinationSide === side &&
+        (blockedCopies === undefined || !blockedCopies.has(action)),
+    )
+  );
+}
+
+/**
+ * Whether a scanned file's OWN side content is replaced (deleted/overwritten)
+ * by the final decisions. A deletion or copy that preflight blocked keeps the
+ * side's on-disk content intact, so its evidence still counts.
+ */
+function scannedFileSideRemoved(
+  file: ScannedFile,
+  decisions: ReadonlyMap<string, FileDecision> | undefined,
+  blockedDeletes: ReadonlySet<FileDecision["deletes"][number]> | undefined,
+  blockedCopies: ReadonlySet<FileDecision["copies"][number]> | undefined,
+): boolean {
+  return sideContentRemoved(file.side, file.key, decisions, blockedDeletes, blockedCopies);
+}
+
+/**
+ * Whether an UNAVAILABLE target logical file (an ignored target symlink that
+ * could not be read this round) loses the target side content its persisted
+ * generic evidence described. The final decision may replace the target side
+ * with a copy from the local counterpart or delete it outright; either way the
+ * old persisted evidence no longer describes surviving content and must not be
+ * restored.
+ */
+export function targetSideEvidenceRemoved(
+  key: string,
+  decisions: ReadonlyMap<string, FileDecision> | undefined,
+  blockedDeletes: ReadonlySet<FileDecision["deletes"][number]> | undefined,
+  blockedCopies: ReadonlySet<FileDecision["copies"][number]> | undefined,
+): boolean {
+  return sideContentRemoved("target", key, decisions, blockedDeletes, blockedCopies);
+}
+
+/**
+ * True when a canonical sessions logical file key is EQUAL TO or BELOW one of
+ * the ignored target symlink logical prefixes. A symlinked directory — or a
+ * whole symlinked top-level target tree — hides every state key under it, so
+ * exact-key matching would treat those hidden owners as deleted instead of
+ * UNAVAILABLE, losing their persisted generic evidence.
+ */
+export function sessionTargetSymlinkCovers(
+  symlinkPaths: ReadonlySet<string>,
+  key: string,
+): boolean {
+  const canonical = nativeNameIdentity(key);
+  for (const path of symlinkPaths) {
+    if (canonical === path) return true;
+    if (canonical.startsWith(`${path}/`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Derive the generic sessions-URI mapping evidence carried by ONE scanned
+ * file. Kept per-file so the ignored-target-symlink preservation can carry
+ * the exact evidence a now-unreadable logical file used to prove, instead of
+ * resurrecting unrelated mappings from the whole scope.
+ */
+function genericMappingsForScannedFile(
+  file: ScannedFile,
+  ctx: DecisionContext,
+): Map<string, string> {
+  const mappings = new Map<string, string>();
+  for (const reference of file.genericPathReferences) {
+    const mappedUri = isSyncUri(reference.value)
+      ? reference.value
+      : (reference.mappedUri ?? reference.rewritten);
+    if (mappedUri === undefined || !isSyncUri(mappedUri)) continue;
+    let portableName: string;
+    try {
+      portableName = syncParentUriToPortableName(mappedUri, ctx.namingOptions);
+    } catch {
+      // Structurally invalid spellings never enter state; the transform
+      // pass already preserves them verbatim with a warning.
+      continue;
+    }
+    const decoded = decodePortableSessionDirName(portableName, ctx.namingOptions);
+    if (decoded === null) continue;
+    // Only strict canonical evidence enters current state; legacy loose
+    // spellings are old/inapplicable and never poison mappings.
+    if (!isStrictPortableSessionDirName(portableName, ctx.namingOptions)) continue;
+    let localName: string;
+    if (ctx.layout === "nested") {
+      localName = defaultSessionDirName(decoded.cwd);
+    } else {
+      // Flat: the URI must carry a relative path; the first relative
+      // segment is the directory owner the resolver can later infer from.
+      // The flat root itself has no directory concept and carries no
+      // generic evidence.
+      const remainder = mappedUri.slice(SESSIONS_FILE_URI_PREFIX.length);
+      const slash = remainder.indexOf("/");
+      if (slash < 0) continue;
+      const encodedFirst = remainder.slice(slash + 1).split("/")[0];
+      if (encodedFirst === undefined || encodedFirst.length === 0) continue;
+      let decodedFirst: string;
+      try {
+        decodedFirst = decodeURIComponent(encodedFirst);
+      } catch {
+        continue;
+      }
+      if (decodedFirst.includes("/") || decodedFirst.length === 0) continue;
+      localName = decodedFirst;
+    }
+    mergeGenericMapping(mappings, localName, portableName, ctx);
+  }
+  return mappings;
+}
+
+/**
+ * Per-logical-file generic sessions-URI mapping evidence from the surviving
+ * local and target scans, keyed by canonical logical file key. Keying by
+ * owner lets an unavailable (ignored target symlink) file's evidence be
+ * carried forward per owner instead of resurrecting or dropping unrelated
+ * scope-level mappings.
+ */
+export function genericEvidenceByKey(
+  localScan: ScanResult | undefined,
+  targetScan: ScanResult,
+  ctx: DecisionContext,
+  decisions: ReadonlyMap<string, FileDecision> | undefined = undefined,
+  blockedDeletes: ReadonlySet<FileDecision["deletes"][number]> | undefined = undefined,
+  blockedCopies: ReadonlySet<FileDecision["copies"][number]> | undefined = undefined,
+): Map<string, Map<string, string>> {
+  const byKey = new Map<string, Map<string, string>>();
+  const addEvidenceFor = (key: string, file: ScannedFile): void => {
+    const fileEvidence = genericMappingsForScannedFile(file, ctx);
+    if (fileEvidence.size === 0) return;
+    let existing = byKey.get(key);
+    if (existing === undefined) {
+      existing = new Map<string, string>();
+      byKey.set(key, existing);
+    }
+    for (const [localName, portableName] of fileEvidence) {
+      mergeGenericMapping(existing, localName, portableName, ctx);
+    }
+  };
+  const sides = localScan === undefined ? [targetScan] : [targetScan, localScan];
+  for (const scan of sides) {
+    for (const file of scan.files.values()) {
+      if (scannedFileSideRemoved(file, decisions, blockedDeletes, blockedCopies)) continue;
+      // Stale/excluded target keys belong to a superseded label (nested label
+      // replacement) or a stale flat identity: once their content is actually
+      // replaced or deleted it no longer survives under that key, so it must
+      // never seed current mappings. A preflight-blocked replacement group
+      // keeps the old file physically on disk (its delete/copy actions are in
+      // `blockedDeletes`/`blockedCopies`), so its evidence still describes
+      // surviving content and must stay under its own old key. Without final
+      // decisions the superseded filter stays unconditional.
+      if (scan.side === "target") {
+        const supersededNestedKey =
+          ctx.layout === "nested" &&
+          ((ctx.staleNestedTargetKeys?.has(file.key) ?? false) ||
+            (ctx.excludedNestedTargetKeys?.has(file.key) ?? false));
+        if (
+          supersededNestedKey &&
+          (decisions === undefined ||
+            scannedFileSideRemoved(file, decisions, blockedDeletes, blockedCopies))
+        ) {
+          continue;
+        }
+        if (flatTargetKeyIdentityIsStale(file.key, ctx)) continue;
+      }
+      addEvidenceFor(file.key, file);
+    }
+  }
+  // Synthetic nested label-replacement copies: the old-label target file is
+  // deleted and its content re-materialized under the replacement key, so the
+  // transformed generic evidence belongs to the DESTINATION key. A blocked
+  // replacement keeps the old file on disk, whose own evidence the scan loop
+  // already kept under its old key.
+  for (const newKey of ctx.nestedReplacementSources?.keys() ?? []) {
+    const decision = decisions?.get(newKey);
+    if (decision === undefined) continue;
+    for (const copy of decision.copies) {
+      if (copy.source.key !== newKey) continue;
+      if (blockedCopies?.has(copy)) continue;
+      addEvidenceFor(newKey, copy.source);
+    }
+  }
+  return byKey;
+}
 
 export function decisionForScannedFile(
   file: ScannedFile,

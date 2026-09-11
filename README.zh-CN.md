@@ -41,7 +41,7 @@ pi install npm:@brglng/pi-session-sync
 ```
 
 - 同步只能手动执行，不提供自动后台同步。
-- 两个本机源根目录都允许是符号链接并跟随，源树内部的符号链接也跟随；缺失的源根目录忽略并提示 warning。本机源树中解析目标为 `targetDir` 本身或其内部目录/文件的符号链接属于安全错误：按物理真实路径（含祖先别名解析后）判定，作为与 warning 区分的非致命 error 显式记录并跳过该链接，不跟随、不复制、不删除其内容，其它安全文件继续同步。
+- 两个本机源根目录都允许是符号链接并跟随，源树内部的符号链接也跟随；缺失或悬空（dangling）的源根目录会提示 missing-root warning（`rootPresent:false`、`rootUnavailable:false`），已存在但无法读取（`EACCES`/`EPERM`/`ENOTDIR`/`ELOOP`）的源根目录会提示对应的根目录 warning 并标记 `rootUnavailable:true`，两者都只冻结该棵目录树，另一棵源根目录继续正常同步。本机源树中解析目标为 `targetDir` 本身或其内部目录/文件的符号链接属于安全错误：按物理真实路径（含祖先别名解析后）判定，作为与 warning 区分的非致命 error 显式记录并跳过该链接，不跟随、不复制、不删除其内容，其它安全文件继续同步。
 - `.json`、JSONL 及 Markdown frontmatter 中所有完整表示 sessions/missions 根内绝对路径的字符串都会被改写为 portable URI；根外路径、相对值与普通 ID 原样保留。任何以 `pi-session-sync:` 开头但并非合法根命名空间 URI 的值，在来自本机源时均视为文件错误；从 target 同步回本机时，非合法 URI 及无法解码为可移植路径的 `cwd`/路径字段会原样保留并提示 warning，不中止整次同步，本地落点由 target 树形 portableName 映射确定。
 - 当前格式只接受严格规范拼写的可移植名与 URI 可移植名部分。旧的宽松 `encodeURIComponent` 拼写（字面 `*`、末尾点号）属于过时内容：target → local 复制时原样保留并提示 warning，local → target 时作为文件错误拒绝。
 - local → target 的 `parentSession` 严格校验：绝对 parent 必须解析到 `sessionsRoot` 内的 sessions 文件 URI，Windows 风格/UNC、根外、missions 根、畸形或宽松拼写的 URI 都会在 staging 前作为文件错误停止同步。
@@ -94,7 +94,7 @@ pi install npm:@brglng/pi-session-sync
 - 只同步 `.json`、`.jsonl` 和 `.md`。JSON 与 JSONL 严格解析；Markdown 读取开头标准 YAML frontmatter。所有完整表示 `sessionsRoot`/`missionsRoot` 内绝对路径的字符串值都会被递归改写：sessions 路径转为 `pi-session-sync://sessions/<portableName>/<relativePath>`，missions 路径转为 `pi-session-sync://missions/<relativePath>`，`cwd` 保持无根名的 `pi-session-sync://<portableName>` 形式；反向同步时 target URI 还原为本地绝对路径。
 - 只允许一个末尾换行符；内部换行或多余空行都会失败。
 - 凡是以 `pi-session-sync:` 开头的值，都必须是有效的 `pi-session-sync://` URI；方案名匹配不区分大小写。（本机源严格校验；target → local 复制时非法值原样保留并提示 warning，不停止同步。）
-- 位于 `sessionsRoot` 内的本地绝对 JSONL `parentSession` 路径，会转为 `pi-session-sync://<portableName>/<relativePath>`；`relativePath` 相对于被引用的 session 目录。相对值保持不变，反向同步时 URI 会还原为本地路径。
+- 位于 `sessionsRoot` 内的本地绝对 JSONL `parentSession` 路径，会转为 `pi-session-sync://sessions/<portableName>/<relativePath>`；`relativePath` 相对于被引用的 session 目录。相对值保持不变，反向同步时 URI 会还原为本地路径。旧的、不带根名的文件 URI（`pi-session-sync://<portableName>/<relativePath>`）不再支持。
 - 父级 URI 的相对路径必须使用 `/`、规范化的百分号编码和跨平台安全的路径段，且不得包含目录穿越。已有引用必须指向普通文件；尚未创建的引用目标也可以是有效引用。
 - POSIX 拒绝 Windows 驱动器路径和 UNC 风格的绝对父级路径。flat 布局中的绝对父级路径使用自身的精确映射或包含它的映射，绝不使用当前文件的映射。
 - Markdown 只读取文件开头的标准 YAML frontmatter，递归重写 `cwd`，并保持正文不变。没有 frontmatter 时不进行 `cwd` 映射。
@@ -133,6 +133,8 @@ target → local 复制时，非可移植值原样保留并提示 warning，不�
 - nested 子项保留顶层 session 的 `cwd`。不含 `cwd` 的文件继承最近且无歧义的包含映射；找不到映射则出错。
 - flat 根目录按每个文件的 `cwd` 分组。JSONL 或 Markdown 中的有效父级引用，可以建立没有现存文件的仅父级映射。
 - 现存文件的映射优先于仅父级证据，但同一个解码后的 `cwd` 若对应不同的语义标签会失败，包括现存映射与仅父级引用之间的冲突。
+- 由 mission 推导出的证据按「所有者」条目保存，而不只是保存在 scope 上。`cwdEvidence` 记录某个 mission 文件证明过的 cwd 标签，`missionSessionMappings` 记录它证明过的仅父级 session 目录映射；两者都按机器 scope key（`<layout>:<sessionsRoot>::<machineId>`）切片，因此一台机器的记录绝不会覆盖另一台机器的记录。只会读取记录的 layout 与当前 layout 一致的证据；其它 layout 的记录原样保留但绝不喂给 resolver，已被 tombstone 的所有者不贡献任何内容，因此退役的映射不会被复活。
+- 被冻结的 sessions 根目录会原样保留 scope 映射字段，并依赖上述所有者条目：下一轮 sessions 根目录可用时，会在扫描前先载入已持久化的 `missionSessionMappings`，使仍然存活的本机绝对路径拼写重新编码为原始可移植 URI。preflight 阻断某个 mission 拷贝或删除时，会用 blocked 集合重新计算所有者证据——被阻断的动作仍保留该侧磁盘内容，因此其证据仍然有效——仅有的传输被阻断的全新 mission 文件会持久化一个仅含源侧内容的条目，绝不把被阻断的传输记为已完成。被冻结的 sessions 根目录仍会用存活的 target 推导映射校验 mission 的仅父级证据，因此同一个 Pi 本机目录对应的不兼容语义标签会停止同步，即使不写入任何 scope 映射。
 - target 根目录下的 `.pi-session-sync-state.json` 是实际存在的 version-1 JSON 状态文件，按 effective `sessionsRoot` 和 layout 划分作用域。
 - 状态文件记录逻辑基线、规范化哈希和 mtime、目录映射、删除 tombstone、各机器快照，以及规范化命名配置。
 - 作用域根目录保持区分大小写；目标检查采用保守策略。稳定的机器 ID 位于 `~/.pi/agent/extensions/pi-session-sync/machine-id`。
@@ -150,6 +152,10 @@ target → local 复制时，非可移植值原样保留并提示 warning，不�
 
 - `sessionsRoot` 允许是符号链接（本机源根目录跟随）；`targetDir` 必须是已存在的真实、非符号链接目录，且两者不得重叠。
 - 不检查目标目录祖先的符号链接，包括 macOS 的 `/var` 和 `/tmp` 别名。
+- 本机源根目录（`sessionsRoot` 或 `<agentDir>/missions`）独立判定，单棵不可用不会影响另一棵树：安全的那棵树继续完成自己的文件同步、删除与 tombstone 传播、空目录清理。缺失或悬空（dangling）的源根目录（路径不存在，或源根目录符号链接的目标无法解析）会提示 missing-root warning，并产生 `rootPresent:false` 与 `rootUnavailable:false`。已存在但无法检查或读取的源根目录（`EACCES`、`EPERM`、`ENOTDIR`、`ELOOP`／符号链接循环，或其它不可读错误）会提示对应的根目录 warning，并产生 `rootUnavailable:true`。两者都只把该源根目录视为本轮 UNAVAILABLE。
+- 不可用的源根目录会冻结它自己那棵目录树：不会从缺失／不可读的根目录推导任何文件决策、删除、tombstone、状态条目变更或空目录清理，也不会代为写入或删除该树的本机侧与 target 侧。被冻结的 sessions 树还会原样保留已经持久化的 scope 映射字段：由 mission 推导出的 session 映射仍会在本轮 missions 操作中临时使用，但只有在成功重新扫描本机 sessions 根目录后才会持久化。被冻结的 missions 树会保留其仍然存活的 target mission 内容所证明的仅父级 session 映射；但若 sessions 树同时被冻结，scope 映射字段仍必须原样保留。
+- 根目录校验本身会把这类缺失／不可读根目录交给扫描阶段处理，而不是直接让同步失败；只有已存在且既不是目录也不是符号链接的源根目录（或解析结果不是目录的符号链接根目录）才是配置错误。
+- 根目录不可用与禁止的源符号链接错误不同：解析目标位于 `targetDir` 内的源符号链接条目，是按条目记录在 `SyncSummary.errors` 中的非致命 error；源根目录本身解析进 `targetDir` 时属于 blocked root，其仍然存活的证据会被保留。两者都不是 `rootUnavailable` warning，也不会因为链接不安全而冻结整棵树。
 - 本机源树（根目录及内部）的符号链接跟随；目标根目录下的符号链接文件和目录永远不会被跟随，会被忽略并发出警告。
 - 未知条目、默认根目录文件和不支持的类型会被忽略并发出警告；不安全的相对路径段会报错。
 - local → target 的 `parentSession` 必须严格指向父会话文件：sessions 目录 URI（`pi-session-sync://sessions/<portableName>`，无相对路径）或被引用目标存在但不是普通文件，都会在 staging 前作为文件错误停止同步；被引用文件不存在时，只要 URI、范围与路径段规则通过仍然有效。绝对 parent 必须解析到 `sessionsRoot` 内；Windows 风格/UNC、根外、missions 根、畸形或宽松拼写的值同样在 staging 前停止同步。

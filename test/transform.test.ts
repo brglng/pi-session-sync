@@ -768,6 +768,58 @@ describe("session file transformation", () => {
     expect(() => transformFileText("bad.json", input, "to-target", resolver)).toThrow();
   });
 
+  it("keeps mappable target absolute generic paths raw in bytes and canonical hash", () => {
+    // Phase 2: a target path field that is NOT a portable path is copied back
+    // to local verbatim, so its canonical hash must use the same raw bytes
+    // (user clarification). The mappable spelling is in-root, unlike the
+    // unmappable case above.
+    const inRootRecord = join(sessionsRoot, localName, "record.json");
+    const jsonlInput = `${JSON.stringify({ recordPath: inRootRecord, nested: { owner: inRootRecord } })}\n`;
+    const jsonl = transformFileText("raw.jsonl", jsonlInput, "to-local", resolver);
+    expect(jsonl.outputText).toBe(jsonlInput);
+    expect(jsonl.canonicalText).toBe(jsonlInput);
+    expect(
+      jsonl.warnings?.some((warning) =>
+        warning.includes(`Invalid target path preserved verbatim: ${inRootRecord}`),
+      ),
+    ).toBe(true);
+
+    const jsonInput = `${JSON.stringify({ recordPath: inRootRecord }, null, 2)}\n`;
+    const json = transformFileText("raw.json", jsonInput, "to-local", resolver);
+    expect(json.outputText).toBe(jsonInput);
+    expect(json.canonicalText).toBe(jsonInput);
+
+    const mdInput = [
+      "---",
+      `cwd: pi-session-sync://${portableName}`,
+      `recordPath: ${inRootRecord}`,
+      "---",
+      "body",
+    ].join("\n");
+    const md = transformFileText("raw.md", mdInput, "to-local", resolver);
+    // The portable cwd is rewritten to its local path; the nonportable generic
+    // absolute stays byte-identical and hashes raw.
+    expect(md.outputText).toContain(`cwd: ${cwd}`);
+    expect(md.outputText).toContain(`recordPath: ${inRootRecord}`);
+    expect(md.canonicalText).toContain(`recordPath: ${inRootRecord}`);
+    expect(md.canonicalText).not.toContain(`recordPath: pi-session-sync://sessions/`);
+  });
+
+  it("round-trips a portable generic URI through target->local->target with one canonical hash", () => {
+    const inRootRecord = join(sessionsRoot, localName, "record.json");
+    const uri = `pi-session-sync://sessions/${portableName}/record.json`;
+    const input = `${JSON.stringify({ cwd: `pi-session-sync://${portableName}`, recordPath: uri })}\n`;
+    const forward = transformFileText("round.jsonl", input, "to-local", resolver);
+    // Valid portable values are converted to their local absolute spelling.
+    expect(forward.outputText).toContain(inRootRecord);
+    const back = transformFileText("round.jsonl", forward.outputText, "to-target", resolver, {
+      portableName,
+    });
+    // Valid portable/strict values normalize identically from both sides, so
+    // the round trip never produces a false conflict from a hash asymmetry.
+    expect(back.canonicalText).toBe(forward.canonicalText);
+  });
+
   it("preserves invalid Markdown cwd and generic URI values in target-to-local only", () => {
     const unmappedInRoot = join(sessionsRoot, "unmapped", "session.jsonl");
     const input = [

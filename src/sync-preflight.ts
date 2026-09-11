@@ -673,6 +673,13 @@ export async function preflightDecisions(
     for (const [key, groupKey] of ctx.nestedReplacementSymlinkKeys) {
       ensureGroup(groupKey).replacementKeys.add(key);
     }
+    // Live old-label files retired by the replacement: their deletes are part
+    // of the same all-or-nothing group, so a blocked replacement keeps them on
+    // disk (and their state/evidence intact) instead of committing a one-sided
+    // deletion of content the reverted migration never replaced.
+    for (const [key, groupKey] of ctx.nestedStaleReplacementKeys ?? []) {
+      ensureGroup(groupKey).replacementKeys.add(key);
+    }
     for (const groupKey of ctx.nestedReplacementSymlinkLabels) ensureGroup(groupKey);
     // A nested label replacement is one logical group even for files the
     // migration itself did not produce: a newer-target first-seen file under
@@ -918,6 +925,11 @@ export async function preflightDecisions(
       const originalOld = ctx.nestedOriginalMigratedEntries.get(oldKey);
       if (originalOld !== undefined) nextEntries[oldKey] = originalOld;
       else delete nextEntries[oldKey];
+      // The restored old entry keeps its persisted generic mapping evidence.
+      // Record the old key so the evidence is carried forward even though the
+      // old physical file is absent this sync (its content could not be
+      // re-read); committing replacements must never take this path.
+      ctx.nestedBlockedReplacementRestoredKeys.add(oldKey);
       // A blocked replacement group must restore both original old-key and
       // replacement-key entries exactly, not drop the prior replacement state.
       if (restoredReplacementKeys.has(newKey)) continue;

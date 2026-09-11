@@ -29,6 +29,8 @@ describe("bidirectional session sync tombstones", () => {
       );
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "local-collision-machine",
@@ -64,6 +66,8 @@ describe("bidirectional session sync tombstones", () => {
       );
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: flatRoot,
           targetDir: fixture.targetDir,
           layout: "flat",
@@ -98,6 +102,8 @@ describe("bidirectional session sync tombstones", () => {
       );
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: flatRoot,
           targetDir: fixture.targetDir,
           layout: "flat",
@@ -121,6 +127,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(source, `---\ncwd: ${fixture.cwd}\n---\nsource\n`);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "case-file-machine",
@@ -144,6 +152,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(source, `---\ncwd: ${fixture.cwd}\n---\nsource\n`);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "case-ancestor-machine",
@@ -166,6 +176,8 @@ describe("bidirectional session sync tombstones", () => {
       await mkdir(join(targetTree, "same.jsonl"), { recursive: true });
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "type-machine",
@@ -189,6 +201,8 @@ describe("bidirectional session sync tombstones", () => {
       const localFile = join(flatRoot, relativePath);
       await writeFile(localFile, `${JSON.stringify({ cwd: firstCwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -197,6 +211,8 @@ describe("bidirectional session sync tombstones", () => {
       });
       await rm(localFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -213,6 +229,8 @@ describe("bidirectional session sync tombstones", () => {
 
       await writeFile(localFile, `${JSON.stringify({ cwd: secondCwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -244,6 +262,8 @@ describe("bidirectional session sync tombstones", () => {
       const fileB = join(flatB, relativePath);
       await writeFile(fileA, `${JSON.stringify({ cwd: firstCwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatA,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -251,6 +271,8 @@ describe("bidirectional session sync tombstones", () => {
         now: 80_000,
       });
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatB,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -259,6 +281,8 @@ describe("bidirectional session sync tombstones", () => {
       });
       await rm(fileB);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatB,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -276,6 +300,8 @@ describe("bidirectional session sync tombstones", () => {
       );
       await utimes(targetFile, 83, 83);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatA,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -303,6 +329,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localFile, `${JSON.stringify({ cwd: oldCwd, value: "old" })}\n`);
       await utimes(localFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -311,6 +339,8 @@ describe("bidirectional session sync tombstones", () => {
       });
       await rm(localFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -338,6 +368,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(newTargetFile, 3, 3);
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -360,6 +392,8 @@ describe("bidirectional session sync tombstones", () => {
       const source = join(fixture.localTree, "session.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         now: 71_500,
@@ -369,6 +403,8 @@ describe("bidirectional session sync tombstones", () => {
       await mkdir(targetFile);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           now: 72_500,
@@ -394,6 +430,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(fileA, `${JSON.stringify({ cwd: fixture.cwd, value: "old" })}\n`);
       await utimes(fileA, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsA,
         targetDir: fixture.targetDir,
         machineId: "manual-delete-a",
@@ -404,6 +442,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(fileB, `${JSON.stringify({ cwd: fixture.cwd, value: "old" })}\n`);
       await utimes(fileB, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "manual-delete-b",
@@ -416,6 +456,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(fileB, `${JSON.stringify({ cwd: fixture.cwd, value: "new" })}\n`);
       await utimes(fileB, 4, 4);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "manual-delete-b",
@@ -447,6 +489,8 @@ describe("bidirectional session sync tombstones", () => {
         await writeFile(fileA, baseText);
         await utimes(fileA, 1, 1);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: sessionsA,
           targetDir: fixture.targetDir,
           machineId: "fresh-touch-a",
@@ -463,6 +507,8 @@ describe("bidirectional session sync tombstones", () => {
         await writeFile(fileB, presentText);
         await utimes(fileB, 4, 4);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: sessionsB,
           targetDir: fixture.targetDir,
           machineId: "fresh-touch-b",
@@ -492,6 +538,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localAFile, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await utimes(localAFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "known-target-a",
@@ -499,6 +547,8 @@ describe("bidirectional session sync tombstones", () => {
       });
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "known-target-b",
@@ -507,6 +557,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localBFile, `${JSON.stringify({ cwd: fixture.cwd, value: "target-new" })}\n`);
       await utimes(localBFile, 7, 7);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "known-target-b",
@@ -515,6 +567,8 @@ describe("bidirectional session sync tombstones", () => {
 
       await rm(localAFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "known-target-a",
@@ -544,6 +598,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localAFile, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await utimes(localAFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "known-local-a",
@@ -551,6 +607,8 @@ describe("bidirectional session sync tombstones", () => {
       });
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "known-local-b",
@@ -559,6 +617,8 @@ describe("bidirectional session sync tombstones", () => {
       const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(targetFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "known-local-b",
@@ -569,6 +629,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(localAFile, 6, 6);
       await rm(targetFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "known-local-a",
@@ -606,6 +668,8 @@ describe("bidirectional session sync tombstones", () => {
         await writeFile(source, baseLocalText);
         await utimes(source, 1, 1);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: baseMachine,
@@ -614,6 +678,8 @@ describe("bidirectional session sync tombstones", () => {
 
         await rm(presentSide === "local" ? targetFile : source);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: baseMachine,
@@ -625,6 +691,8 @@ describe("bidirectional session sync tombstones", () => {
         await writeFile(presentPath, presentSide === "local" ? baseLocalText : baseTargetText);
         await utimes(presentPath, 4, 4);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: `fresh-tombstone-touch-${presentSide}`,
@@ -640,6 +708,8 @@ describe("bidirectional session sync tombstones", () => {
         );
         await utimes(presentPath, 6, 6);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: `fresh-tombstone-change-${presentSide}`,
@@ -687,6 +757,8 @@ describe("bidirectional session sync tombstones", () => {
         await utimes(touchedSource, 1, 1);
         await utimes(changedSource, 1, 1);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId,
@@ -709,6 +781,8 @@ describe("bidirectional session sync tombstones", () => {
           await utimes(changedTarget, 5, 5);
         }
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId,
@@ -750,6 +824,8 @@ describe("bidirectional session sync tombstones", () => {
         await writeFile(source, baseLocalText);
         await utimes(source, 1, 1);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId,
@@ -757,6 +833,8 @@ describe("bidirectional session sync tombstones", () => {
         });
         await rm(source);
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId,
@@ -779,6 +857,8 @@ describe("bidirectional session sync tombstones", () => {
           changedSide === "target" ? 4 : 5,
         );
         await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId,
@@ -799,6 +879,8 @@ describe("bidirectional session sync tombstones", () => {
       const source = join(fixture.localTree, "session.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cutoff-machine",
@@ -806,6 +888,8 @@ describe("bidirectional session sync tombstones", () => {
       });
       await rm(source);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cutoff-machine",
@@ -822,6 +906,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(source, 1, 1);
       await utimes(targetFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cutoff-machine",
@@ -844,12 +930,16 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localAFile, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await utimes(localAFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "unchanged-target-a",
         now: 2_000,
       });
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "unchanged-target-b",
@@ -858,6 +948,8 @@ describe("bidirectional session sync tombstones", () => {
       const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(targetFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "unchanged-target-b",
@@ -866,6 +958,8 @@ describe("bidirectional session sync tombstones", () => {
 
       await rm(localAFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "unchanged-target-a",
@@ -888,12 +982,16 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localAFile, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await utimes(localAFile, 5, 5);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "local-baseline-a",
         now: 6_000,
       });
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "local-baseline-b",
@@ -902,6 +1000,8 @@ describe("bidirectional session sync tombstones", () => {
       const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await utimes(targetFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: sessionsB,
         targetDir: fixture.targetDir,
         machineId: "local-baseline-b",
@@ -915,6 +1015,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(localAFile, 3, 3);
       await rm(targetFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "local-baseline-a",
@@ -934,6 +1036,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(localFile, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await utimes(localFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "unchanged-local-machine",
@@ -943,6 +1047,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(localFile, 3, 3);
       await rm(targetFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "unchanged-local-machine",
@@ -962,6 +1068,8 @@ describe("bidirectional session sync tombstones", () => {
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await utimes(source, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "mixed-tombstone-machine",
@@ -970,6 +1078,8 @@ describe("bidirectional session sync tombstones", () => {
       const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       await rm(source);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "mixed-tombstone-machine",
@@ -986,6 +1096,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(source, 100, 100);
       await utimes(targetFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "mixed-tombstone-new-machine",
@@ -1007,6 +1119,8 @@ describe("bidirectional session sync tombstones", () => {
       const source = join(fixture.localTree, "session.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd, value: "base" })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "equal-mtime-machine",
@@ -1018,6 +1132,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(source, targetMtime, targetMtime);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "equal-mtime-machine",
@@ -1034,6 +1150,8 @@ describe("bidirectional session sync tombstones", () => {
       await utimes(targetFile, targetMtime, targetMtime);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "equal-mtime-machine",

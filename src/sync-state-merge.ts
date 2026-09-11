@@ -128,11 +128,59 @@ export function mergeStateEntries(key: string, first: StateEntry, second: StateE
       configurable: true,
     });
   }
+  // Per-machine mission session mapping evidence merges per machine scope
+  // key: machine keys unique to one side union in; within one machine, owner
+  // keys unique to one side union in and the same owner key on both sides must
+  // carry the same portable name or the spelling-duplicate pair is
+  // incompatible.
+  const missionSessionMappings: Record<string, Record<string, string>> = Object.create(
+    null,
+  ) as Record<string, Record<string, string>>;
+  for (const machineKey of [
+    ...new Set([
+      ...Object.keys(first.missionSessionMappings ?? {}),
+      ...Object.keys(second.missionSessionMappings ?? {}),
+    ]),
+  ].sort()) {
+    const firstRecord = first.missionSessionMappings?.[machineKey] ?? {};
+    const secondRecord = second.missionSessionMappings?.[machineKey] ?? {};
+    const mergedRecord = Object.create(null) as Record<string, string>;
+    for (const [owner, portableName] of Object.entries(firstRecord)) {
+      const counterpart = secondRecord[owner];
+      if (counterpart !== undefined && counterpart !== portableName) {
+        incompatible(`mission session mapping for ${machineKey} owner ${owner}`);
+      }
+      Object.defineProperty(mergedRecord, owner, {
+        value: portableName,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    for (const [owner, portableName] of Object.entries(secondRecord)) {
+      if (Object.hasOwn(mergedRecord, owner)) continue;
+      Object.defineProperty(mergedRecord, owner, {
+        value: portableName,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    if (Object.keys(mergedRecord).length > 0) {
+      Object.defineProperty(missionSessionMappings, machineKey, {
+        value: mergedRecord,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+  }
   return {
     baselineHash,
     localSnapshots,
     target,
     tombstone,
     ...(Object.keys(cwdEvidence).length > 0 ? { cwdEvidence } : {}),
+    ...(Object.keys(missionSessionMappings).length > 0 ? { missionSessionMappings } : {}),
   };
 }

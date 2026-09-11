@@ -7,4 +7,5 @@ export {
   SyncFailure,
   type SyncOptions,
   type SyncSummary,
+  type ValidatedSyncRoots,
 } from "./sync-types.ts";

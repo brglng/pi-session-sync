@@ -32,6 +32,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(join(flatRoot, "star.jsonl"), `${JSON.stringify({ cwd: starCwd })}\n`);
       await writeFile(join(flatRoot, "dot.jsonl"), `${JSON.stringify({ cwd: dotCwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -62,6 +64,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(join(fixture.targetDir, "sessions", starName, "star.jsonl"), 60, 60);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -87,6 +91,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(join(flatRoot, "nested", "session.jsonl"), `${JSON.stringify({ cwd })}\n`);
       await writeFile(join(inheritedDir, "orphan.md"), "inherited orphan\n");
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -128,6 +134,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await writeFile(join(flatRoot, "nested", "orphan.md"), "direct orphan\n");
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -172,6 +180,8 @@ describe("bidirectional session sync flat layout", () => {
       await mkdir(flatRoot);
       await writeFile(rootFile, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -187,6 +197,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(descendantFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -204,6 +216,8 @@ describe("bidirectional session sync flat layout", () => {
         `pi-session-sync://sessions/${fixture.portableName}/missing/parent.jsonl`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -243,6 +257,8 @@ describe("bidirectional session sync flat layout", () => {
         `${JSON.stringify({ cwd: sourceCwd, parentSession: missingParent })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -283,6 +299,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -306,6 +324,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -321,6 +341,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(localReused, `${JSON.stringify({ cwd: newCwd, value: "new" })}\n`);
       await utimes(localReused, 3, 3);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -361,6 +383,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceTarget, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -372,6 +396,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(parentLocal, `${JSON.stringify({ cwd: parentCwd, value: "parent" })}\n`);
       await utimes(parentLocal, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -381,6 +407,8 @@ describe("bidirectional session sync flat layout", () => {
       await rm(parentLocal);
       await rm(parentTarget);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -397,6 +425,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(parentLocal, "{}\n");
       await utimes(parentLocal, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -429,6 +459,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(knownFile, `${JSON.stringify({ cwd: fixture.cwd, value: "known" })}\n`);
       await utimes(knownFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "nested-retry-mapping-machine",
@@ -447,6 +479,8 @@ describe("bidirectional session sync flat layout", () => {
       await utimes(unknownTargetFile, 3, 3);
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "nested-retry-mapping-machine",
@@ -492,6 +526,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(knownFile, `${JSON.stringify({ cwd: fixture.cwd, value: "known" })}\n`);
       await utimes(knownFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -523,6 +559,8 @@ describe("bidirectional session sync flat layout", () => {
       await utimes(unknownTargetFile, 3, 3);
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -565,6 +603,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -574,6 +614,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(localReused, `${JSON.stringify({ cwd: parentCwd, value: "live" })}\n`);
       await utimes(localReused, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -587,6 +629,8 @@ describe("bidirectional session sync flat layout", () => {
       const before = await readFile(statePath, "utf8");
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: flatRoot,
           targetDir: fixture.targetDir,
           layout: "flat",
@@ -624,6 +668,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -638,6 +684,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(oldTargetFile, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -647,6 +695,8 @@ describe("bidirectional session sync flat layout", () => {
       await rm(localOldFile);
       await rm(oldTargetFile);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -670,6 +720,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceFile, 5, 5);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -718,6 +770,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(targetSource, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -729,6 +783,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(localReused, `${JSON.stringify({ cwd: newCwd, value: "new" })}\n`);
       await utimes(localReused, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -775,6 +831,8 @@ describe("bidirectional session sync flat layout", () => {
         })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -806,6 +864,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(join(flatRoot, "second.jsonl"), `${JSON.stringify({ cwd: secondCwd })}\n`);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: flatRoot,
           targetDir: fixture.targetDir,
           layout: "flat",
@@ -837,6 +897,8 @@ describe("bidirectional session sync flat layout", () => {
         })}\n`,
       );
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -844,6 +906,8 @@ describe("bidirectional session sync flat layout", () => {
         now: 64_000,
       });
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -876,6 +940,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(targetFile, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "nested-parent-round-trip-machine",
@@ -894,6 +960,8 @@ describe("bidirectional session sync flat layout", () => {
       expect(scope?.directories[defaultSessionDirName(parentCwd)]).toBe(parentName);
 
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "nested-parent-round-trip-machine",
@@ -935,6 +1003,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceTarget, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "stale-nested-parent-machine",
@@ -949,6 +1019,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(replacementTarget, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "stale-nested-parent-machine",
@@ -991,6 +1063,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceTarget, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cwdless-stale-nested-machine",
@@ -1001,6 +1075,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(parentLocal, `${JSON.stringify({ cwd: parentCwd, value: "parent" })}\n`);
       await utimes(parentLocal, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cwdless-stale-nested-machine",
@@ -1009,6 +1085,8 @@ describe("bidirectional session sync flat layout", () => {
       await rm(parentLocal);
       await rm(parentTarget);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cwdless-stale-nested-machine",
@@ -1024,6 +1102,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(parentLocal, "{}\n");
       await utimes(parentLocal, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "cwdless-stale-nested-machine",
@@ -1072,6 +1152,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceTarget, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "overwrite-nested-parent-machine",
@@ -1087,6 +1169,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(replacementTarget, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         machineId: "overwrite-nested-parent-machine",
@@ -1131,6 +1215,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceTarget, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1146,6 +1232,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(replacementTarget, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1191,6 +1279,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(sourceTarget, 1, 1);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1207,6 +1297,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await utimes(replacementTarget, 2, 2);
       await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+
         sessionsRoot: flatRoot,
         targetDir: fixture.targetDir,
         layout: "flat",
@@ -1256,6 +1348,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: flatRoot,
           targetDir: fixture.targetDir,
           layout: "flat",
@@ -1286,6 +1380,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(targetFile, targetText);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "nested-parent-collision-machine",
@@ -1318,6 +1414,8 @@ describe("bidirectional session sync flat layout", () => {
       await writeFile(targetFile, targetText);
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "nested-parent-tree-same-cwd-machine",
@@ -1350,7 +1448,11 @@ describe("bidirectional session sync flat layout", () => {
       await mkdir(dirname(localFile), { recursive: true });
       await writeFile(localFile, `${JSON.stringify({ type: "session", id: "base", cwd })}\n`);
       await utimes(localFile, 1, 1);
-      await syncSessions({ ...options, now: 2_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 2_000,
+      });
       await rm(localFile);
 
       const staleText = `${JSON.stringify({
@@ -1374,9 +1476,13 @@ describe("bidirectional session sync flat layout", () => {
       const statePath = join(fixture.targetDir, STATE_FILE_NAME);
       const stateBeforeError = await readFile(statePath, "utf8");
 
-      await expect(syncSessions({ ...options, now: 4_000 })).rejects.toThrow(
-        /Replacement parentSession mapping collision/,
-      );
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 4_000,
+        }),
+      ).rejects.toThrow(/Replacement parentSession mapping collision/);
       expect(await readFile(oldTarget, "utf8")).toBe(staleText);
       expect(await readFile(replacementTarget, "utf8")).toBe(replacementText);
       expect(await readFile(statePath, "utf8")).toBe(stateBeforeError);
@@ -1407,7 +1513,11 @@ describe("bidirectional session sync flat layout", () => {
       await mkdir(sourceTree, { recursive: true });
       await writeFile(sourceLocal, `${JSON.stringify({ cwd: sourceCwd, value: "base" })}\n`);
       await utimes(sourceLocal, 1, 1);
-      await syncSessions({ ...options, now: 100_000 });
+      await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        ...options,
+        now: 100_000,
+      });
 
       const oldText = `${JSON.stringify({
         cwd: `pi-session-sync://${oldName}`,
@@ -1426,9 +1536,13 @@ describe("bidirectional session sync flat layout", () => {
 
       const statePath = join(fixture.targetDir, STATE_FILE_NAME);
       const stateBeforeError = await readFile(statePath, "utf8");
-      await expect(syncSessions({ ...options, now: 400_000 })).rejects.toThrow(
-        /Replacement parentSession mapping collision/,
-      );
+      await expect(
+        syncSessions({
+          missionsRoot: fixture.missionsRoot,
+          ...options,
+          now: 400_000,
+        }),
+      ).rejects.toThrow(/Replacement parentSession mapping collision/);
       expect(await readFile(oldTarget, "utf8")).toBe(oldText);
       expect(await readFile(replacementTarget, "utf8")).toBe(replacementText);
       expect(await readFile(sourceLocal, "utf8")).toBe(
@@ -1462,6 +1576,8 @@ describe("bidirectional session sync flat layout", () => {
       );
       await expect(
         syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "lossy-machine",

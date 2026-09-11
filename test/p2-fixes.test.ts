@@ -37,12 +37,15 @@ async function makeAliasedTargetFixture(suffix: string) {
   await mkdir(sessionsRoot, { recursive: true });
   await mkdir(lexicalTargetDir, { recursive: true });
   await mkdir(join(lexicalTargetDir, "sessions"), { recursive: true });
+  const missionsRoot = join(root, "missions");
+  await mkdir(missionsRoot, { recursive: true });
   const cwd = join(root, "alias-project");
   const localTree = join(sessionsRoot, defaultSessionDirName(cwd));
   await mkdir(localTree, { recursive: true });
   return {
     root,
     sessionsRoot,
+    missionsRoot,
     // The configured (lexical) targetDir spells through the alias.
     targetDir: lexicalTargetDir,
     // The physical targetDir the alias resolves to.
@@ -73,6 +76,8 @@ describe("reviewer block fixes", () => {
           "dir",
         );
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "physical-alias-dir-machine",
@@ -116,6 +121,8 @@ describe("reviewer block fixes", () => {
         );
         await symlink(seedFile, join(fixture.localTree, "leaf.jsonl"));
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "physical-alias-file-machine",
@@ -147,6 +154,8 @@ describe("reviewer block fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "dir-uri-jsonl-machine",
@@ -175,6 +184,8 @@ describe("reviewer block fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "dir-uri-json-machine",
@@ -201,6 +212,8 @@ describe("reviewer block fixes", () => {
         await writeFile(join(fixture.localTree, "note.md"), text);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "dir-uri-md-machine",
@@ -231,6 +244,8 @@ describe("reviewer block fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "nonregular-jsonl-machine",
@@ -261,6 +276,8 @@ describe("reviewer block fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "nonregular-json-machine",
@@ -289,6 +306,8 @@ describe("reviewer block fixes", () => {
         await writeFile(join(fixture.localTree, "note.md"), text);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "nonregular-md-machine",
@@ -314,6 +333,8 @@ describe("reviewer block fixes", () => {
           })}\n`,
         );
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "missing-parent-ok-machine",
@@ -355,6 +376,8 @@ describe("reviewer block fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "abs-dir-jsonl-machine",
@@ -380,6 +403,8 @@ describe("reviewer block fixes", () => {
           `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, parentSession: parentPath })}\n`,
         );
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "abs-file-jsonl-machine",
@@ -417,6 +442,8 @@ describe("reviewer block fixes", () => {
         );
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "uri-dir-json-machine",
@@ -445,6 +472,8 @@ describe("reviewer block fixes", () => {
         await writeFile(join(fixture.localTree, "note.md"), text);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "abs-dir-md-machine",
@@ -538,6 +567,8 @@ describe("reviewer block fixes", () => {
         await writeFile(statePath, seededState);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "malformed-entries-machine",
@@ -573,6 +604,8 @@ describe("reviewer block fixes", () => {
         await writeFile(statePath, seededState);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "malformed-scope-machine",
@@ -605,6 +638,8 @@ describe("reviewer block fixes", () => {
         await writeFile(statePath, seededState);
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "malformed-scopes-machine",
@@ -640,6 +675,8 @@ describe("reviewer block fixes", () => {
         await writeFile(statePath, oldStateText);
         const before = await readFile(statePath, "utf8");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "preserve-old-state-machine",
@@ -718,6 +755,8 @@ describe("reviewer block fixes", () => {
         );
         await symlink(join(fixture.targetDir, "sessions"), join(fixture.localTree, "evil"), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "error-channel-machine",
@@ -760,6 +799,8 @@ describe("reviewer block fixes", () => {
         // Top-level symlink tree A aliases the same real directory.
         await symlink(treeB, join(fixture.sessionsRoot, nameA), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "ordinary-alias-dedup-machine",
@@ -813,6 +854,8 @@ describe("reviewer block fixes", () => {
         // Top-level symlink tree A (non-canonical name) aliases tree B.
         await symlink(treeB, join(fixture.sessionsRoot, nameA), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "canonical-ordinary-machine",
@@ -870,6 +913,8 @@ describe("reviewer block fixes", () => {
         await symlink(realShared, join(fixture.sessionsRoot, nameA), "dir");
         await symlink(realShared, join(fixture.sessionsRoot, nameB), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "double-symlink-dedup-machine",
@@ -901,6 +946,8 @@ describe("reviewer block fixes", () => {
         // The representative is stable across a second sync: no re-writes,
         // no new trees, no deletions.
         const again = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "double-symlink-dedup-machine",
@@ -941,6 +988,8 @@ describe("reviewer block fixes", () => {
         await symlink(realShared, join(fixture.sessionsRoot, nameA), "dir");
         await symlink(realShared, join(fixture.sessionsRoot, nameZ), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "double-symlink-rehome-machine",
@@ -970,6 +1019,8 @@ describe("reviewer block fixes", () => {
         expect(scope?.directories[nameZ]).toBe(portableZ);
         expect(scope?.directories[nameA]).toBeUndefined();
         const again = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "double-symlink-rehome-machine",
@@ -1018,6 +1069,8 @@ describe("reviewer block fixes", () => {
         // A contains an internal alias to the ordinary top-level tree B.
         await symlink(treeB, join(treeA, "alias"), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "ordinary-alias-first-machine",
@@ -1085,6 +1138,8 @@ describe("reviewer block fixes", () => {
         await writeFile(join(treeA, "session.jsonl"), writeSession(cwdA, "a"));
         await symlink(treeB, join(treeA, "alias"), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "ordinary-alias-last-machine",
@@ -1142,6 +1197,8 @@ describe("reviewer block fixes", () => {
         await symlink(real, join(fixture.sessionsRoot, unsafeName), "dir");
         await expect(
           syncSessions({
+            missionsRoot: fixture.missionsRoot,
+
             sessionsRoot: fixture.sessionsRoot,
             targetDir: fixture.targetDir,
             machineId: "unsafe-symlink-name-machine",
@@ -1173,6 +1230,8 @@ describe("reviewer block fixes", () => {
         // warning.
         await symlink(fixture.targetDir, join(fixture.sessionsRoot, "unknown-evil"), "dir");
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "unknown-top-link-machine",
@@ -1217,6 +1276,8 @@ describe("reviewer block fixes", () => {
         const name = defaultSessionDirName(join(fixture.root, "seed-project"));
         await symlink(seedFile, join(fixture.sessionsRoot, name));
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "top-level-file-link-machine",
@@ -1241,6 +1302,8 @@ describe("reviewer block fixes", () => {
           writeSession(fixture.cwd, "safe"),
         );
         const first = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "top-takeover-machine",
@@ -1258,6 +1321,8 @@ describe("reviewer block fixes", () => {
           "dir",
         );
         const second = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "top-takeover-machine",
@@ -1320,6 +1385,8 @@ describe("reviewer block fixes", () => {
           }),
         );
         const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "cwdless-alias-machine",
@@ -1341,6 +1408,8 @@ describe("reviewer block fixes", () => {
         expect(scopeAfter?.directories[nameA]).toBeUndefined();
         // A second sync is stable: no re-mapping, no deletion.
         const again = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
+
           sessionsRoot: fixture.sessionsRoot,
           targetDir: fixture.targetDir,
           machineId: "cwdless-alias-machine",
