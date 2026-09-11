@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
-import { lstat, mkdir, readdir, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { lstat, mkdir, readdir, readlink, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { nativePathInsideOrEqual, realPathWithMissingSuffix } from "./sync-native.ts";
 import { errorMessage } from "./sync-snapshots.ts";
 import { makeValidatedSyncRoots, type ValidatedSyncRoots } from "./validated-roots.ts";
@@ -47,6 +47,49 @@ function assertNoOverlap(name: string, first: string, second: string): void {
 }
 
 /**
+ * Resolve the physical identity of one configured source root for overlap
+ * comparison. This extends `realPathWithMissingSuffix` for the source-root
+ * case: a symlinked root whose link target does not exist yet is a dangling
+ * symlink, which `realpath` reports as ENOENT and which the generic helper
+ * would leave as an opaque leaf name. Following that leaf link to its target
+ * (with a depth bound so a symlink cycle cannot loop) lets two source roots
+ * that alias each other through a not-yet-created target still be detected.
+ * Missing suffix components below an existing ancestor resolve as far as they
+ * exist.
+ */
+async function sourceRootRealPath(rootPath: string): Promise<string> {
+  const fallback = resolve(rootPath);
+  let current = fallback;
+  const suffix: string[] = [];
+  for (let depth = 0; depth < 40; depth += 1) {
+    try {
+      const resolvedCurrent = await realpath(current);
+      return resolve(resolvedCurrent, ...suffix);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return fallback;
+      const parent = dirname(current);
+      if (parent === current) return fallback;
+      let linkTarget: string | undefined;
+      try {
+        const info = await lstat(current);
+        if (info.isSymbolicLink()) {
+          linkTarget = resolve(dirname(current), await readlink(current));
+        }
+      } catch {
+        // Uninspectable leaf: fall through to the parent-name ascent.
+      }
+      if (linkTarget !== undefined) {
+        current = linkTarget;
+        continue;
+      }
+      suffix.unshift(basename(current));
+      current = parent;
+    }
+  }
+  return fallback;
+}
+
+/**
  * Report old-layout or unknown direct entries under `targetDir` that the
  * current layout does not participate in. The current version synchronizes
  * only the `sessions` and `missions` child roots plus the state file; old
@@ -77,11 +120,20 @@ export async function collectTargetDirLegacyWarnings(
  *
  * `targetDir` itself must exist as a real, non-symlink directory (ancestor
  * symlinks remain allowed). Overlap validation covers both local source roots
- * (sessions and missions) against the target parent and both target child
- * roots, and runs before any target child is created so a misconfiguration
- * never writes. Missing source roots still participate in the lexical overlap
- * check: a source path that would land inside a target root is a configuration
- * error even when nothing exists there yet. The sessions child root
+ * (sessions and missions) against EACH OTHER and against the target parent and
+ * both target child roots, and runs before any target child is created so a
+ * misconfiguration never writes. Every pass is both lexical and real-path, so
+ * a symlinked source root is still rejected when it aliases the other source
+ * root, while allowed source symlinks pointing outside the configured roots
+ * stay valid. The two source roots against EACH OTHER additionally follow a
+ * dangling source-root symlink to its link target (resolved as far as it
+ * exists); the source-vs-target passes deliberately keep the missing-suffix
+ * identity so a source link that only resolves into a target child created
+ * later stays the scanner's nonfatal forbidden-source error. Missing source
+ * roots still participate in the lexical overlap check: a
+ * source path that would land inside a target root — or inside/around the
+ * other source root — is a configuration error even when nothing exists there
+ * yet. The sessions child root
  * `targetDir/sessions` is created when missing and must never be a symlink or
  * a non-directory once present; the `targetDir/missions` child root is created
  * under the same rules. `missionsRoot` is REQUIRED: phase-2 two-root
@@ -136,7 +188,12 @@ export async function validateSyncRoots(
   // would land inside a target root can never be created by this sync. Both
   // source roots are checked against the target parent and BOTH target child
   // roots, so a sessions source landing inside the missions child (or vice
-  // versa) is caught before any directory is created.
+  // versa) is caught before any directory is created. The two source roots are
+  // also checked against EACH OTHER: overlapping sessions and missions trees
+  // would scan the same local files under two logical root namespaces and let
+  // their target/local commits conflict, so that is a configuration error
+  // regardless of the target layout.
+  assertNoOverlap("Pi sessions root and missions root", sourcePath, missionsSourcePath);
   assertNoOverlap("Pi sessions root and target dir", sourcePath, targetPath);
   assertNoOverlap("Pi sessions root and target sessions root", sourcePath, sessionsChild);
   assertNoOverlap("Pi sessions root and target missions root", sourcePath, missionsChild);
@@ -147,7 +204,10 @@ export async function validateSyncRoots(
   // Real-path overlap validation: symlinked source roots and symlinked target
   // ancestors are resolved so a physical overlap (through symlinks) is caught
   // even when the lexical spellings differ. Missing suffix paths are resolved
-  // as far as they exist.
+  // as far as they exist. Source-vs-target checks use the missing-suffix
+  // identity on purpose: a source symlink that only resolves into a target
+  // child created LATER is left to the scanner, which reports it as the
+  // nonfatal forbidden-source error instead of a configuration hard error.
   const realSource = await realPathWithMissingSuffix(sourcePath);
   const realTarget = await realPathWithMissingSuffix(targetPath);
   const realSessionsChild = await realPathWithMissingSuffix(sessionsChild);
@@ -155,10 +215,20 @@ export async function validateSyncRoots(
   assertNoOverlap("Pi sessions root and target sessions root", realSource, realSessionsChild);
   const realMissions = await realPathWithMissingSuffix(missionsSourcePath);
   const realMissionsChild = await realPathWithMissingSuffix(missionsChild);
-  assertNoOverlap("Pi sessions root and target dir", realMissions, realTarget);
+  assertNoOverlap("Missions root and target dir", realMissions, realTarget);
   assertNoOverlap("Pi sessions root and target missions root", realSource, realMissionsChild);
   assertNoOverlap("Missions root and target sessions root", realMissions, realSessionsChild);
   assertNoOverlap("Missions root and target missions root", realMissions, realMissionsChild);
+  // Source-vs-source real-path check. The two source roots are independent of
+  // the target children, so a dangling source-root symlink is FOLLOWED here:
+  // two roots aliasing one another through a not-yet-existing target must be
+  // rejected even though the source-target race above intentionally defers a
+  // dangling source link to the scanner.
+  assertNoOverlap(
+    "Pi sessions root and missions root",
+    await sourceRootRealPath(sourcePath),
+    await sourceRootRealPath(missionsSourcePath),
+  );
 
   // Inspect both target child roots BEFORE creating either one: a symlink or
   // non-directory conflict in one child must be detected before the other

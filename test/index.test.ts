@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import extension from "../src/index.ts";
+import { MACHINE_ID_FILE_NAME } from "../src/machine.ts";
 import { defaultSessionDirName, portableSessionDirName } from "../src/portable-name.ts";
 
 async function makeTempRoot(prefix: string): Promise<string> {
@@ -23,6 +24,67 @@ async function makeTempRoot(prefix: string): Promise<string> {
 }
 
 describe("Pi extension registration", () => {
+  it("rejects overlapping source roots before writing machine identity or target layout", async () => {
+    const root = await makeTempRoot("pi-session-sync-root-overlap-");
+    const previousAgent = process.env.PI_CODING_AGENT_DIR;
+    const previousSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const agentDir = join(root, "agent");
+    const targetDir = join(root, "target");
+    // sessions root (from the explicit env override) === missions root
+    const missionsRoot = join(agentDir, "missions");
+    try {
+      await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
+      await mkdir(missionsRoot, { recursive: true });
+      await mkdir(targetDir);
+      await writeFile(
+        join(agentDir, "extensions", "pi-session-sync", "config.json"),
+        JSON.stringify({ targetDir }),
+      );
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      process.env.PI_CODING_AGENT_SESSION_DIR = missionsRoot;
+
+      const notifications: string[] = [];
+      const commands = new Map<string, unknown>();
+      const pi = {
+        on() {},
+        registerCommand(name: string, definition: unknown) {
+          commands.set(name, definition);
+        },
+      } as unknown as ExtensionAPI;
+      extension(pi);
+      const definition = commands.get("session-sync") as {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      };
+      const context = {
+        cwd: join(root, "project"),
+        waitForIdle: async () => {},
+        ui: {
+          notify(message: string) {
+            notifications.push(message);
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      await definition.handler("", context);
+
+      expect(notifications[0]).toContain("synchronization failed");
+      expect(notifications[0]).toContain("overlap");
+      // The overlap is rejected before the machine identity is loaded, so the
+      // machine id is never minted and the target child roots stay uncreated.
+      await expect(
+        lstat(join(agentDir, "extensions", "pi-session-sync", MACHINE_ID_FILE_NAME)),
+      ).rejects.toThrow();
+      await expect(lstat(join(targetDir, "sessions"))).rejects.toThrow();
+      await expect(lstat(join(targetDir, "missions"))).rejects.toThrow();
+      await expect(lstat(join(targetDir, ".pi-session-sync-state.json"))).rejects.toThrow();
+    } finally {
+      if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgent;
+      if (previousSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessions;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reports scan warnings when command sync fails", async () => {
     const root = await makeTempRoot("pi-session-sync-command-");
     const previousAgent = process.env.PI_CODING_AGENT_DIR;

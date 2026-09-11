@@ -120,6 +120,35 @@ function safeRecord<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>;
 }
 
+/**
+ * True only when `value` carries exactly the expected own keys (order
+ * independent). Used to reject unknown/missing fields instead of silently
+ * dropping them on rewrite: a persisted state object that is not the exact
+ * current shape is malformed current state, not content to discard.
+ */
+function hasExactOwnKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  if (keys.length !== expected.length) return false;
+  const wanted = [...expected].sort();
+  return keys.every((key, index) => key === wanted[index]);
+}
+
+/**
+ * True only when every own key is in `allowed` and every key in `required` is
+ * present. Used for objects with optional fields: unknown fields are rejected
+ * (never silently dropped) while absent optional fields stay valid.
+ */
+function hasOwnKeysWithin(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  required: readonly string[],
+): boolean {
+  const allowedSet = new Set(allowed);
+  const keys = Object.keys(value);
+  if (!keys.every((key) => allowedSet.has(key))) return false;
+  return required.every((key) => Object.hasOwn(value, key));
+}
+
 /** Own-property write so prototype names stay ordinary own data keys. */
 function setOwnRecordValue<T>(record: Record<string, T>, key: string, value: T): void {
   Object.defineProperty(record, key, {
@@ -130,9 +159,29 @@ function setOwnRecordValue<T>(record: Record<string, T>, key: string, value: T):
   });
 }
 
+const SNAPSHOT_FIELDS = ["hash", "mtimeMs"] as const;
+const TOMBSTONE_FIELDS = ["side", "at"] as const;
+const STATE_ENTRY_FIELDS = [
+  "baselineHash",
+  "localSnapshots",
+  "target",
+  "tombstone",
+  "cwdEvidence",
+  "missionSessionMappings",
+] as const;
+const STATE_ENTRY_REQUIRED_FIELDS = [
+  "baselineHash",
+  "localSnapshots",
+  "target",
+  "tombstone",
+] as const;
+
 function parseSnapshot(value: unknown, label: string): SideSnapshot | null {
   if (value === null) return null;
-  if (!isRecord(value) || typeof value.hash !== "string" || typeof value.mtimeMs !== "number") {
+  if (!isRecord(value) || !hasExactOwnKeys(value, SNAPSHOT_FIELDS)) {
+    throw new Error(`Invalid ${label} snapshot in pi-session-sync state`);
+  }
+  if (typeof value.hash !== "string" || typeof value.mtimeMs !== "number") {
     throw new Error(`Invalid ${label} snapshot in pi-session-sync state`);
   }
   if (!Number.isFinite(value.mtimeMs)) {
@@ -143,10 +192,10 @@ function parseSnapshot(value: unknown, label: string): SideSnapshot | null {
 
 function parseTombstone(value: unknown): Tombstone | null {
   if (value === null) return null;
-  if (
-    !isRecord(value) ||
-    (value.side !== "local" && value.side !== "target" && value.side !== "both")
-  ) {
+  if (!isRecord(value) || !hasExactOwnKeys(value, TOMBSTONE_FIELDS)) {
+    throw new Error("Invalid tombstone in pi-session-sync state");
+  }
+  if (value.side !== "local" && value.side !== "target" && value.side !== "both") {
     throw new Error("Invalid tombstone in pi-session-sync state");
   }
   if (typeof value.at !== "number" || !Number.isFinite(value.at)) {
@@ -157,6 +206,12 @@ function parseTombstone(value: unknown): Tombstone | null {
 
 function parseEntry(value: unknown): StateEntry {
   if (!isRecord(value)) throw new Error("Invalid entry in pi-session-sync state");
+  // Current state never drops an unknown entry field on rewrite: an unknown
+  // field means the file is not the exact current format, so it is malformed
+  // current state rather than content to silently discard.
+  if (!hasOwnKeysWithin(value, STATE_ENTRY_FIELDS, STATE_ENTRY_REQUIRED_FIELDS)) {
+    throw new Error("Invalid entry fields in pi-session-sync state");
+  }
   const baselineHash = value.baselineHash;
   if (baselineHash !== null && typeof baselineHash !== "string") {
     throw new Error("Invalid baseline hash in pi-session-sync state");
@@ -344,6 +399,25 @@ function parseGenericEvidence(
   return Object.keys(result).length > 0 ? result : undefined;
 }
 
+const STATE_TOP_LEVEL_FIELDS = ["version", "scopes", "entries"] as const;
+const STATE_SCOPE_FIELDS = [
+  "layout",
+  "sessionsRoot",
+  "namingConfig",
+  "directories",
+  "flatFiles",
+  "genericDirectories",
+  "genericFlatFiles",
+  "genericEvidence",
+] as const;
+const STATE_SCOPE_REQUIRED_FIELDS = [
+  "layout",
+  "sessionsRoot",
+  "namingConfig",
+  "directories",
+  "flatFiles",
+] as const;
+
 function parseState(value: unknown): SyncState {
   if (!isRecord(value) || value.version !== 1) {
     throw new Error("pi-session-sync state must be a version 1 JSON object");
@@ -353,7 +427,17 @@ function parseState(value: unknown): SyncState {
   }
   const scopes = safeRecord<StateScope>();
   for (const [scopeKey, rawScope] of Object.entries(value.scopes)) {
-    if (!isRecord(rawScope) || (rawScope.layout !== "nested" && rawScope.layout !== "flat")) {
+    if (!isRecord(rawScope)) {
+      throw new Error(`Invalid session scope in pi-session-sync state: ${scopeKey}`);
+    }
+    // Unknown scope fields are rejected instead of dropped, so no persisted
+    // evidence (current or stage-2 generic) is ever silently rewritten away.
+    if (!hasOwnKeysWithin(rawScope, STATE_SCOPE_FIELDS, STATE_SCOPE_REQUIRED_FIELDS)) {
+      throw new Error(
+        `Invalid pi-session-sync state scope fields (unknown or missing field): ${scopeKey}`,
+      );
+    }
+    if (rawScope.layout !== "nested" && rawScope.layout !== "flat") {
       throw new Error(`Invalid session scope in pi-session-sync state: ${scopeKey}`);
     }
     if (typeof rawScope.sessionsRoot !== "string" || rawScope.sessionsRoot.length === 0) {
@@ -363,6 +447,21 @@ function parseState(value: unknown): SyncState {
       throw new Error(`Invalid mappings in pi-session-sync state scope: ${scopeKey}`);
     }
     const namingConfig = parseNamingConfig(rawScope.namingConfig, scopeKey);
+    // Layout-specific generic evidence must match the scope layout: a nested
+    // scope never writes `genericFlatFiles` and a flat scope never writes
+    // `genericDirectories`, so a mismatched field is malformed current state.
+    // Silently dropping (or rewriting away) it would discard persisted evidence
+    // without telling the user.
+    if (rawScope.layout === "flat" && rawScope.genericDirectories !== undefined) {
+      throw new Error(
+        `Generic directory mappings are not valid in a flat pi-session-sync state scope: ${scopeKey}`,
+      );
+    }
+    if (rawScope.layout === "nested" && rawScope.genericFlatFiles !== undefined) {
+      throw new Error(
+        `Generic flat file mappings are not valid in a nested pi-session-sync state scope: ${scopeKey}`,
+      );
+    }
     const directories = safeRecord<string>();
     for (const [localName, portableName] of Object.entries(rawScope.directories)) {
       if (typeof portableName !== "string" || portableName.length === 0) {
@@ -434,8 +533,9 @@ export type LoadStateResult =
  * - Old-shaped entry keys are rootless (they predate the mandatory
  *   `sessions/` / `missions/` root namespace).
  * - Old-shaped scopes predate the normalized `namingConfig` field that every
- *   current writer always persists; a version-1 scope without it is
- *   structurally old-schema regardless of whether its maps are empty.
+ *   current writer always persists, but must still carry the old mapping
+ *   skeleton (see `isOldSchemaScope`); an object without `namingConfig` that
+ *   does not match that shape is unpredictable content, not old state.
  */
 function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mixed" | "current" {
   // A malformed `entries` or `scopes` container is malformed CURRENT state no
@@ -462,12 +562,13 @@ function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mix
   for (const rawScope of Object.values(parsed.scopes)) {
     if (!isRecord(rawScope)) continue;
     if (rawScope.namingConfig !== undefined) currentScopes += 1;
-    else if (hasStage2ScopeFields(rawScope)) mixedScopes += 1;
-    else oldScopes += 1;
+    else if (isOldSchemaScope(rawScope)) oldScopes += 1;
+    // A scope that lacks `namingConfig` but is not the exact old mapping
+    // skeleton is unpredictable content: it is contradictory (mixed) state
+    // and must hard-error instead of being warn-and-ignored as old and
+    // silently dropped (which would also drop stage-2 generic evidence).
+    else mixedScopes += 1;
   }
-  // A scope that lacks the current `namingConfig` but already carries stage-2
-  // generic evidence fields is contradictory (mixed) content: hard-error
-  // instead of treating it as old and silently dropping the evidence.
   if (mixedScopes > 0) return "mixed";
   if (rootlessEntries === 0 && oldScopes === 0) return "current";
   if (namespacedEntries > 0 || currentScopes > 0) return "mixed";
@@ -475,24 +576,28 @@ function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mix
 }
 
 /**
- * Recognizable old/inapplicable state kept for the convenience of the current
- * version's own users. Nothing in this version writes these shapes; they are
- * recognized so they can be report-and-ignore without ever misclassifying a
- * malformed current-format state file. A mixed current-plus-old topology is
- * never "old": it is malformed current state and is rejected by the caller.
+ * Recognizable old/inapplicable state is kept for the convenience of the
+ * current version's own users: nothing in this version writes these shapes,
+ * they are recognized only so they can be report-and-ignore without ever
+ * misclassifying a malformed current-format state file.
+ *
+ * Minimum shape of a version-1 scope written before the normalized
+ * `namingConfig` field existed: EXACTLY `layout`, `sessionsRoot`,
+ * `directories`, and `flatFiles` — nothing else. Only this exact skeleton can
+ * be classified as unambiguously old. An arbitrary object without
+ * `namingConfig` (for example `{}` or one carrying any unknown field, such as
+ * the stage-2 generic evidence fields) is unpredictable content and must
+ * hard-error as mixed/current state instead of being warn-and-ignored and
+ * silently dropped.
  */
-/**
- * Stage-2 generic sessions-URI evidence fields never existed in the old schema.
- * A scope that lacks `namingConfig` but carries any of them is therefore not
- * unambiguously old-shaped: it is mixed/current content and must hard-error
- * instead of being warn-and-ignored (which would silently drop the evidence
- * and later overwrite it).
- */
-function hasStage2ScopeFields(rawScope: Record<string, unknown>): boolean {
+function isOldSchemaScope(rawScope: Record<string, unknown>): boolean {
   return (
-    rawScope.genericDirectories !== undefined ||
-    rawScope.genericFlatFiles !== undefined ||
-    rawScope.genericEvidence !== undefined
+    hasExactOwnKeys(rawScope, ["layout", "sessionsRoot", "directories", "flatFiles"]) &&
+    (rawScope.layout === "nested" || rawScope.layout === "flat") &&
+    typeof rawScope.sessionsRoot === "string" &&
+    rawScope.sessionsRoot.length > 0 &&
+    isRecord(rawScope.directories) &&
+    isRecord(rawScope.flatFiles)
   );
 }
 
@@ -516,7 +621,7 @@ function isRecognizedOldState(
   }
   if (isRecord(parsed.scopes)) {
     for (const [scopeKey, rawScope] of Object.entries(parsed.scopes)) {
-      if (isRecord(rawScope) && rawScope.namingConfig === undefined) {
+      if (isRecord(rawScope) && isOldSchemaScope(rawScope)) {
         details.push(`old rootless scope ${scopeKey}`);
       }
     }
@@ -570,6 +675,12 @@ export async function loadState(path: string): Promise<LoadStateResult> {
     throw new Error(
       `Invalid pi-session-sync state (unsupported version ${String(parsed.version)}): ${path}`,
     );
+  }
+  // Unknown top-level fields are malformed current state: rewriting the file
+  // would silently drop them. Reject before old recognition so a file that is
+  // otherwise old-shaped plus an unknown field is not warn-and-ignored either.
+  if (!hasExactOwnKeys(parsed, STATE_TOP_LEVEL_FIELDS)) {
+    throw new Error(`Invalid pi-session-sync state (unknown or missing top-level fields): ${path}`);
   }
   const recognizedOld = isRecognizedOldState(parsed);
   if (recognizedOld === "mixed") {

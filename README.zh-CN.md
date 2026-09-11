@@ -150,7 +150,8 @@ target → local 复制时，非可移植值原样保留并提示 warning，不�
 
 ### 验证与提交边界
 
-- `sessionsRoot` 允许是符号链接（本机源根目录跟随）；`targetDir` 必须是已存在的真实、非符号链接目录，且两者不得重叠。
+- `sessionsRoot` 与 `<agentDir>/missions` 源根目录都允许是符号链接（本机源根目录跟随）；`targetDir` 必须是已存在的真实、非符号链接目录。两个源根目录之间（sessions ↔ missions），以及每个源根目录与 `targetDir`、两个目标子目录（`targetDir/sessions`、`targetDir/missions`）之间都不得重叠：词法路径或真实路径的重叠都属于配置硬错误，会在创建任何子目录、写入 machine identity 或状态文件之前停止同步。
+- 唯一刻意保留的例外是「validation 期间创建目标子目录」造成的竞态：如果源根目录符号链接的链接目标只解析到根目录校验在 real-path 重叠检查之后才创建的目标子目录，则不算硬重叠；scanner 会把它作为非致命 forbidden-source error 记入 `SyncSummary.errors` 并跳过，其它安全文件继续同步。源根目录之间的重叠仍然会跟随悬空链接，保持为配置硬错误。
 - 不检查目标目录祖先的符号链接，包括 macOS 的 `/var` 和 `/tmp` 别名。
 - 本机源根目录（`sessionsRoot` 或 `<agentDir>/missions`）独立判定，单棵不可用不会影响另一棵树：安全的那棵树继续完成自己的文件同步、删除与 tombstone 传播、空目录清理。缺失或悬空（dangling）的源根目录（路径不存在，或源根目录符号链接的目标无法解析）会提示 missing-root warning，并产生 `rootPresent:false` 与 `rootUnavailable:false`。已存在但无法检查或读取的源根目录（`EACCES`、`EPERM`、`ENOTDIR`、`ELOOP`／符号链接循环，或其它不可读错误）会提示对应的根目录 warning，并产生 `rootUnavailable:true`。两者都只把该源根目录视为本轮 UNAVAILABLE。
 - 不可用的源根目录会冻结它自己那棵目录树：不会从缺失／不可读的根目录推导任何文件决策、删除、tombstone、状态条目变更或空目录清理，也不会代为写入或删除该树的本机侧与 target 侧。被冻结的 sessions 树还会原样保留已经持久化的 scope 映射字段：由 mission 推导出的 session 映射仍会在本轮 missions 操作中临时使用，但只有在成功重新扫描本机 sessions 根目录后才会持久化。被冻结的 missions 树会保留其仍然存活的 target mission 内容所证明的仅父级 session 映射；但若 sessions 树同时被冻结，scope 映射字段仍必须原样保留。

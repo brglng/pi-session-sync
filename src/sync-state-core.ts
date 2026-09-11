@@ -15,7 +15,12 @@ import {
   nativeNameIdentity,
 } from "./session-paths.ts";
 import type { StateEntry, StateScope, SyncState } from "./state.ts";
-import { recordValueForNativeName, sameCwdPath, sameNativeName } from "./sync-native.ts";
+import {
+  nativePathIdentity,
+  recordValueForNativeName,
+  sameCwdPath,
+  sameNativeName,
+} from "./sync-native.ts";
 import { MISSIONS_LOGICAL_KEY_PREFIX, SESSIONS_LOGICAL_KEY_PREFIX } from "./sync-paths.ts";
 import { canonicalStatePortableName } from "./sync-state-normalize.ts";
 
@@ -261,14 +266,26 @@ function portableSemanticsEqual(
  * identity), while foreign records are validated structurally. Malformed
  * current evidence hard-errors before scanning/staging so a corrupt label
  * can never silently re-encode a cwd under the wrong semantic portable name.
+ *
+ * The current machine's keys are also REWRITTEN to their native-identity
+ * spelling (`resolve`, case-folded on Windows). Evidence lookups index the
+ * record by that same identity, so a persisted key like
+ * `/tmp/project/../project` would pass the native comparison above yet miss
+ * the exact lookup and silently lose the semantic label. Two
+ * native-equivalent keys that carry different portable names are a conflict
+ * (hard error); foreign records are preserved verbatim.
  */
 function validateEntryCwdEvidence(
   entry: StateEntry,
   namingOptions: PortableNameOptions,
   machineScopeKey: string,
+  root: "sessions" | "missions",
 ): void {
   const cwdEvidence = entry.cwdEvidence;
   if (cwdEvidence === undefined) return;
+  if (root !== "missions") {
+    throw new Error("Cwd evidence is only valid on missions entries in pi-session-sync state");
+  }
   const safeKey = (key: string, context: string): void => {
     if (key.length === 0 || [...key].some((character) => /\p{Cc}/u.test(character))) {
       throw new Error(`Invalid ${context} in pi-session-sync cwd evidence`);
@@ -277,6 +294,9 @@ function validateEntryCwdEvidence(
   for (const [machineKey, record] of Object.entries(cwdEvidence)) {
     safeKey(machineKey, "machine key");
     const isCurrentMachine = machineKey === machineScopeKey;
+    const canonicalRecord = isCurrentMachine
+      ? (Object.create(null) as Record<string, string>)
+      : undefined;
     for (const [cwd, portableName] of Object.entries(record)) {
       safeKey(cwd, "cwd evidence path");
       // A cwd evidence key is an absolute, cross-platform-safe path spelling
@@ -299,7 +319,28 @@ function validateEntryCwdEvidence(
             `Cwd evidence label does not match its path under native identity: ${machineKey}`,
           );
         }
+        const identity = nativePathIdentity(cwd);
+        const existing = canonicalRecord?.[identity];
+        if (existing !== undefined && existing !== portableName) {
+          throw new Error(
+            `Conflicting cwd evidence labels for native-equivalent paths: ${machineKey}`,
+          );
+        }
+        Object.defineProperty(canonicalRecord, identity, {
+          value: portableName,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
       }
+    }
+    if (canonicalRecord !== undefined) {
+      Object.defineProperty(cwdEvidence, machineKey, {
+        value: canonicalRecord,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
     }
   }
 }
@@ -312,7 +353,7 @@ export function validateStateEntries(
 ): void {
   for (const [key, entry] of Object.entries(state.entries)) {
     const parsed = parseLogicalKey(key, namingOptions);
-    validateEntryCwdEvidence(entry, namingOptions, machineScopeKey ?? "");
+    validateEntryCwdEvidence(entry, namingOptions, machineScopeKey ?? "", parsed.root);
     validateEntryMissionSessionMappings(
       entry,
       namingOptions,
