@@ -2,13 +2,6 @@
 
 import { lstat, readFile } from "node:fs/promises";
 import type { SessionLayout } from "./config.ts";
-import {
-  decodePortableSessionDirName,
-  isStrictPortableSessionDirName,
-  normalizePortableNameOptions,
-  type PortableNameOptions,
-  portableNameOptionsFingerprint,
-} from "./portable-name.ts";
 import { isCrossPlatformSafePathSegment } from "./session-paths.ts";
 
 export interface SideSnapshot {
@@ -54,7 +47,14 @@ export interface StateEntry {
 export interface StateScope {
   layout: SessionLayout;
   sessionsRoot: string;
-  namingConfig: PortableNameOptions;
+  /**
+   * Current scope-format marker. Naming configuration is deliberately NOT
+   * persisted (v0.4.2): cross-machine sync must never compare homeLabel,
+   * rootLabel, extraPrefixes, or any naming config, so no config snapshot is
+   * ever saved. A legacy scope carrying `namingConfig` is still accepted on
+   * read and dropped on rewrite.
+   */
+  format: 2;
   directories: Record<string, string>;
   flatFiles: Record<string, string>;
   /**
@@ -94,15 +94,11 @@ export interface SyncState {
   entries: Record<string, StateEntry>;
 }
 
-export function emptyScope(
-  layout: SessionLayout,
-  sessionsRoot: string,
-  namingConfig: Partial<PortableNameOptions> | undefined = undefined,
-): StateScope {
+export function emptyScope(layout: SessionLayout, sessionsRoot: string): StateScope {
   return {
+    format: 2,
     layout,
     sessionsRoot,
-    namingConfig: normalizePortableNameOptions(namingConfig),
     directories: safeRecord<string>(),
     flatFiles: safeRecord<string>(),
   };
@@ -296,47 +292,20 @@ function parseEntry(value: unknown): StateEntry {
   };
 }
 
-function parseNamingConfig(value: unknown, scopeKey: string): PortableNameOptions {
-  if (!isRecord(value)) {
-    throw new Error(`Invalid naming config in pi-session-sync state scope: ${scopeKey}`);
-  }
-  if (
-    typeof value.homeLabel !== "string" ||
-    typeof value.rootLabel !== "string" ||
-    !isRecord(value.extraPrefixes)
-  ) {
-    throw new Error(`Invalid naming config in pi-session-sync state scope: ${scopeKey}`);
-  }
-  try {
-    const fields = Object.keys(value).sort();
-    if (fields.join("\0") !== "extraPrefixes\0homeLabel\0rootLabel") {
-      throw new Error("naming config contains unknown or missing fields");
-    }
-    return normalizePortableNameOptions({
-      homeLabel: value.homeLabel,
-      rootLabel: value.rootLabel,
-      extraPrefixes: value.extraPrefixes as Record<string, string>,
-    });
-  } catch (error) {
-    throw new Error(
-      `Invalid naming config in pi-session-sync state scope: ${scopeKey}: ${String(error)}`,
-    );
-  }
-}
-
 /**
  * Parse and validate one persisted generic sessions-URI mapping record
  * (`genericDirectories` / `genericFlatFiles`). Keys must be non-empty and
  * cross-platform-safe (a single safe segment for nested directory names, safe
- * segments for flat relative paths); values must be the strict canonical
- * portable spelling decodable under the scope's own naming configuration.
- * Referenced paths are never required to exist. Empty records are dropped so
- * the optional fields stay absent when there is no evidence.
+ * segments for flat relative paths); values must be non-empty strings. The
+ * strict/decodable portable-name contract is enforced later by
+ * `normalizeStateScopePortableNames` / `validateStateMappings` under the
+ * CURRENT naming configuration, because state no longer stores a config
+ * snapshot to validate against (v0.4.2). Referenced paths are never required
+ * to exist. Empty records are dropped so the optional fields stay absent.
  */
 function parseGenericMappingRecord(
   value: unknown,
   context: string,
-  namingConfig: PortableNameOptions,
   allowSlashSeparatedKeys: boolean,
 ): Record<string, string> | undefined {
   if (value === undefined) return undefined;
@@ -355,12 +324,6 @@ function parseGenericMappingRecord(
     if (typeof portableName !== "string" || portableName.length === 0) {
       throw new Error(`Invalid ${context} in pi-session-sync state: ${name}`);
     }
-    if (
-      !isStrictPortableSessionDirName(portableName, namingConfig) ||
-      decodePortableSessionDirName(portableName, namingConfig) === null
-    ) {
-      throw new Error(`Invalid portable name in ${context} in pi-session-sync state: ${name}`);
-    }
     setOwnRecordValue(record, name, portableName);
   }
   return Object.keys(record).length > 0 ? record : undefined;
@@ -375,7 +338,6 @@ function parseGenericMappingRecord(
 function parseGenericEvidence(
   value: unknown,
   context: string,
-  namingConfig: PortableNameOptions,
   flatLayout: boolean,
 ): Record<string, Record<string, string>> | undefined {
   if (value === undefined) return undefined;
@@ -387,12 +349,7 @@ function parseGenericEvidence(
     if (!key.startsWith("sessions/")) {
       throw new Error(`Invalid ${context} logical key in pi-session-sync state: ${key}`);
     }
-    const record = parseGenericMappingRecord(
-      rawRecord,
-      `${context} for ${key}`,
-      namingConfig,
-      flatLayout,
-    );
+    const record = parseGenericMappingRecord(rawRecord, `${context} for ${key}`, flatLayout);
     if (record === undefined) continue;
     setOwnRecordValue(result, key, record);
   }
@@ -403,6 +360,7 @@ const STATE_TOP_LEVEL_FIELDS = ["version", "scopes", "entries"] as const;
 const STATE_SCOPE_FIELDS = [
   "layout",
   "sessionsRoot",
+  "format",
   "namingConfig",
   "directories",
   "flatFiles",
@@ -410,13 +368,7 @@ const STATE_SCOPE_FIELDS = [
   "genericFlatFiles",
   "genericEvidence",
 ] as const;
-const STATE_SCOPE_REQUIRED_FIELDS = [
-  "layout",
-  "sessionsRoot",
-  "namingConfig",
-  "directories",
-  "flatFiles",
-] as const;
+const STATE_SCOPE_REQUIRED_FIELDS = ["layout", "sessionsRoot", "directories", "flatFiles"] as const;
 
 function parseState(value: unknown): SyncState {
   if (!isRecord(value) || value.version !== 1) {
@@ -446,7 +398,14 @@ function parseState(value: unknown): SyncState {
     if (!isRecord(rawScope.directories) || !isRecord(rawScope.flatFiles)) {
       throw new Error(`Invalid mappings in pi-session-sync state scope: ${scopeKey}`);
     }
-    const namingConfig = parseNamingConfig(rawScope.namingConfig, scopeKey);
+    // A legacy scope carries a `namingConfig` snapshot (v0.4.1 and earlier);
+    // v0.4.2 never reads or compares it, so it is accepted and dropped on
+    // rewrite. A current scope carries `format: 2`; any other explicit format
+    // value is an unsupported future schema.
+    if (rawScope.format !== undefined && rawScope.format !== 2) {
+      throw new Error(`Invalid pi-session-sync state scope format: ${scopeKey}`);
+    }
+    const scopeFormat = 2;
     // Layout-specific generic evidence must match the scope layout: a nested
     // scope never writes `genericFlatFiles` and a flat scope never writes
     // `genericDirectories`, so a mismatched field is malformed current state.
@@ -483,25 +442,22 @@ function parseState(value: unknown): SyncState {
     const genericDirectories = parseGenericMappingRecord(
       rawScope.genericDirectories,
       `generic directory mapping in scope ${scopeKey}`,
-      namingConfig,
       false,
     );
     const genericFlatFiles = parseGenericMappingRecord(
       rawScope.genericFlatFiles,
       `generic flat file mapping in scope ${scopeKey}`,
-      namingConfig,
       true,
     );
     const genericEvidence = parseGenericEvidence(
       rawScope.genericEvidence,
       `generic evidence in scope ${scopeKey}`,
-      namingConfig,
       rawScope.layout === "flat",
     );
     setOwnRecordValue(scopes, scopeKey, {
+      format: scopeFormat,
       layout: rawScope.layout,
       sessionsRoot: rawScope.sessionsRoot,
-      namingConfig,
       directories,
       flatFiles,
       ...(genericDirectories === undefined ? {} : { genericDirectories }),
@@ -532,10 +488,10 @@ export type LoadStateResult =
  *
  * - Old-shaped entry keys are rootless (they predate the mandatory
  *   `sessions/` / `missions/` root namespace).
- * - Old-shaped scopes predate the normalized `namingConfig` field that every
- *   current writer always persists, but must still carry the old mapping
- *   skeleton (see `isOldSchemaScope`); an object without `namingConfig` that
- *   does not match that shape is unpredictable content, not old state.
+ * - Old-shaped scopes carry only the old mapping skeleton (see
+ *   `isOldSchemaScope`) and no current-format marker (`format`, legacy
+ *   `namingConfig`, or generic evidence); an object that does not match that
+ *   shape is unpredictable content, not old state.
  */
 function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mixed" | "current" {
   // A malformed `entries` or `scopes` container is malformed CURRENT state no
@@ -561,12 +517,12 @@ function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mix
   let mixedScopes = 0;
   for (const rawScope of Object.values(parsed.scopes)) {
     if (!isRecord(rawScope)) continue;
-    if (rawScope.namingConfig !== undefined) currentScopes += 1;
-    else if (isOldSchemaScope(rawScope)) oldScopes += 1;
-    // A scope that lacks `namingConfig` but is not the exact old mapping
-    // skeleton is unpredictable content: it is contradictory (mixed) state
-    // and must hard-error instead of being warn-and-ignored as old and
-    // silently dropped (which would also drop stage-2 generic evidence).
+    if (isOldSchemaScope(rawScope)) oldScopes += 1;
+    else if (isCurrentScopeShape(rawScope)) currentScopes += 1;
+    // A scope that is neither the exact old mapping skeleton nor a current
+    // shape is unpredictable content: it is contradictory (mixed) state and
+    // must hard-error instead of being warn-and-ignored as old and silently
+    // dropped (which would also drop stage-2 generic evidence).
     else mixedScopes += 1;
   }
   if (mixedScopes > 0) return "mixed";
@@ -576,19 +532,36 @@ function classifyOldStateTopology(parsed: Record<string, unknown>): "old" | "mix
 }
 
 /**
+ * True when a scope carries a current-format marker on top of the old mapping
+ * skeleton: the current writer always persists `format: 2`, and a legacy scope
+ * that still carries the removed `namingConfig` snapshot is likewise
+ * current-format content (accepted on read, dropped on rewrite). A bare
+ * `{layout, sessionsRoot, directories, flatFiles}` object (no marker) stays the
+ * unambiguous old skeleton handled by `isOldSchemaScope`; any other shape,
+ * including a marker-less scope with generic fields, is unpredictable content
+ * and must hard-error rather than be warn-and-ignored.
+ *
+ * A marked scope stays current-shaped even when it also carries unknown or
+ * missing fields: the strict scope-field validation in `parseState` must run
+ * and report the precise scope-field error instead of the file being
+ * misclassified as mixed old/current topology and warn-and-ignored.
+ */
+function isCurrentScopeShape(rawScope: Record<string, unknown>): boolean {
+  return rawScope.format !== undefined || rawScope.namingConfig !== undefined;
+}
+
+/**
  * Recognizable old/inapplicable state is kept for the convenience of the
  * current version's own users: nothing in this version writes these shapes,
  * they are recognized only so they can be report-and-ignore without ever
  * misclassifying a malformed current-format state file.
  *
- * Minimum shape of a version-1 scope written before the normalized
- * `namingConfig` field existed: EXACTLY `layout`, `sessionsRoot`,
- * `directories`, and `flatFiles` — nothing else. Only this exact skeleton can
- * be classified as unambiguously old. An arbitrary object without
- * `namingConfig` (for example `{}` or one carrying any unknown field, such as
- * the stage-2 generic evidence fields) is unpredictable content and must
- * hard-error as mixed/current state instead of being warn-and-ignored and
- * silently dropped.
+ * Minimum shape of a version-1 scope written before any current-format
+ * marker existed: EXACTLY `layout`, `sessionsRoot`, `directories`, and
+ * `flatFiles` — nothing else. Only this exact skeleton can be classified as
+ * unambiguously old. An arbitrary object (for example `{}` or one carrying
+ * any unknown field) is unpredictable content and must hard-error as
+ * mixed/current state instead of being warn-and-ignored and silently dropped.
  */
 function isOldSchemaScope(rawScope: Record<string, unknown>): boolean {
   return (
@@ -640,10 +613,9 @@ function isRecognizedOldState(
  * empty and overwritten.
  *
  * The only warn-and-continue case is a recognizable OLD `version=1` shape: old
- * rootless entry keys or old-schema scopes (which predate the normalized
- * `namingConfig` field). Those are reported with a warning and ignored without
- * migration or deletion. A symlink or non-regular file at the state path stays
- * a hard error (safety, not format).
+ * rootless entry keys or marker-less old-schema scopes. Those are reported
+ * with a warning and ignored without migration or deletion. A symlink or
+ * non-regular file at the state path stays a hard error (safety, not format).
  */
 export async function loadState(path: string): Promise<LoadStateResult> {
   let info: Awaited<ReturnType<typeof lstat>>;
@@ -701,8 +673,4 @@ export async function loadState(path: string): Promise<LoadStateResult> {
 
 export function serializeState(state: SyncState): string {
   return `${JSON.stringify(state, null, 2)}\n`;
-}
-
-export function stateNamingConfigFingerprint(scope: StateScope): string {
-  return portableNameOptionsFingerprint(scope.namingConfig);
 }

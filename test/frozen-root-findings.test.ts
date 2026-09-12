@@ -73,7 +73,7 @@ describe("frozen root session evidence", () => {
       await mkdir(targetTree, { recursive: true });
       await writeFile(
         join(targetTree, "meta.json"),
-        `${JSON.stringify({ linked: "pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/x.jsonl" }, null, 2)}\n`,
+        `${JSON.stringify({ ownerSessionId: "pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/x.jsonl" }, null, 2)}\n`,
       );
       await syncSessions({
         missionsRoot: fixture.missionsRoot,

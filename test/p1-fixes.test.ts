@@ -110,8 +110,8 @@ describe("latest reviewer fixes", () => {
     });
   });
 
-  describe("P1-2 strict local-to-target parentSession", () => {
-    it("rejects an out-of-root JSONL parentSession before staging", async () => {
+  describe("v0.4.1 lenient local-to-target parentSession", () => {
+    it("preserves an out-of-root JSONL parentSession verbatim with a warning", async () => {
       const fixture = await makeFixture();
       try {
         await writeFile(
@@ -123,72 +123,93 @@ describe("latest reviewer fixes", () => {
             parentSession: "/machine-only/parent.jsonl",
           })}\n`,
         );
-        await expect(
-          syncSessions({
-            missionsRoot: fixture.missionsRoot,
+        const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
 
-            sessionsRoot: fixture.sessionsRoot,
-            targetDir: fixture.targetDir,
-            now: 1_000,
-          }),
-        ).rejects.toThrow(/parentSession must reference a session file/);
-        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-        expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          now: 1_000,
+        });
+        expect(summary.copied).toBe(1);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.includes(
+              "Invalid local parentSession preserved verbatim: /machine-only/parent.jsonl",
+            ),
+          ),
+        ).toBe(true);
+        const target = JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        expect(target.parentSession).toBe("/machine-only/parent.jsonl");
       } finally {
         await cleanup(fixture.root);
       }
     });
 
-    it("rejects a missions-root absolute JSON parentSession before staging", async () => {
+    it("preserves a missions-root absolute JSON parentSession verbatim with a warning", async () => {
       const fixture = await makeFixture();
-      const missionsRoot = join(fixture.root, "missions");
+      const missionParent = join(fixture.missionsRoot, "index", "x.json");
       try {
-        await mkdir(missionsRoot, { recursive: true });
+        await mkdir(join(fixture.missionsRoot, "index"), { recursive: true });
         await writeFile(
           join(fixture.localTree, "session.jsonl"),
           `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd })}\n`,
         );
         await writeFile(
           join(fixture.localTree, "meta.json"),
-          `${JSON.stringify({ parentSession: join(missionsRoot, "index", "x.json") }, null, 2)}\n`,
+          `${JSON.stringify({ parentSession: missionParent }, null, 2)}\n`,
         );
-        await expect(
-          syncSessions({
-            sessionsRoot: fixture.sessionsRoot,
-            targetDir: fixture.targetDir,
-            missionsRoot,
-            now: 1_000,
-          }),
-        ).rejects.toThrow(/parentSession must reference a session file/);
-        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-        expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
+        const summary = await syncSessions({
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          missionsRoot: fixture.missionsRoot,
+          now: 1_000,
+        });
+        expect(summary.copied).toBe(2);
+        const target = JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "meta.json"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        expect(target.parentSession).toBe(missionParent);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.includes("Invalid local parentSession preserved verbatim"),
+          ),
+        ).toBe(true);
       } finally {
         await cleanup(fixture.root);
       }
     });
 
-    it("rejects a UNC-shaped JSONL parentSession on every platform", async () => {
+    it("preserves a UNC-shaped JSONL parentSession verbatim on every platform", async () => {
       const fixture = await makeFixture();
+      const unc = "\\\\server\\share\\parent.jsonl";
       try {
         await writeFile(
           join(fixture.localTree, "session.jsonl"),
-          `${JSON.stringify({
-            type: "session",
-            id: "s1",
-            cwd: fixture.cwd,
-            parentSession: "\\\\server\\share\\parent.jsonl",
-          })}\n`,
+          `${JSON.stringify({ type: "session", id: "s1", cwd: fixture.cwd, parentSession: unc })}\n`,
         );
-        await expect(
-          syncSessions({
-            missionsRoot: fixture.missionsRoot,
+        const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
 
-            sessionsRoot: fixture.sessionsRoot,
-            targetDir: fixture.targetDir,
-            now: 1_000,
-          }),
-        ).rejects.toThrow(/parentSession must reference a session file/);
-        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          now: 1_000,
+        });
+        expect(summary.copied).toBe(1);
+        const target = JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        expect(target.parentSession).toBe(unc);
       } finally {
         await cleanup(fixture.root);
       }
@@ -252,7 +273,7 @@ describe("latest reviewer fixes", () => {
       }
     });
 
-    it("rejects loose legacy URI values in local content before staging", async () => {
+    it("preserves loose legacy URI values in local content with a warning", async () => {
       if (process.platform === "win32") return;
       const root = await mkdtempLike("p1-fixes-loose-local-");
       const sessionsRoot = join(root, "sessions");
@@ -275,17 +296,25 @@ describe("latest reviewer fixes", () => {
             recordPath: `pi-session-sync://sessions/${looseName}/record.json`,
           })}\n`,
         );
-        await expect(
-          syncSessions({
-            missionsRoot: join(root, "missions"),
-            sessionsRoot,
-            targetDir,
-            layout: "nested",
-            now: 200_000,
-          }),
-        ).rejects.toThrow(/Legacy loose portable name/);
-        await expect(readFile(join(targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-        expect(await readdir(join(targetDir, "sessions"))).toEqual([]);
+        const summary = await syncSessions({
+          missionsRoot: join(root, "missions"),
+          sessionsRoot,
+          targetDir,
+          layout: "nested",
+          now: 200_000,
+        });
+        expect(summary.copied).toBe(1);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.includes("Malformed pi-session-sync value preserved verbatim"),
+          ),
+        ).toBe(true);
+        // The loose legacy URI value is invalid current-format content:
+        // preserved verbatim with a warning, never decoded or rewritten.
+        const targetFile = join(targetDir, "sessions", strictName, "session.jsonl");
+        const target = JSON.parse(await readFile(targetFile, "utf8")) as Record<string, unknown>;
+        expect(target.cwd).toBe(`pi-session-sync://${strictName}`);
+        expect(target.recordPath).toBe(`pi-session-sync://sessions/${looseName}/record.json`);
       } finally {
         await rm(root, { recursive: true, force: true });
         await rm(cwd, { recursive: true, force: true });

@@ -143,6 +143,13 @@ export async function oldLabelCanonicalTextForLocalFile(
   localScan?: ScanResult,
 ): Promise<string | undefined> {
   try {
+    // A streamed file has no materialized text to re-canonicalize under the
+    // old label, and re-reading it as one string here would reintroduce the
+    // whole-file decode. `undefined` is the documented "unknown" result that
+    // callers treat as changed (an explicit pre-mutation conflict), which is
+    // safer than re-keying a file whose staged bytes still carry the adopted
+    // label.
+    if (local.streamedContent !== undefined) return undefined;
     const text = await readFile(local.absolutePath, "utf8");
     const resolver = createParentPathResolver(
       ctx.sessionsRoot,

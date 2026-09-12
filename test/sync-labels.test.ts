@@ -25,7 +25,7 @@ import { STATE_FILE_NAME, syncSessions } from "../src/sync.ts";
 import { cleanup, makeFixture } from "./sync-fixture.ts";
 
 describe("bidirectional session sync labels", () => {
-  it("writes a normalized naming snapshot and preserves custom labels", async () => {
+  it("does not persist a naming snapshot while preserving custom labels", async () => {
     const fixture = await makeFixture();
     const namingOptions = {
       homeLabel: "USER",
@@ -53,10 +53,12 @@ describe("bidirectional session sync labels", () => {
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
       ) as {
         version: number;
-        scopes: Record<string, { namingConfig: typeof namingOptions }>;
+        scopes: Record<string, Record<string, unknown>>;
       };
       expect(state.version).toBe(1);
-      expect(Object.values(state.scopes)[0]?.namingConfig).toEqual(namingOptions);
+      // v0.4.2: naming configuration is never saved in the state file.
+      expect(state.scopes[Object.keys(state.scopes)[0] as string]?.namingConfig).toBeUndefined();
+      expect(state.scopes[Object.keys(state.scopes)[0] as string]?.format).toBe(2);
     } finally {
       await cleanup(fixture.root);
     }
@@ -1703,7 +1705,7 @@ describe("bidirectional session sync labels", () => {
     }
   });
 
-  it("stops without migrating target trees when naming config changes", async () => {
+  it("keeps syncing when the naming config changes across machines", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "mismatch.jsonl");
     try {
@@ -1717,19 +1719,18 @@ describe("bidirectional session sync labels", () => {
         namingOptions: initialOptions,
         now: 43_000,
       });
-      const beforeState = await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8");
       const targetName = portableSessionDirName(fixture.cwd, initialOptions);
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
+      const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
 
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          namingOptions: { ...initialOptions, homeLabel: "CHANGED" },
-          now: 44_000,
-        }),
-      ).rejects.toThrow(/Naming configuration mismatch/);
-      expect(await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).toBe(beforeState);
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        namingOptions: { ...initialOptions, homeLabel: "CHANGED" },
+        now: 44_000,
+      });
+      // v0.4.2: a differing homeLabel/rootLabel/extraPrefixes is NOT a config
+      // error. The sync proceeds and does not migrate existing target trees.
+      expect(summary.copied).toBe(0);
       expect(
         await readFile(join(fixture.targetDir, "sessions", targetName, "mismatch.jsonl"), "utf8"),
       ).toContain("SYSTEM");

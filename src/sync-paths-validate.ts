@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
-import { lstat, mkdir, readdir, readlink, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { lstat, mkdir, readlink, realpath } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { nativePathInsideOrEqual, realPathWithMissingSuffix } from "./sync-native.ts";
 import { errorMessage } from "./sync-snapshots.ts";
 import { makeValidatedSyncRoots, type ValidatedSyncRoots } from "./validated-roots.ts";
@@ -87,32 +87,6 @@ async function sourceRootRealPath(rootPath: string): Promise<string> {
     }
   }
   return fallback;
-}
-
-/**
- * Report old-layout or unknown direct entries under `targetDir` that the
- * current layout does not participate in. The current version synchronizes
- * only the `sessions` and `missions` child roots plus the state file; old
- * portable session directories, old layout files, and other unknown direct
- * entries are ignored without mutation or deletion, but must be surfaced as
- * warnings per the authoritative requirements.
- */
-export async function collectTargetDirLegacyWarnings(
-  targetDir: string,
-  stateFileName: string,
-): Promise<string[]> {
-  const warnings: string[] = [];
-  let entries: string[];
-  try {
-    entries = await readdir(targetDir);
-  } catch {
-    return warnings;
-  }
-  for (const entry of entries) {
-    if (entry === "sessions" || entry === "missions" || entry === stateFileName) continue;
-    warnings.push(`Ignored legacy/unknown target root entry: ${join(targetDir, entry)}`);
-  }
-  return warnings;
 }
 
 /**

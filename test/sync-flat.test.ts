@@ -850,29 +850,44 @@ describe("bidirectional session sync flat layout", () => {
     }
   });
 
-  it("rejects unresolved flat parent references without an unambiguous mapping", async () => {
+  it("preserves unresolved flat parent references verbatim with a warning", async () => {
     const fixture = await makeFixture();
     const flatRoot = join(fixture.root, "unresolved-local-parent-flat-sessions");
     const firstCwd = join(fixture.root, "first-parent-project");
     const secondCwd = join(fixture.root, "second-parent-project");
+    const localParent = join(flatRoot, "missing.jsonl");
     try {
       await mkdir(flatRoot);
       await writeFile(
         join(flatRoot, "first.jsonl"),
-        `${JSON.stringify({ cwd: firstCwd, parentSession: join(flatRoot, "missing.jsonl") })}\n`,
+        `${JSON.stringify({ cwd: firstCwd, parentSession: localParent })}\n`,
       );
       await writeFile(join(flatRoot, "second.jsonl"), `${JSON.stringify({ cwd: secondCwd })}\n`);
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
+      // v0.4.1: an in-root flat parent with no unambiguous mapping cannot be
+      // encoded as a portable path, so it is preserved verbatim with a warning
+      // instead of failing the sync.
+      const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
 
-          sessionsRoot: flatRoot,
-          targetDir: fixture.targetDir,
-          layout: "flat",
-          machineId: "unresolved-local-parent-flat-machine",
-          now: 63_500,
-        }),
-      ).rejects.toThrow(/Session path is not mapped/);
+        sessionsRoot: flatRoot,
+        targetDir: fixture.targetDir,
+        layout: "flat",
+        machineId: "unresolved-local-parent-flat-machine",
+        now: 63_500,
+      });
+      expect(summary.copied).toBe(2);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes(`Invalid local parentSession preserved verbatim: ${localParent}`),
+        ),
+      ).toBe(true);
+      const target = JSON.parse(
+        await readFile(
+          join(fixture.targetDir, "sessions", portableSessionDirName(firstCwd), "first.jsonl"),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      expect(target.parentSession).toBe(localParent);
     } finally {
       await cleanup(fixture.root);
     }

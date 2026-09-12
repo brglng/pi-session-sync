@@ -18,10 +18,10 @@ const NAMING = { homeLabel: "HOME", rootLabel: "ROOT", extraPrefixes: {} } as co
  * Latest review findings on the persisted-state classifier and the
  * current-machine cwd label evidence.
  *
- * - The old-state classifier must not treat an arbitrary object without
- *   `namingConfig` (for example `{}`) as unambiguously old: only the exact old
- *   mapping skeleton is old, anything else is malformed current state and must
- *   hard-error before scan/staging.
+ * - The old-state classifier must not treat an arbitrary object without a
+ *   current-format marker (for example `{}`) as unambiguously old: only the
+ *   exact old mapping skeleton is old, anything else is malformed current state
+ *   and must hard-error before scan/staging.
  * - Current-machine cwd evidence keys must be canonicalized to native-identity
  *   spelling so a persisted `/tmp/project/../project` cannot pass validation
  *   and then miss the exact lookup, silently dropping the semantic label.

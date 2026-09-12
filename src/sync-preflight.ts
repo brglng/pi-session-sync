@@ -164,8 +164,9 @@ export async function validateParentReferenceTargets(
         ? reference.value
         : (reference.mappedUri ?? reference.rewritten);
       if (effectiveUri === undefined || !isSyncUri(effectiveUri)) continue;
-      // Directory URIs are rejected at transform time on local source; this
-      // guard covers references collected through any other path.
+      // A directory-form sessions URI is preserved verbatim at transform time
+      // and never enters this reference stream; this guard is defensive for a
+      // raw absolute spelling that maps to the session directory itself.
       if (!effectiveUri.toLowerCase().startsWith(SESSIONS_FILE_URI_PREFIX)) continue;
       const slash = effectiveUri.slice(SESSIONS_FILE_URI_PREFIX.length).indexOf("/");
       if (slash < 0) {

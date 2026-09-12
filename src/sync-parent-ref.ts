@@ -8,10 +8,12 @@ import {
 } from "./portable-name.ts";
 import { flatMappingIdentityKey, type ScannedFile, type ScanResult } from "./scan.ts";
 import {
+  hasHiddenPathSegment,
   isSyncUri,
   nativeNameIdentity,
   SESSIONS_FILE_URI_PREFIX,
   syncParentUriToPortableName,
+  syncUriTargetsHiddenPath,
 } from "./session-paths.ts";
 import type { SyncState } from "./state.ts";
 import { resolveExistingEntry, resolveInitialEntry } from "./sync-decision-core.ts";
@@ -150,6 +152,10 @@ function genericMappingsForScannedFile(
       ? reference.value
       : (reference.mappedUri ?? reference.rewritten);
     if (mappedUri === undefined || !isSyncUri(mappedUri)) continue;
+    // A hidden relative path (dot-prefixed segment) never participates in the
+    // sync (v0.4.1): the URI value itself stays in the visible file, but it
+    // must not seed a flat mapping or any other mapping evidence.
+    if (syncUriTargetsHiddenPath(mappedUri)) continue;
     let portableName: string;
     try {
       portableName = syncParentUriToPortableName(mappedUri, ctx.namingOptions);
@@ -292,6 +298,10 @@ export function parentMappingFromReference(
   ctx: DecisionContext,
 ): { localName: string; portableName: string } | undefined {
   if (!isSyncUri(reference.value)) return undefined;
+  // A hidden relative path is not synchronized content (v0.4.1): the URI may
+  // still be preserved/rewritten inside a visible file, but it proves no
+  // mapping, evidence, tombstone, or destination.
+  if (parentReferenceTargetsHiddenPath(reference, ctx)) return undefined;
   const portableName = syncParentUriToPortableName(reference.value, ctx.namingOptions);
   if (ctx.layout === "flat") {
     const localName = targetParentReferenceRelativePath(reference, ctx);
@@ -328,6 +338,9 @@ export function parentMappingFromAbsoluteReference(
   ) {
     return undefined;
   }
+  // A dot-prefixed segment inside the sessions root is hidden content that
+  // never participates in the sync (v0.4.1): it proves no mapping evidence.
+  if (parentReferenceTargetsHiddenPath(reference, ctx)) return undefined;
   if (ctx.layout === "flat") {
     return { localName: relativePosix(ctx.sessionsRoot, reference.value), portableName };
   }
@@ -339,12 +352,54 @@ export function parentMappingFromAbsoluteReference(
   return { localName, portableName };
 }
 
+/**
+ * True when a parentSession reference names hidden (dot-prefixed relative
+ * segment) sessions content in any spelling it carries: its own URI/absolute
+ * value, the resolver-validated mapped URI captured during a scan, or the
+ * rewritten output. Hidden entries never participate in the sync (v0.4.1), so
+ * a hidden reference must prove no mapping, mapping liveness, replacement
+ * replay validation, or evidence, while the visible file that contains it
+ * keeps its bytes untouched. Rootless cwd URIs and out-of-root absolute paths
+ * carry no in-root relative path and are never hidden here.
+ */
+export function parentReferenceTargetsHiddenPath(
+  reference: { value: string; rewritten?: string; mappedUri?: string },
+  ctx: DecisionContext,
+): boolean {
+  const root = resolve(ctx.sessionsRoot);
+  for (const spelling of [reference.value, reference.mappedUri, reference.rewritten]) {
+    if (spelling === undefined) continue;
+    if (isSyncUri(spelling)) {
+      if (syncUriTargetsHiddenPath(spelling)) return true;
+      continue;
+    }
+    if (!isAbsolute(spelling)) continue;
+    const relativePath = relative(root, resolve(spelling));
+    if (
+      relativePath === "" ||
+      relativePath === ".." ||
+      relativePath.startsWith("../") ||
+      (process.platform === "win32" && relativePath.startsWith("..\\")) ||
+      isAbsolute(relativePath)
+    ) {
+      continue;
+    }
+    if (hasHiddenPathSegment(splitRelativePath(relativePath).join("/"))) return true;
+  }
+  return false;
+}
+
 export function parentReferenceMatchesMapping(
   reference: { value: string; rewritten?: string; mappedUri?: string },
   mapping: { localName: string; portableName: string },
   ctx: DecisionContext,
   value = reference.value,
 ): boolean {
+  // A hidden (dot-prefixed) reference path never participates in mapping
+  // liveness (v0.4.1): the visible file keeps its bytes, but the reference
+  // cannot match a mapping and keep it alive. Every caller's `value` is one of
+  // the reference spellings this predicate already inspects.
+  if (parentReferenceTargetsHiddenPath(reference, ctx)) return false;
   // Canonical sync URIs carry an absolute local path; they are canonical
   // hashing output, not mapping evidence, so mapping proof must come from the
   // sync URI spelling (value or a resolver-validated mappedUri) only.

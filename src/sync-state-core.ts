@@ -6,16 +6,19 @@ import {
   decodePortableSessionDirName,
   defaultSessionDirName,
   isDefaultSessionDirName,
+  isForeignStatePortableName,
   isStrictPortableSessionDirName,
   type PortableNameOptions,
 } from "./portable-name.ts";
 import {
+  hasHiddenPathSegment,
   isCrossPlatformSafePathSegment,
   isWindowsShapedAbsolutePath,
   nativeNameIdentity,
 } from "./session-paths.ts";
 import type { StateEntry, StateScope, SyncState } from "./state.ts";
 import {
+  layoutFromMachineScopeKey,
   nativePathIdentity,
   recordValueForNativeName,
   sameCwdPath,
@@ -305,11 +308,20 @@ function validateEntryCwdEvidence(
       if (!isAbsolute(cwd) && !isWindowsShapedAbsolutePath(cwd)) {
         throw new Error(`Non-absolute cwd evidence path in pi-session-sync cwd evidence`);
       }
-      if (
-        typeof portableName !== "string" ||
-        !isStrictPortableSessionDirName(portableName, namingOptions) ||
-        decodePortableSessionDirName(portableName, namingOptions) === null
-      ) {
+      // A foreign machine record with a RECOGNIZED machine scope key shape is
+      // allowed to carry a portable name that only its own naming
+      // configuration can decode: such a label is preserved verbatim instead
+      // of being rejected under the current configuration (v0.4.2). Records
+      // with an unknown/legacy key shape, and the current machine's own
+      // record, keep the full strict/decodable requirement.
+      const recognizedForeignMachineKey =
+        !isCurrentMachine && layoutFromMachineScopeKey(machineKey) !== undefined;
+      const validPortableName = recognizedForeignMachineKey
+        ? isStrictPortableSessionDirName(portableName, namingOptions) ||
+          isForeignStatePortableName(portableName, namingOptions)
+        : isStrictPortableSessionDirName(portableName, namingOptions) &&
+          decodePortableSessionDirName(portableName, namingOptions) !== null;
+      if (typeof portableName !== "string" || !validPortableName) {
         throw new Error(`Invalid portable name in pi-session-sync cwd evidence: ${machineKey}`);
       }
       if (isCurrentMachine) {
@@ -395,6 +407,11 @@ function validateEntryMissionSessionMappings(
     }
     const isCurrentMachine = machineKey === machineScopeKey;
     for (const [localName, portableName] of Object.entries(mappings)) {
+      // A hidden (dot-prefixed) relative segment never participates in the sync
+      // (v0.4.1): the persisted key is ignored here instead of being validated
+      // as a current mapping or hard-erroring on its shape, and the
+      // carry-forward filter drops it from next state.
+      if (hasHiddenPathSegment(localName)) continue;
       // The current machine's record must carry this scope's exact key shape;
       // another machine's record may use either shape (it can belong to a
       // different layout that shares this target), so it is validated
@@ -410,6 +427,18 @@ function validateEntryMissionSessionMappings(
         throw new Error(
           `Invalid mission session mapping key in pi-session-sync state: ${localName}`,
         );
+      }
+      // Another machine's record with a RECOGNIZED machine scope key shape may
+      // carry a portable label only its own naming configuration can decode;
+      // that foreign label is preserved verbatim. Unknown/legacy key shapes
+      // and the current machine's own record keep the strict/decodable
+      // requirement.
+      if (
+        !isCurrentMachine &&
+        layoutFromMachineScopeKey(machineKey) !== undefined &&
+        isForeignStatePortableName(portableName, namingOptions)
+      ) {
+        continue;
       }
       if (!isStrictPortableSessionDirName(portableName, namingOptions)) {
         throw new Error(`Legacy loose portable name in mission session mapping: ${localName}`);

@@ -42,7 +42,7 @@ describe("generic session evidence replacement", () => {
         "meta.json",
       );
       const localLink = join(fixture.sessionsRoot, defaultSessionDirName(bCwd), "x.jsonl");
-      await writeFile(localMetaPath, `${JSON.stringify({ linked: localLink })}\n`);
+      await writeFile(localMetaPath, `${JSON.stringify({ ownerSessionId: localLink })}\n`);
       await syncSessions({
         missionsRoot: fixture.missionsRoot,
         sessionsRoot: fixture.sessionsRoot,
@@ -54,7 +54,7 @@ describe("generic session evidence replacement", () => {
       await new Promise((resolve) => setTimeout(resolve, 15));
       await writeFile(
         localMetaPath,
-        `${JSON.stringify({ linked: join(fixture.sessionsRoot, defaultSessionDirName(cCwd), "x.jsonl") })}\n`,
+        `${JSON.stringify({ ownerSessionId: join(fixture.sessionsRoot, defaultSessionDirName(cCwd), "x.jsonl") })}\n`,
       );
       await syncSessions({
         missionsRoot: fixture.missionsRoot,

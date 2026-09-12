@@ -34,9 +34,9 @@ describe("post-push review fixes", () => {
           join(targetTree, "meta.json"),
           `${JSON.stringify(
             {
-              linkedRoot: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b`,
-              linkedFile: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/session.jsonl`,
-              deepMissing: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/nested/dir/missing.json`,
+              ownerSessionId: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b`,
+              recordPath: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/session.jsonl`,
+              sessionPath: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/nested/dir/missing.json`,
             },
             null,
             2,
@@ -64,8 +64,10 @@ describe("post-push review fixes", () => {
             "utf8",
           ),
         ) as Record<string, string>;
-        expect(localMeta.linkedRoot).toBe(join(fixture.sessionsRoot, "--home-alice-project-b--"));
-        expect(localMeta.linkedFile).toBe(
+        expect(localMeta.ownerSessionId).toBe(
+          join(fixture.sessionsRoot, "--home-alice-project-b--"),
+        );
+        expect(localMeta.recordPath).toBe(
           join(fixture.sessionsRoot, "--home-alice-project-b--", "session.jsonl"),
         );
         // Second sync: the local copy must re-encode from persisted generic
@@ -83,13 +85,13 @@ describe("post-push review fixes", () => {
         const roundTripped = JSON.parse(
           await readFile(join(targetTree, "meta.json"), "utf8"),
         ) as Record<string, string>;
-        expect(roundTripped.linkedRoot).toBe(
+        expect(roundTripped.ownerSessionId).toBe(
           `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b`,
         );
-        expect(roundTripped.linkedFile).toBe(
+        expect(roundTripped.recordPath).toBe(
           `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/session.jsonl`,
         );
-        expect(roundTripped.deepMissing).toBe(
+        expect(roundTripped.sessionPath).toBe(
           `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/nested/dir/missing.json`,
         );
       } finally {
@@ -123,7 +125,7 @@ describe("post-push review fixes", () => {
           join(targetDir, "cross.json"),
           `${JSON.stringify(
             {
-              linked: `pi-session-sync://sessions/${portable}/foo/missing/cross.jsonl`,
+              ownerSessionId: `pi-session-sync://sessions/${portable}/foo/missing/cross.jsonl`,
             },
             null,
             2,
@@ -144,7 +146,9 @@ describe("post-push review fixes", () => {
         ) as Record<string, string>;
         // Flat URIs carry sessions-root-relative paths, so the portable
         // tree prefix decodes to the sessions root and `foo/...` is kept.
-        expect(localCross.linked).toBe(join(fixture.sessionsRoot, "foo", "missing", "cross.jsonl"));
+        expect(localCross.ownerSessionId).toBe(
+          join(fixture.sessionsRoot, "foo", "missing", "cross.jsonl"),
+        );
         const persistedScope = await readFirstScope(fixture.targetDir);
         expect(persistedScope.genericFlatFiles?.foo ?? persistedScope.flatFiles.foo).toBe(portable);
         // Round trip: local re-encodes from persisted generic evidence. The
@@ -157,7 +161,7 @@ describe("post-push review fixes", () => {
           join(fixture.sessionsRoot, "foo", "cross.json"),
           `${JSON.stringify(
             {
-              linked: join(fixture.sessionsRoot, "foo", "missing", "cross.jsonl"),
+              ownerSessionId: join(fixture.sessionsRoot, "foo", "missing", "cross.jsonl"),
               edited: "round-trip",
             },
             null,
@@ -177,7 +181,7 @@ describe("post-push review fixes", () => {
         const targetCross = JSON.parse(
           await readFile(join(targetDir, "cross.json"), "utf8"),
         ) as Record<string, string>;
-        expect(targetCross.linked).toBe(
+        expect(targetCross.ownerSessionId).toBe(
           `pi-session-sync://sessions/${portable}/foo/missing/cross.jsonl`,
         );
       } finally {
@@ -193,7 +197,9 @@ describe("post-push review fixes", () => {
         await writeFile(
           join(targetTree, "meta.json"),
           `${JSON.stringify(
-            { linked: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/x.jsonl` },
+            {
+              ownerSessionId: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/x.jsonl`,
+            },
             null,
             2,
           )}\n`,
@@ -341,9 +347,9 @@ describe("post-push review fixes", () => {
           join(fixture.sessionsRoot, "foo", "meta.json"),
           `${JSON.stringify(
             {
-              ownerDir: join(fixture.sessionsRoot, "foo"),
-              ownerDirNested: join(fixture.sessionsRoot, "foo", "sub"),
-              deepMissing: join(fixture.sessionsRoot, "foo", "sub", "missing.jsonl"),
+              ownerSessionId: join(fixture.sessionsRoot, "foo"),
+              recordPath: join(fixture.sessionsRoot, "foo", "sub"),
+              sessionPath: join(fixture.sessionsRoot, "foo", "sub", "missing.jsonl"),
             },
             null,
             2,
@@ -363,9 +369,9 @@ describe("post-push review fixes", () => {
         const targetMeta = JSON.parse(
           await readFile(join(fixture.targetDir, "sessions", portable, "foo", "meta.json"), "utf8"),
         ) as Record<string, string>;
-        expect(targetMeta.ownerDir).toBe(`pi-session-sync://sessions/${portable}/foo`);
-        expect(targetMeta.ownerDirNested).toBe(`pi-session-sync://sessions/${portable}/foo/sub`);
-        expect(targetMeta.deepMissing).toBe(
+        expect(targetMeta.ownerSessionId).toBe(`pi-session-sync://sessions/${portable}/foo`);
+        expect(targetMeta.recordPath).toBe(`pi-session-sync://sessions/${portable}/foo/sub`);
+        expect(targetMeta.sessionPath).toBe(
           `pi-session-sync://sessions/${portable}/foo/sub/missing.jsonl`,
         );
       } finally {

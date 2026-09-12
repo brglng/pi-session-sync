@@ -82,7 +82,7 @@ describe("phase-2 blocking findings", () => {
       await writeFile(
         join(targetTree, "meta.json"),
         `${JSON.stringify(
-          { linked: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/x.jsonl` },
+          { ownerSessionId: `pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/x.jsonl` },
           null,
           2,
         )}\n`,
@@ -98,7 +98,7 @@ describe("phase-2 blocking findings", () => {
       // Local file still carries the absolute reference to the missing session.
       const localMetaPath = join(fixture.sessionsRoot, "--home-alice-project-a--", "meta.json");
       const localMeta = JSON.parse(await readFile(localMetaPath, "utf8")) as Record<string, string>;
-      expect(localMeta.linked).toBe(
+      expect(localMeta.ownerSessionId).toBe(
         join(fixture.sessionsRoot, "--home-alice-project-b--", "x.jsonl"),
       );
       // Replace the target meta.json with a symlink (ignored by target scan).
@@ -135,7 +135,7 @@ describe("phase-2 blocking findings", () => {
       await writeFile(
         localMetaPath,
         `${JSON.stringify(
-          { linked: join(fixture.sessionsRoot, "--home-alice-project-b--", "other.jsonl") },
+          { ownerSessionId: join(fixture.sessionsRoot, "--home-alice-project-b--", "other.jsonl") },
           null,
           2,
         )}\n`,
@@ -148,7 +148,7 @@ describe("phase-2 blocking findings", () => {
         now: 3_000,
       });
       expect(third.copied).toBe(1);
-      expect(JSON.parse(await readFile(join(targetTree, "meta.json"), "utf8")).linked).toBe(
+      expect(JSON.parse(await readFile(join(targetTree, "meta.json"), "utf8")).ownerSessionId).toBe(
         "pi-session-sync://sessions/ROOT%2Fhome%2Falice%2Fproject-b/other.jsonl",
       );
       expect(third.warnings.some((warning: string) => warning.includes("not mapped"))).toBe(false);

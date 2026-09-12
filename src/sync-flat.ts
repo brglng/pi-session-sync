@@ -11,7 +11,10 @@ import {
   sameNativeName,
 } from "./sync-native.ts";
 import { decisionKeepsScannedFile } from "./sync-nested.ts";
-import { parentReferenceMatchesMapping } from "./sync-parent-ref.ts";
+import {
+  parentReferenceMatchesMapping,
+  parentReferenceTargetsHiddenPath,
+} from "./sync-parent-ref.ts";
 import { canonicalStateLogicalKey, parseLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
 import { canonicalStatePortableName } from "./sync-state-normalize.ts";
 import type { DecisionContext, FileDecision } from "./sync-types.ts";
@@ -168,6 +171,9 @@ export function flatMappingHasLiveFile(
       if (!decisionKeepsScannedFile(file, localScan, targetScan, state, hadState, ctx)) continue;
       for (const reference of file.parentSessionReferences) {
         if (!isAbsolute(reference.value)) continue;
+        // A hidden (dot-prefixed) parent path never keeps a flat mapping
+        // alive (v0.4.1); the visible file keeps its bytes unchanged.
+        if (parentReferenceTargetsHiddenPath(reference, ctx)) continue;
         if (!nativePathEquals(resolve(reference.value), parentPath)) continue;
         const targetFile = targetScan.files.get(file.key);
         if (targetFile !== undefined) {

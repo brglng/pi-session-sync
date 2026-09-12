@@ -140,8 +140,9 @@ describe("reviewer block fixes", () => {
   });
 
   describe("P1 parentSession must reference a session file", () => {
-    it("rejects a sessions-directory URI in JSONL parentSession before staging", async () => {
+    it("preserves a sessions-directory URI in JSONL parentSession with a warning", async () => {
       const fixture = await makeFixture();
+      const directoryUri = `pi-session-sync://sessions/${fixture.portableName}`;
       try {
         await writeFile(
           join(fixture.localTree, "session.jsonl"),
@@ -149,28 +150,38 @@ describe("reviewer block fixes", () => {
             type: "session",
             id: "s1",
             cwd: fixture.cwd,
-            parentSession: `pi-session-sync://sessions/${fixture.portableName}`,
+            parentSession: directoryUri,
           })}\n`,
         );
-        await expect(
-          syncSessions({
-            missionsRoot: fixture.missionsRoot,
+        const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
 
-            sessionsRoot: fixture.sessionsRoot,
-            targetDir: fixture.targetDir,
-            machineId: "dir-uri-jsonl-machine",
-            now: 91_000,
-          }),
-        ).rejects.toThrow(/parentSession must reference a session file, not a session directory/);
-        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-        expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          machineId: "dir-uri-jsonl-machine",
+          now: 91_000,
+        });
+        expect(summary.copied).toBe(1);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
+          ),
+        ).toBe(true);
+        const target = JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        expect(target.parentSession).toBe(directoryUri);
       } finally {
         await cleanup(fixture.root);
       }
     });
 
-    it("rejects a sessions-directory URI in JSON parentSession before staging", async () => {
+    it("preserves a sessions-directory URI in JSON parentSession with a warning", async () => {
       const fixture = await makeFixture();
+      const directoryUri = `pi-session-sync://sessions/${fixture.portableName}`;
       try {
         await writeFile(
           join(fixture.localTree, "session.jsonl"),
@@ -178,49 +189,66 @@ describe("reviewer block fixes", () => {
         );
         await writeFile(
           join(fixture.localTree, "meta.json"),
-          `${JSON.stringify({
-            parentSession: `pi-session-sync://sessions/${fixture.portableName}`,
-          })}\n`,
+          `${JSON.stringify({ parentSession: directoryUri })}\n`,
         );
-        await expect(
-          syncSessions({
-            missionsRoot: fixture.missionsRoot,
+        const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
 
-            sessionsRoot: fixture.sessionsRoot,
-            targetDir: fixture.targetDir,
-            machineId: "dir-uri-json-machine",
-            now: 91_001,
-          }),
-        ).rejects.toThrow(/parentSession must reference a session file, not a session directory/);
-        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          machineId: "dir-uri-json-machine",
+          now: 91_001,
+        });
+        expect(summary.copied).toBe(2);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
+          ),
+        ).toBe(true);
+        const target = JSON.parse(
+          await readFile(
+            join(fixture.targetDir, "sessions", fixture.portableName, "meta.json"),
+            "utf8",
+          ),
+        ) as Record<string, unknown>;
+        expect(target.parentSession).toBe(directoryUri);
       } finally {
         await cleanup(fixture.root);
       }
     });
 
-    it("rejects a sessions-directory URI in Markdown frontmatter parentSession before staging", async () => {
+    it("preserves a sessions-directory URI in Markdown frontmatter parentSession with a warning", async () => {
       const fixture = await makeFixture();
+      const directoryUri = `pi-session-sync://sessions/${fixture.portableName}`;
       try {
         const text = [
           "---",
           `cwd: ${fixture.cwd}`,
-          `parentSession: pi-session-sync://sessions/${fixture.portableName}`,
+          `parentSession: ${directoryUri}`,
           "---",
           "body",
           "",
         ].join("\n");
         await writeFile(join(fixture.localTree, "note.md"), text);
-        await expect(
-          syncSessions({
-            missionsRoot: fixture.missionsRoot,
+        const summary = await syncSessions({
+          missionsRoot: fixture.missionsRoot,
 
-            sessionsRoot: fixture.sessionsRoot,
-            targetDir: fixture.targetDir,
-            machineId: "dir-uri-md-machine",
-            now: 91_002,
-          }),
-        ).rejects.toThrow(/parentSession must reference a session file, not a session directory/);
-        await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+          sessionsRoot: fixture.sessionsRoot,
+          targetDir: fixture.targetDir,
+          machineId: "dir-uri-md-machine",
+          now: 91_002,
+        });
+        expect(summary.copied).toBe(1);
+        expect(
+          summary.warnings.some((warning) =>
+            warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
+          ),
+        ).toBe(true);
+        const target = await readFile(
+          join(fixture.targetDir, "sessions", fixture.portableName, "note.md"),
+          "utf8",
+        );
+        expect(target).toContain(`parentSession: ${directoryUri}`);
       } finally {
         await cleanup(fixture.root);
       }

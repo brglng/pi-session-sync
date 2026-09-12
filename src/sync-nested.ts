@@ -1,6 +1,5 @@
 /// <reference types="node" />
 
-import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import {
   decodePortableSessionDirName,
@@ -24,6 +23,7 @@ import {
   decisionForScannedFile,
   parentMappingFromAbsoluteReference,
   parentMappingFromReference,
+  parentReferenceTargetsHiddenPath,
 } from "./sync-parent-ref.ts";
 import { destinationPath, splitRelativePath } from "./sync-paths-keys.ts";
 import { entryWithCurrentLocal, hashText, localSnapshotFor } from "./sync-snapshots.ts";
@@ -34,8 +34,35 @@ import {
   createParentPathResolver,
   type ParentPathResolver,
   type ParentSessionReference,
+  transformFile,
   transformFileText,
 } from "./transform.ts";
+
+/**
+ * Whether two scanned files' canonical (path-normalized) content differs.
+ * Streamed JSONL files never materialize canonical text, but every
+ * scanned file carries a canonical hash, so the hash is authoritative for
+ * them and equivalent for materialized files.
+ */
+function scannedCanonicalContentDiffers(first: ScannedFile, second: ScannedFile): boolean {
+  if (first.streamedContent !== undefined || second.streamedContent !== undefined) {
+    return first.hash !== second.hash;
+  }
+  return first.canonicalText !== second.canonicalText;
+}
+
+/**
+ * Whether two target files' rendered output content differs. A streamed file
+ * has no materialized output text; its canonical hash is the only
+ * available content identity, and both files are compared in the same target
+ * rendering, so the hash comparison stays meaningful.
+ */
+function scannedOutputContentDiffers(first: ScannedFile, second: ScannedFile): boolean {
+  if (first.streamedContent !== undefined || second.streamedContent !== undefined) {
+    return first.hash !== second.hash;
+  }
+  return first.outputText !== second.outputText;
+}
 
 export function nestedFileMatchesMapping(
   file: ScannedFile,
@@ -694,8 +721,8 @@ export function staleNestedTargetKeysForReplacement(
           (candidate) =>
             candidate.mtimeMs === file.mtimeMs &&
             (candidate.side === "local"
-              ? candidate.canonicalText !== file.canonicalText
-              : candidate.outputText !== file.outputText),
+              ? scannedCanonicalContentDiffers(candidate, file)
+              : scannedOutputContentDiffers(candidate, file)),
         );
         if (equalMtimeContentDiffers) {
           ctx.nestedReplacementConflicts.add(newKey);
@@ -817,16 +844,19 @@ export function nestedReplacementDecision(
       isSyncUri(reference.mappedUri)
     );
   };
-  const sourceParentReplays = source.parentSessionReferences
-    .filter(isReplayableReference)
-    .map((reference) => ({
-      rewritten: reference.rewritten,
-      syncValue: isSyncUri(reference.value)
-        ? reference.value
-        : (reference.mappedUri ?? reference.value),
-    }));
-  const sourceParentMappings = source.parentSessionReferences
-    .filter(isReplayableReference)
+  const replayableParentReferences = source.parentSessionReferences.filter(isReplayableReference);
+  const sourceParentReplays = replayableParentReferences.map((reference) => ({
+    rewritten: reference.rewritten,
+    syncValue: isSyncUri(reference.value)
+      ? reference.value
+      : (reference.mappedUri ?? reference.value),
+  }));
+  // A hidden (dot-prefixed) reference path never participates in the sync
+  // (v0.4.1): its URI/absolute bytes are still replayed inside the visible
+  // file, but it proves no replacement directory mapping and must never fail
+  // the replacement as an invalid mapping.
+  const sourceParentMappings = replayableParentReferences
+    .filter((reference) => !parentReferenceTargetsHiddenPath(reference, ctx))
     .map((reference) => validateNestedReplacementParentMapping(reference, mappings, ctx));
   let sourceParentReferenceIndex = 0;
   const resolver: ParentPathResolver = {
@@ -849,6 +879,14 @@ export function nestedReplacementDecision(
     syncToLocal: mappedResolver.syncToLocal,
     canonicalSync: mappedResolver.canonicalSync,
   };
+  // A streamed file never materialized its output text, so the label
+  // replacement replay below cannot re-encode it. Refuse explicitly instead
+  // of replaying an empty string and silently corrupting the replacement.
+  if (source.streamedContent !== undefined) {
+    throw new Error(
+      `Cannot replay a streamed session file during nested label replacement: ${source.absolutePath}`,
+    );
+  }
   const transformed = transformFileText(
     source.absolutePath,
     source.outputText,
@@ -1004,14 +1042,23 @@ export async function retargetLiveNestedTargetParentEvidence(
       }
     }
     if (!needsRetarget) continue;
+    // A streamed file has no materialized output text to replay unless it is
+    // re-read; re-reading it as one string would reintroduce the whole-file
+    // decode. Re-run the same live-resolver transform through the size-aware
+    // `transformFile` so a streamed file refreshes its evidence exactly like a
+    // materialized one does.
     try {
-      const text = await readFile(file.absolutePath, "utf8");
-      const transformed = transformFileText(file.absolutePath, text, "to-local", resolver, {
+      const transformed = await transformFile(file.absolutePath, "to-local", resolver, {
         namingOptions: ctx.namingOptions,
       });
       file.outputText = transformed.outputText;
       file.canonicalText = transformed.canonicalText;
-      file.hash = hashText(transformed.canonicalText);
+      file.hash = transformed.streamedContent?.canonicalHash ?? hashText(transformed.canonicalText);
+      if (transformed.streamedContent === undefined) {
+        delete file.streamedContent;
+      } else {
+        file.streamedContent = transformed.streamedContent;
+      }
       file.cwdValues = transformed.cwdValues;
       file.sessionCwdPresent = transformed.sessionCwdPresent ?? false;
       file.sessionHeaderValid = transformed.sessionHeaderValid ?? false;

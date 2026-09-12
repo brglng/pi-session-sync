@@ -81,7 +81,7 @@ describe("review5 P1-1: ignored target session symlink prefix coverage", () => {
       await mkdir(localTreeA, { recursive: true });
       await writeFile(
         localMeta,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
       );
       await writeFile(
         join(localTreeA, "session.jsonl"),
@@ -139,7 +139,7 @@ describe("review5 P1-1: ignored target session symlink prefix coverage", () => {
       await mkdir(join(localTreeA, "sub"), { recursive: true });
       await writeFile(
         localNestedMeta,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
       );
       await writeFile(
         join(localTreeA, "session.jsonl"),
@@ -192,7 +192,7 @@ describe("review5 P1-1: ignored target session symlink prefix coverage", () => {
       await mkdir(localTreeA, { recursive: true });
       await writeFile(
         localMeta,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
       );
       await writeFile(
         join(localTreeA, "session.jsonl"),
@@ -375,9 +375,9 @@ describe("review5 P1-2: mission session mapping validation", () => {
     const derived = defaultSessionDirName(cwd);
     // A structurally valid generic record passes.
     const valid: StateScope = {
+      format: 2,
       layout: "nested",
       sessionsRoot: "/tmp/review5",
-      namingConfig: namingOptions,
       directories: {},
       flatFiles: {},
       genericDirectories: { [derived]: portable },
@@ -386,9 +386,9 @@ describe("review5 P1-2: mission session mapping validation", () => {
     // A malformed nested key (not a Pi directory name and not the derived
     // name) is rejected; the same guard runs on the generated next state.
     const malformed: StateScope = {
+      format: 2,
       layout: "nested",
       sessionsRoot: "/tmp/review5",
-      namingConfig: namingOptions,
       directories: {},
       flatFiles: {},
       genericDirectories: { "not-a-pi-dir": portable },

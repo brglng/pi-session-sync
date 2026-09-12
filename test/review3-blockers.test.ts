@@ -88,7 +88,7 @@ describe("review3 item1: blocked nested replacement keeps old-label generic evid
         oldTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${oldName}`,
-          linked: `pi-session-sync://sessions/${refName}/x.jsonl`,
+          ownerSessionId: `pi-session-sync://sessions/${refName}/x.jsonl`,
           value: "old-label-session",
         })}\n`,
       );
@@ -99,7 +99,7 @@ describe("review3 item1: blocked nested replacement keeps old-label generic evid
         oldExtraTarget,
         `${JSON.stringify({
           cwd: `pi-session-sync://${oldName}`,
-          linked: `pi-session-sync://sessions/${unrefName}/y.jsonl`,
+          ownerSessionId: `pi-session-sync://sessions/${unrefName}/y.jsonl`,
           value: "old-label-extra",
         })}\n`,
       );

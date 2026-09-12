@@ -5,11 +5,11 @@ import {
   type PortableNameOptions,
   portableNameKeyIdentity,
 } from "./portable-name.ts";
-import { nativeNameIdentity } from "./session-paths.ts";
+import { hasHiddenPathSegment, nativeNameIdentity } from "./session-paths.ts";
 import type { StateEntry, StateScope, SyncState } from "./state.ts";
 import { nativeCompatiblePortableMappings, sameNativeName } from "./sync-native.ts";
 import { MISSIONS_LOGICAL_KEY_PREFIX, SESSIONS_LOGICAL_KEY_PREFIX } from "./sync-paths.ts";
-import { canonicalStateLogicalKey } from "./sync-state-core.ts";
+import { canonicalStateLogicalKey, parseLogicalKey } from "./sync-state-core.ts";
 import { mergeStateEntries } from "./sync-state-merge.ts";
 
 export function canonicalStatePortableName(
@@ -41,6 +41,10 @@ export function normalizeStateEntryKeys(
     ) {
       throw new Error(`Invalid logical state key without root namespace: ${key}`);
     }
+    // Dot-prefixed (hidden) logical paths never participate in the sync: their
+    // entries are dropped before decisions, tombstones, mapping/evidence, or
+    // empty-directory cleanup can observe them (v0.4.1).
+    if (hasHiddenPathSegment(parseLogicalKey(key, namingOptions).relativePath)) continue;
     const normalizedKey = canonicalStateLogicalKey(key, namingOptions);
     const existing = normalized[normalizedKey];
     if (existing === undefined) {
@@ -69,6 +73,10 @@ export function normalizeStateScopePortableNames(
 ): void {
   const directories: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [localName, rawPortableName] of Object.entries(scope.directories)) {
+    // Hidden local names never participate in mappings (v0.4.1). `.` and
+    // `..` are not hidden names: they stay invalid mapping names and keep
+    // hard-erroring below.
+    if (hasHiddenPathSegment(localName)) continue;
     const portableName = canonicalStatePortableName(rawPortableName, namingOptions);
     const existingName = Object.keys(directories).find((name) => sameNativeName(name, localName));
     if (
@@ -86,6 +94,8 @@ export function normalizeStateScopePortableNames(
 
   const flatFiles: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [relativePath, rawPortableName] of Object.entries(scope.flatFiles)) {
+    // Hidden relative paths never participate in mappings (v0.4.1).
+    if (hasHiddenPathSegment(relativePath)) continue;
     const portableName = canonicalStatePortableName(rawPortableName, namingOptions);
     const existingPath = Object.keys(flatFiles).find(
       (candidate) => nativeNameIdentity(candidate) === nativeNameIdentity(relativePath),
@@ -152,6 +162,8 @@ function normalizeGenericEvidence(
   >;
   for (const [rawKey, rawRecord] of Object.entries(evidence)) {
     const key = canonicalStateLogicalKey(rawKey, namingOptions);
+    // Hidden logical paths never participate in mapping/evidence (v0.4.1).
+    if (hasHiddenPathSegment(parseLogicalKey(rawKey, namingOptions).relativePath)) continue;
     const record = normalizeGenericScopeRecord(
       rawRecord,
       namingOptions,
@@ -193,6 +205,8 @@ function normalizeGenericScopeRecord(
   if (record === undefined) return undefined;
   const normalized: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [rawKey, rawPortableName] of Object.entries(record)) {
+    // Hidden local names/relative paths never participate in mappings (v0.4.1).
+    if (hasHiddenPathSegment(rawKey)) continue;
     const portableName = canonicalStatePortableName(rawPortableName, namingOptions);
     const existingKey = Object.keys(normalized).find(
       (candidate) => nativeNameIdentity(candidate) === nativeNameIdentity(rawKey),

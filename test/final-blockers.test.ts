@@ -42,11 +42,11 @@ describe("final parallel-review blockers", () => {
       const portableD = "ROOT%2Fhome%2Falice%2Fproject-d";
       await writeFile(
         join(targetA, "meta.json"),
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableB}/x.jsonl` })}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableB}/x.jsonl` })}\n`,
       );
       await writeFile(
         join(targetC, "meta.json"),
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableD}/x.jsonl` })}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableD}/x.jsonl` })}\n`,
       );
       await syncSessions({
         sessionsRoot: fixture.sessionsRoot,

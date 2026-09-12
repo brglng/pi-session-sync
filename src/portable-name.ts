@@ -36,7 +36,7 @@ function isWindowsAbsolutePathSyntax(value: string): boolean {
   return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\") || value.startsWith("//");
 }
 
-/** Convert Git Bash, MSYS, Cygwin, and WSL drive paths to native Windows paths. */
+/** Convert MSYS, Cygwin, and WSL drive paths to native Windows paths. */
 export function normalizeWindowsShellPath(value: string): string {
   if (process.platform !== "win32") return value;
   if (!value.startsWith("/") || value.startsWith("//") || value.includes("\\")) {
@@ -95,6 +95,12 @@ function normalizeLabel(value: unknown, field: string): string {
   if (value.toLowerCase() === RESERVED_STATE_FILE_NAME) {
     throw new Error(`${field} is reserved for the sync state file`);
   }
+  if (value.startsWith(".")) {
+    // A dot-prefixed label would generate a hidden target tree that every
+    // scanner (and the sync itself) must ignore, making the mapping invisible
+    // and its files undeleable. Reject such a configuration before any write.
+    throw new Error(`${field} must be a cross-platform safe label`);
+  }
   if (
     value.includes("/") ||
     value.includes("\\") ||
@@ -113,6 +119,38 @@ function normalizeLabel(value: unknown, field: string): string {
     throw new Error(`${field} must be a cross-platform safe label`);
   }
   return value;
+}
+
+/**
+ * True when `value` is structurally usable as a portable-name label: exactly
+ * the character and shape rules `normalizeLabel` enforces. Used to classify a
+ * state portable name whose label is unknown to the CURRENT naming
+ * configuration (another machine's label): such a name is preserved verbatim,
+ * but only while its label is still a cross-platform-safe segment.
+ */
+export function isStructurallyValidPortableLabel(value: string): boolean {
+  if (value.length === 0) return false;
+  if (value === "." || value === "..") return false;
+  if (value.toLowerCase() === RESERVED_STATE_FILE_NAME) return false;
+  if (value.startsWith(".")) return false;
+  if (
+    value.includes("/") ||
+    value.includes("\\") ||
+    value.includes("%") ||
+    value.includes(":") ||
+    value.includes("?") ||
+    value.includes("*") ||
+    value.includes('"') ||
+    value.includes("<") ||
+    value.includes(">") ||
+    value.includes("|") ||
+    /[. ]$/u.test(value) ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/iu.test(value) ||
+    [...value].some((character) => /\p{Cc}/u.test(character))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -307,7 +345,7 @@ function encodeRemainderLoose(remainder: string): string {
  * names such as `/tmp/a*b` and `/tmp/a.` therefore round-trip into
  * Windows-safe target names.
  */
-function encodeRemainderStrict(remainder: string): string {
+export function encodeRemainderStrict(remainder: string): string {
   const encoded = encodeRemainderLoose(remainder).replaceAll("*", "%2A");
   // Only the terminal run of dots is unsafe; interior dots stay literal.
   return encoded.replace(/\.+$/, (dots) => "%2E".repeat(dots.length));
@@ -656,6 +694,103 @@ export function isStrictPortableSessionDirName(
     return true;
   }
   return false;
+}
+
+/**
+ * Recover the path a structurally strict name encodes. The label is the literal
+ * prefix before the first `%`, but a ROOT-mapped Windows path keeps its drive
+ * letter literal in the name (`ROOTC%3A%2FUsers%2Ffoo`), so the split absorbs
+ * it into the label: the decoded remainder starts with `:`. Move that single
+ * trailing drive letter back into the path; every other mapping's remainder is
+ * percent-encoded from its first `/` on and needs no reconstruction.
+ */
+function structurallyStrictRemainderPath(label: string, decoded: string): string {
+  if (decoded.startsWith(":") && /[A-Za-z]$/.test(label)) {
+    return `${label.slice(-1)}${decoded}`;
+  }
+  return decoded;
+}
+
+/**
+ * True when a decoded portable-name remainder names an absolute path. Every
+ * configured mapping (HOME, ROOT, or an extra prefix) encodes the path BELOW
+ * its prefix, so the remainder is always an absolute POSIX path, a Windows
+ * drive path, or a UNC path — or empty when the name is exactly the prefix
+ * root. A relative remainder (`TEAM%20relative`) is not a portable path and
+ * stays malformed state instead of being preserved as opaque foreign evidence.
+ */
+function isAbsolutePortableRemainder(remainder: string): boolean {
+  return (
+    remainder.startsWith("/") || /^[A-Za-z]:[\\/]/.test(remainder) || remainder.startsWith("\\\\")
+  );
+}
+
+/**
+ * True when an absolute portable-name remainder contains a `..` traversal
+ * segment (`TEAM%2F..%2Foutside`). Every `..` segment is rejected regardless
+ * of position: a portable name must always stay a canonical descendant of its
+ * prefix (or the prefix root itself).
+ */
+function portableRemainderHasTraversal(remainder: string): boolean {
+  return remainder.split(/[\\/]/u).includes("..");
+}
+
+/**
+ * True when `name` is a strict portable-name spelling under SOME naming
+ * configuration: a cross-platform-safe literal label followed by a canonically
+ * strict percent-encoded remainder that names an absolute, non-traversing
+ * path. The label itself is deliberately NOT matched against the current
+ * configuration, so a name written with another machine's labels/prefixes
+ * still passes. Legacy loose spellings (literal `*`, terminal dots),
+ * over-encoded or otherwise non-canonical remainders, relative remainders
+ * (`TEAM%20relative`), and traversal remainders (`TEAM%2F..%2Foutside`) do
+ * not, so they keep hard-erroring as malformed state.
+ */
+export function isStructurallyStrictPortableName(name: string): boolean {
+  if (name.length === 0) return false;
+  if (name.includes("/") || name.includes("\\") || name.includes("?")) return false;
+  if ([...name].some((character) => /\p{Cc}/u.test(character))) return false;
+  const firstEscape = name.indexOf("%");
+  const label = firstEscape < 0 ? name : name.slice(0, firstEscape);
+  if (!isStructurallyValidPortableLabel(label)) return false;
+  if (firstEscape < 0) return true;
+  const remainder = name.slice(firstEscape);
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(remainder);
+  } catch {
+    return false;
+  }
+  if ([...decoded].some((character) => /\p{Cc}/u.test(character))) return false;
+  if (decoded.length > 0) {
+    const remainderPath = structurallyStrictRemainderPath(label, decoded);
+    if (!isAbsolutePortableRemainder(remainderPath)) return false;
+    if (portableRemainderHasTraversal(remainderPath)) return false;
+  }
+  return encodeRemainderStrict(decoded) === remainder;
+}
+
+/**
+ * True when `name` is a valid portable name for another machine's naming
+ * configuration: it is neither the current machine's own (strict, decodable)
+ * spelling nor a name the current configuration can still decode as a legacy
+ * loose spelling, yet it is a structurally strict spelling under some other
+ * label set. Such foreign state is preserved verbatim instead of being decoded
+ * or rejected under the current configuration (v0.4.2 cross-machine rule).
+ *
+ * A name that the current configuration can decode is never foreign: a legacy
+ * loose spelling stays current-machine content and keeps hard-erroring. A name
+ * that is strict under the current labels but platform-invalid (for example a
+ * POSIX-restricted foreign Windows path) also stays current-machine content so
+ * its existing hard error is retained.
+ */
+export function isForeignStatePortableName(
+  name: string,
+  options: Partial<PortableNameOptions> | undefined = undefined,
+): boolean {
+  if (decodePortableSessionDirName(name, options) !== null) return false;
+  if (isStrictPortableSessionDirName(name, options)) return false;
+  return isStructurallyStrictPortableName(name);
 }
 
 /**

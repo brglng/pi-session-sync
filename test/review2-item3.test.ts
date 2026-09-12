@@ -183,7 +183,7 @@ describe("review2 item3a: nested replacement copies keep generic evidence", () =
         `${JSON.stringify({
           cwd: `pi-session-sync://${oldName}`,
           value: "newer-old",
-          linked: `pi-session-sync://sessions/${otherLabel}/x.jsonl`,
+          ownerSessionId: `pi-session-sync://sessions/${otherLabel}/x.jsonl`,
         })}\n`,
       );
       await utimes(oldTargetFile, 3, 3);
@@ -193,7 +193,7 @@ describe("review2 item3a: nested replacement copies keep generic evidence", () =
         `${JSON.stringify({
           cwd: `pi-session-sync://${newName}`,
           value: "older-new",
-          linked: `pi-session-sync://sessions/${otherLabel}/x.jsonl`,
+          ownerSessionId: `pi-session-sync://sessions/${otherLabel}/x.jsonl`,
         })}\n`,
       );
       await utimes(newTargetFile, 2, 2);

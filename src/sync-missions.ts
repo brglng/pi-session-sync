@@ -26,7 +26,7 @@ import { errorMessage } from "./sync-snapshots.ts";
 import { parseLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
 import type { DecisionContext, FileDecision } from "./sync-types.ts";
 import type { ParentPathResolver } from "./transform.ts";
-import { transformFile } from "./transform.ts";
+import { fileScopedTransformWarning, transformFile } from "./transform.ts";
 
 export interface MissionScan {
   files: Map<string, ScannedFile>;
@@ -338,7 +338,7 @@ export async function scanMissionsTree(
       ...(perFileEvidence === undefined ? {} : { cwdEvidence: perFileEvidence }),
     });
     for (const warning of transformed.warnings ?? []) {
-      warnings.push(`${logicalPath}: ${warning}`);
+      warnings.push(fileScopedTransformWarning(logicalPath, warning));
     }
     if (side === "target") {
       // Record per-cwd semantic-label evidence: each decoded target cwd
@@ -376,9 +376,12 @@ export async function scanMissionsTree(
       rootPath: rootPathResolved,
       relativePath,
       mtimeMs: info.mtimeMs,
-      hash: hashText(transformed.canonicalText),
+      hash: transformed.streamedContent?.canonicalHash ?? hashText(transformed.canonicalText),
       outputText: transformed.outputText,
       canonicalText: transformed.canonicalText,
+      ...(transformed.streamedContent === undefined
+        ? {}
+        : { streamedContent: transformed.streamedContent }),
       cwdValues: transformed.cwdValues,
       sessionCwdPresent: transformed.sessionCwdPresent ?? false,
       sessionHeaderValid: transformed.sessionHeaderValid ?? false,
@@ -445,8 +448,10 @@ export async function scanMissionsTree(
     let entries: string[];
     try {
       // Sorted traversal: real-node dedup must never depend on filesystem
-      // readdir order.
-      entries = (await readdir(physicalDirectory)).sort();
+      // readdir order. Dot-prefixed entries are excluded before any lstat:
+      // they never participate in the sync and stay completely silent
+      // (v0.4.1).
+      entries = (await readdir(physicalDirectory)).filter((entry) => !entry.startsWith(".")).sort();
     } catch (error) {
       if (isRoot && side === "local") {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") rootVanished = true;

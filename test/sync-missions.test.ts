@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   STATE_FILE_NAME,
-  SyncFailure,
   syncParentUriToCanonical,
   syncParentUriToLocalPath,
   syncSessions,
@@ -168,28 +167,37 @@ describe("missions and generic JSON path synchronization", () => {
     }
   });
 
-  it("treats malformed pi-session-sync prefixes in local files as file errors", async () => {
+  it("preserves malformed pi-session-sync values in local mission files with a warning", async () => {
     const fixture = await makeFixture();
     try {
       const missionsRoot = join(fixture.root, "missions");
-      await writeMission(missionsRoot, "index/bad.json", {
-        path: "pi-session-sync://missions/index/../escape.json",
+      const localMission = await writeMission(missionsRoot, "index/bad.json", {
+        missionPath: "pi-session-sync://missions/index/../escape.json",
       });
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          missionsRoot,
-          now: 1_000,
-        }),
-      ).rejects.toThrow(SyncFailure);
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
+      const original = await readFile(localMission, "utf8");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        now: 1_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Malformed pi-session-sync value preserved verbatim"),
+        ),
+      ).toBe(true);
+      // The malformed `pi-session-sync:` value is preserved byte-for-byte.
+      expect(await readFile(localMission, "utf8")).toBe(original);
+      expect(await readFile(join(fixture.targetDir, "missions", "index", "bad.json"), "utf8")).toBe(
+        original,
+      );
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("preserves invalid target mission URI values with a warning instead of failing", async () => {
+  it("preserves malformed pi-session-sync mission URI values on target source", async () => {
     const fixture = await makeFixture();
     try {
       const missionsRoot = join(fixture.root, "missions");
@@ -210,17 +218,11 @@ describe("missions and generic JSON path synchronization", () => {
       expect(summary.copied).toBe(1);
       expect(
         summary.warnings.some((warning) =>
-          warning.includes(
-            "Invalid pi-session-sync URI preserved verbatim in target content: pi-session-sync:broken",
-          ),
+          warning.includes("Malformed pi-session-sync value preserved verbatim"),
         ),
       ).toBe(true);
-      const local = JSON.parse(await readFile(join(missionsRoot, "index", "bad.json"), "utf8")) as {
-        recordPath: string;
-        ok: boolean;
-      };
-      expect(local.recordPath).toBe("pi-session-sync:broken");
-      expect(local.ok).toBe(true);
+      expect(await readFile(target, "utf8")).toBe(original);
+      expect(await readFile(join(missionsRoot, "index", "bad.json"), "utf8")).toBe(original);
     } finally {
       await cleanup(fixture.root);
     }
@@ -816,28 +818,33 @@ describe("missions and generic JSON path synchronization", () => {
     }
   });
 
-  it("fails local mission references to unmapped sessions paths (strict local → target)", async () => {
+  it("preserves local mission references to unmapped sessions paths with a warning", async () => {
     const fixture = await makeFixture();
+    const unmapped = join(fixture.sessionsRoot, "unknown", "x.jsonl");
     try {
       const missionsRoot = join(fixture.root, "missions");
       // No session file exists to seed a mapping; the referenced path is
-      // inside the sessions root but unmappable, so local → target must
-      // fail loudly instead of preserving a machine-local path.
+      // inside the sessions root but unmappable. v0.4.1 preserves it verbatim
+      // with a warning instead of failing the whole sync.
       await writeMission(missionsRoot, "index/ref.json", {
-        sessionPath: join(fixture.sessionsRoot, "unknown", "x.jsonl"),
+        sessionPath: unmapped,
       });
-      await expect(
-        syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          missionsRoot,
-          now: 1_000,
-        }),
-      ).rejects.toThrow(/Session path is not mapped/);
-      // Nothing was committed.
-      await expect(
-        readFile(join(fixture.targetDir, "missions", "index", "ref.json"), "utf8"),
-      ).rejects.toThrow();
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot,
+        now: 1_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes(`Invalid local path preserved verbatim: ${unmapped}`),
+        ),
+      ).toBe(true);
+      const target = JSON.parse(
+        await readFile(join(fixture.targetDir, "missions", "index", "ref.json"), "utf8"),
+      ) as { sessionPath: string };
+      expect(target.sessionPath).toBe(unmapped);
     } finally {
       await cleanup(fixture.root);
     }

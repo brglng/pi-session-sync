@@ -92,6 +92,122 @@ function isAbsoluteSpelling(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
 }
 
+/** Portable-name spelling class for one `pi-session-sync` URI segment. */
+export type SyncUriNameClass = "current" | "legacy" | "undecodable";
+
+/** Structural inspection of a `pi-session-sync:` URI (see `inspectSyncUri`). */
+export interface InspectedSyncUri {
+  namespace: "cwd" | "sessions" | "missions";
+  /** Portable name of the cwd and sessions forms. */
+  portableName?: string;
+  /**
+   * Percent-encoded relative path: the missions relative path, the sessions
+   * file relative path, or `""` for a sessions directory URI.
+   */
+  relativeEncoded?: string;
+  /**
+   * Spelling class of the portable name (cwd/sessions forms only). `legacy`
+   * is a well-formed but non-current loose spelling; `undecodable` is a
+   * well-formed name that no decodable mapping owns under the current naming
+   * configuration.
+   */
+  nameClass?: SyncUriNameClass;
+}
+
+/**
+ * Validate the structural syntax of one portable-name URI segment. Only
+ * syntax is checked: a single non-empty segment, no raw segment separators or
+ * control characters, and canonical `%XX` percent escapes. Whether the name
+ * decodes under the current naming configuration is deliberately NOT checked
+ * here so valid-but-undecodable names stay distinguishable from malformed
+ * ones.
+ */
+function assertPortableNameSyntax(name: string, value: string): void {
+  if (name.length === 0 || name.includes("/") || name.includes("\\") || name.includes("?")) {
+    throw new Error(`Malformed pi-session-sync URI: ${value}`);
+  }
+  for (const character of name) {
+    if (/\p{Cc}/u.test(character)) {
+      throw new Error(`Malformed pi-session-sync URI: ${value}`);
+    }
+  }
+  for (let index = 0; index < name.length; index += 1) {
+    if (name[index] !== "%") continue;
+    if (!/^[0-9A-Fa-f]{2}$/.test(name.slice(index + 1, index + 3))) {
+      throw new Error(`Invalid percent encoding in pi-session-sync URI: ${value}`);
+    }
+    index += 2;
+  }
+}
+
+function classifyPortableName(name: string, namingOptions: PortableNameOptions): SyncUriNameClass {
+  const strict = isStrictPortableSessionDirName(name, namingOptions);
+  const decodable = decodePortableSessionDirName(name, namingOptions) !== null;
+  if (decodable) return strict ? "current" : "legacy";
+  return "undecodable";
+}
+
+/**
+ * Inspect the structural syntax of a `pi-session-sync:` URI. Throws for a
+ * malformed scheme prefix, an invalid namespace, an empty/trailing/leading
+ * slash segment, out-of-bounds traversal, noncanonical percent encoding, and
+ * unsafe cross-platform relative segments. A well-formed URI whose portable
+ * name cannot decode under the current configuration does NOT throw: the
+ * caller decides whether to preserve it (`nameClass`).
+ */
+export function inspectSyncUri(
+  value: string,
+  namingOptions: PortableNameOptions,
+): InspectedSyncUri {
+  const prefix = /^pi-session-sync:\/\//i.exec(value);
+  if (prefix === null) {
+    throw new Error(`Malformed pi-session-sync URI: ${value}`);
+  }
+  const remainder = value.slice(prefix[0].length);
+  if (remainder.length === 0) throw new Error(`Malformed pi-session-sync URI: ${value}`);
+  const slash = remainder.indexOf("/");
+  if (slash < 0) {
+    assertPortableNameSyntax(remainder, value);
+    return {
+      namespace: "cwd",
+      portableName: remainder,
+      nameClass: classifyPortableName(remainder, namingOptions),
+    };
+  }
+  const namespace = NAMESPACE_CANONICAL[remainder.slice(0, slash).toLowerCase()];
+  if (namespace === undefined) {
+    throw new Error(`Invalid pi-session-sync URI namespace: ${value}`);
+  }
+  const rest = remainder.slice(slash + 1);
+  if (rest.length === 0 || rest.startsWith("/") || rest.endsWith("/")) {
+    throw new Error(`Malformed pi-session-sync URI: ${value}`);
+  }
+  if (namespace === MISSIONS_ROOT_NAMESPACE) {
+    decodeRootRelativePath(rest, "mission");
+    return { namespace: "missions", relativeEncoded: rest };
+  }
+  const sessionSlash = rest.indexOf("/");
+  if (sessionSlash < 0) {
+    assertPortableNameSyntax(rest, value);
+    return {
+      namespace: "sessions",
+      portableName: rest,
+      relativeEncoded: "",
+      nameClass: classifyPortableName(rest, namingOptions),
+    };
+  }
+  const portableName = rest.slice(0, sessionSlash);
+  const relativeEncoded = rest.slice(sessionSlash + 1);
+  assertPortableNameSyntax(portableName, value);
+  decodeRootRelativePath(relativeEncoded, "session");
+  return {
+    namespace: "sessions",
+    portableName,
+    relativeEncoded,
+    nameClass: classifyPortableName(portableName, namingOptions),
+  };
+}
+
 function relativePosix(root: string, candidate: string): string {
   const value = relative(root, candidate);
   return process.platform === "win32" ? value.replaceAll("\\", "/") : value;

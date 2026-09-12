@@ -50,11 +50,14 @@ describe("bidirectional session sync safety", () => {
     }
   });
 
-  it("preserves unknown ignored directories during cleanup", async () => {
+  it("preserves unknown directories silently during cleanup", async () => {
     const fixture = await makeFixture();
     const unknown = join(fixture.localTree, "unknown");
     try {
       await mkdir(unknown, { recursive: true });
+      // A non-session file makes this an unknown (unrecognized) directory;
+      // a truly empty directory is silent under v0.4.1.
+      await writeFile(join(unknown, "notes.txt"), "keep\n");
       const source = join(fixture.localTree, "session.jsonl");
       await writeFile(source, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
       const summary = await syncSessions({
@@ -66,7 +69,7 @@ describe("bidirectional session sync safety", () => {
       });
       expect(
         summary.warnings.some((warning) => warning.includes("unknown session directory")),
-      ).toBe(true);
+      ).toBe(false);
       await rm(source);
       await syncSessions({
         missionsRoot: fixture.missionsRoot,
@@ -761,7 +764,7 @@ describe("bidirectional session sync safety", () => {
     const fixture = await makeFixture();
     try {
       // Old-schema scope: rootless `directories`/`flatFiles` maps and no
-      // `namingConfig` field (every current writer persists it). This is
+      // current-format marker (`format`/legacy `namingConfig`). This is
       // recognizable old state and must be ignored with a warning, never
       // parsed as malformed current state and never migrated.
       await writeFile(
@@ -1621,7 +1624,7 @@ describe("source symlink following", () => {
     }
   });
 
-  it("warns for legacy/unknown direct targetDir entries without mutating them", async () => {
+  it("silently ignores legacy/unknown direct targetDir entries without mutating them", async () => {
     const fixture = await makeFixture();
     const oldPortableDir = join(fixture.targetDir, fixture.portableName);
     const oldLayoutFile = join(fixture.targetDir, "legacy-file.txt");
@@ -1636,11 +1639,16 @@ describe("source symlink following", () => {
         targetDir: fixture.targetDir,
         now: 51_000,
       });
+      // v0.4.2: unknown/legacy entries directly under targetDir (the parent of
+      // `sessions` and `missions`) are ignored silently, with no warning and
+      // no read/write/delete/create.
+      expect(summary.warnings.some((warning) => warning.includes(oldPortableDir))).toBe(false);
+      expect(summary.warnings.some((warning) => warning.includes(oldLayoutFile))).toBe(false);
       expect(
         summary.warnings.some((warning) =>
           warning.includes("Ignored legacy/unknown target root entry"),
         ),
-      ).toBe(true);
+      ).toBe(false);
       // Never mutated or deleted.
       expect(await readFile(join(oldPortableDir, "session.jsonl"), "utf8")).toBe("old-layout\n");
       expect(await readFile(oldLayoutFile, "utf8")).toBe("old\n");
@@ -1649,14 +1657,16 @@ describe("source symlink following", () => {
     }
   });
 
-  it("preserves target-root legacy warnings when the state file is malformed", async () => {
+  it("keeps legacy/unknown direct targetDir entries silent when the state file is malformed", async () => {
     const fixture = await makeFixture();
+    const legacyRootDir = join(fixture.targetDir, fixture.portableName);
+    const legacyRootFile = join(fixture.targetDir, "legacy-file.txt");
     try {
-      // A legacy/unknown direct targetDir entry is collected as a warning
-      // BEFORE the state file is loaded; a malformed state file then stops the
-      // sync. The reported failure must still carry that warning.
-      await mkdir(join(fixture.targetDir, fixture.portableName));
-      await writeFile(join(fixture.targetDir, "legacy-file.txt"), "old\n");
+      // A legacy/unknown direct targetDir entry must not be collected as a
+      // warning before state load: the malformed state file stops the sync and
+      // the target-root entry contributes nothing.
+      await mkdir(legacyRootDir);
+      await writeFile(legacyRootFile, "old\n");
       await writeFile(join(fixture.targetDir, STATE_FILE_NAME), "{ not json");
       let failure: SyncFailure | undefined;
       try {
@@ -1670,58 +1680,51 @@ describe("source symlink following", () => {
         failure = error as SyncFailure;
       }
       expect(failure instanceof SyncFailure).toBe(true);
+      expect(failure?.message).toContain("invalid JSON");
+      const warnings = failure?.warnings ?? [];
+      expect(warnings.some((warning) => warning.includes(legacyRootDir))).toBe(false);
+      expect(warnings.some((warning) => warning.includes(legacyRootFile))).toBe(false);
       expect(
-        (failure?.warnings ?? []).some((warning) =>
-          warning.includes("Ignored legacy/unknown target root entry"),
-        ),
-      ).toBe(true);
+        warnings.some((warning) => warning.includes("Ignored legacy/unknown target root entry")),
+      ).toBe(false);
     } finally {
       await cleanup(fixture.root);
     }
   });
 
-  it("preserves target-root legacy warnings when state validation rejects a scope", async () => {
+  it("still warns for unknown entries inside targetDir/sessions and targetDir/missions", async () => {
     const fixture = await makeFixture();
+    const unknownSessionTree = join(fixture.targetDir, "sessions", "not-a-portable-name");
+    const unknownSessionFile = join(unknownSessionTree, "session.jsonl");
+    const unknownMissionFile = join(fixture.targetDir, "missions", "index", "unknown.txt");
+    const legacyRootEntry = join(fixture.targetDir, "legacy-root-entry.txt");
     try {
-      // A well-formed current state whose scope naming configuration does not
-      // match the running configuration is a HARD error; the target-root
-      // warning collected before loadState must still be reported with it.
-      await mkdir(join(fixture.targetDir, fixture.portableName));
-      await writeFile(join(fixture.targetDir, "legacy-file.txt"), "old\n");
-      await writeFile(
-        join(fixture.targetDir, STATE_FILE_NAME),
-        JSON.stringify({
-          version: 1,
-          scopes: {
-            [`nested:${fixture.sessionsRoot}`]: {
-              layout: "nested",
-              sessionsRoot: fixture.sessionsRoot,
-              namingConfig: { homeLabel: "OTHER_HOME", rootLabel: "ROOT", extraPrefixes: {} },
-              directories: {},
-              flatFiles: {},
-            },
-          },
-          entries: {},
-        }),
-      );
-      let failure: SyncFailure | undefined;
-      try {
-        await syncSessions({
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          missionsRoot: fixture.missionsRoot,
-          now: 51_200,
-        });
-      } catch (error) {
-        failure = error as SyncFailure;
-      }
-      expect(failure instanceof SyncFailure).toBe(true);
-      expect(failure?.message).toContain("Naming configuration mismatch");
+      await mkdir(unknownSessionTree, { recursive: true });
+      await writeFile(unknownSessionFile, "{}\n");
+      await mkdir(join(fixture.targetDir, "missions", "index"), { recursive: true });
+      await writeFile(unknownMissionFile, "unknown\n");
+      await writeFile(legacyRootEntry, "legacy\n");
+      const summary = await syncSessions({
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        missionsRoot: fixture.missionsRoot,
+        machineId: "child-root-warning-machine",
+        now: 51_200,
+      });
+      // Unknown root entries inside the managed child roots still warn.
       expect(
-        (failure?.warnings ?? []).some((warning) =>
-          warning.includes("Ignored legacy/unknown target root entry"),
+        summary.warnings.some((warning) =>
+          warning.includes(`Ignored unknown target session directory: ${unknownSessionTree}`),
         ),
       ).toBe(true);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes(`Ignored unknown missions file: ${unknownMissionFile}`),
+        ),
+      ).toBe(true);
+      // Direct targetDir entries stay silent (v0.4.2).
+      expect(summary.warnings.some((warning) => warning.includes(legacyRootEntry))).toBe(false);
+      expect(await readFile(legacyRootEntry, "utf8")).toBe("legacy\n");
     } finally {
       await cleanup(fixture.root);
     }

@@ -129,7 +129,7 @@ describe("review2 item2: persisted target evidence merges with local evidence", 
       await mkdir(targetTree, { recursive: true });
       await writeFile(
         join(targetTree, "meta.json"),
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${labelRootP}/x.jsonl` })}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${labelRootP}/x.jsonl` })}\n`,
       );
       // Run 1: only the target side exists, so the ROOT spelling becomes the
       // persisted destination-side evidence for this logical owner.
@@ -152,7 +152,7 @@ describe("review2 item2: persisted target evidence merges with local evidence", 
       // and the semantic label conflict must stop the sync.
       await writeFile(
         localMeta,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${labelShortP}/x.jsonl` })}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${labelShortP}/x.jsonl` })}\n`,
       );
       const realFile = join(fixture.root, "real-meta.json");
       await writeFile(realFile, `${JSON.stringify({ linked: "nope" })}\n`);
@@ -241,7 +241,7 @@ describe("review2 item2: persisted flat target evidence merges with local eviden
       await mkdir(targetTree, { recursive: true });
       await writeFile(
         join(targetTree, "meta.json"),
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${labelRootP}/x.jsonl` })}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${labelRootP}/x.jsonl` })}\n`,
       );
       const options = {
         sessionsRoot: flatRoot,
@@ -255,7 +255,7 @@ describe("review2 item2: persisted flat target evidence merges with local eviden
       const localMeta = join(flatRoot, "meta.json");
       await writeFile(
         localMeta,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${labelShortP}/x.jsonl` })}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${labelShortP}/x.jsonl` })}\n`,
       );
       const realFile = join(fixture.root, "real-meta.json");
       await writeFile(realFile, `${JSON.stringify({ linked: "nope" })}\n`);

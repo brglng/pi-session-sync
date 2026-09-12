@@ -100,7 +100,7 @@ describe("P1-2 ignored target symlink persisted generic evidence filtering", () 
       await mkdir(targetTreeA, { recursive: true });
       await writeFile(
         metaPath,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
       );
       const options = {
         sessionsRoot: fixture.sessionsRoot,
@@ -144,7 +144,7 @@ describe("P1-2 ignored target symlink persisted generic evidence filtering", () 
       await mkdir(targetTreeA, { recursive: true });
       await writeFile(
         metaPath,
-        `${JSON.stringify({ linked: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
+        `${JSON.stringify({ ownerSessionId: `pi-session-sync://sessions/${portableB}/x.jsonl` }, null, 2)}\n`,
       );
       const options = {
         sessionsRoot: fixture.sessionsRoot,

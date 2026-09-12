@@ -251,6 +251,63 @@ export function isCrossPlatformSafePathSegment(segment: string): boolean {
   return true;
 }
 
+/**
+ * True when any `/`-separated segment of a root-relative path is a genuinely
+ * hidden name: it starts with `.` but is neither `.` nor `..` (those stay
+ * invalid mapping names and keep hard-erroring elsewhere). Dot-prefixed
+ * entries never participate in the sync (v0.4.1), so a persisted logical path
+ * that names one must never drive decisions, tombstones, mapping/evidence, or
+ * empty-directory cleanup.
+ */
+export function hasHiddenPathSegment(relativePath: string): boolean {
+  return relativePath
+    .split("/")
+    .some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..");
+}
+
+/**
+ * One canonical percent-encoded relative path segment is hidden when its
+ * decoded name starts with `.`. Canonical encoding leaves a leading dot
+ * unescaped, and a non-canonical escaped spelling is rejected by the URI
+ * validators before it reaches this check.
+ */
+function isHiddenRelativeSegment(segment: string): boolean {
+  return segment.startsWith(".") && segment !== "." && segment !== "..";
+}
+
+/**
+ * True when a `pi-session-sync:` URI's relative path (a sessions file path or
+ * a missions path) carries a dot-prefixed (hidden) segment. Rootless cwd URIs
+ * and sessions directory URIs carry no relative path and return false.
+ *
+ * A visible file or mission may still preserve or transform a URI naming a
+ * hidden path, but hidden entries never participate in the sync (v0.4.1), so
+ * such a URI must never seed a flat mapping, parent/generic mapping evidence,
+ * mission evidence, persisted state mapping key, tombstone, cleanup, or
+ * destination write. Malformed or non-file URIs return false; callers
+ * validate URI legality separately.
+ */
+export function syncUriTargetsHiddenPath(value: string): boolean {
+  const prefix = value.match(/^pi-session-sync:\/\//i);
+  if (prefix === null) return false;
+  const remainder = value.slice(prefix[0].length);
+  const slash = remainder.indexOf("/");
+  if (slash <= 0) return false;
+  const namespace = remainder.slice(0, slash).toLowerCase();
+  const rest = remainder.slice(slash + 1);
+  if (namespace === MISSIONS_ROOT_NAMESPACE) {
+    if (rest.length === 0) return false;
+    return rest.split("/").some(isHiddenRelativeSegment);
+  }
+  if (namespace !== SESSIONS_ROOT_NAMESPACE) return false;
+  const sessionSlash = rest.indexOf("/");
+  if (sessionSlash <= 0 || sessionSlash === rest.length - 1) return false;
+  return rest
+    .slice(sessionSlash + 1)
+    .split("/")
+    .some(isHiddenRelativeSegment);
+}
+
 function assertCrossPlatformSafePathSegment(segment: string, context: string): void {
   if (!isCrossPlatformSafePathSegment(segment)) {
     throw new Error(`Unsafe cross-platform path segment in ${context}: ${segment}`);

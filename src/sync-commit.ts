@@ -11,7 +11,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { SessionLayout } from "./config.ts";
 import type { StateEntry } from "./state.ts";
 import { nativePathIdentity, sameOrInside } from "./sync-native.ts";
@@ -24,7 +24,14 @@ export async function stageCopy(
 ): Promise<void> {
   const stagedPath = join(stageRoot, "copies", String(index));
   await mkdir(dirname(stagedPath), { recursive: true });
-  await writeFile(stagedPath, action.source.outputText, { encoding: "utf8", mode: 0o600 });
+  const streamed = action.source.streamedContent;
+  if (streamed === undefined) {
+    await writeFile(stagedPath, action.source.outputText, { encoding: "utf8", mode: 0o600 });
+  } else {
+    // A streamed JSONL source was never materialized: re-emit its rewritten
+    // bytes from the streamed transform instead of holding a whole-file string.
+    await streamed.writeTo(stagedPath);
+  }
   await utimes(stagedPath, action.source.mtimeMs / 1000, action.source.mtimeMs / 1000);
   action.stagedPath = stagedPath;
 }
@@ -60,6 +67,10 @@ export async function removeEmptyDirectories(
   allowed: Set<string>,
   protectedDirectories: ReadonlySet<string> = new Set(),
 ): Promise<void> {
+  // A dot-prefixed directory is hidden and never participates in the sync:
+  // never remove it (nor anything under it), even when a persisted logical key
+  // or a scan seeded it into the cleanup set (v0.4.1).
+  if (basename(root).startsWith(".")) return;
   let info: Awaited<ReturnType<typeof lstat>>;
   try {
     info = await lstat(root);
@@ -75,6 +86,11 @@ export async function removeEmptyDirectories(
     return;
   }
   for (const entry of entries) {
+    // Dot-prefixed entries never participate in the sync: never recurse into
+    // them and never remove them or their content (v0.4.1). They also keep
+    // the enclosing directory non-empty below, so a directory holding only
+    // dot-prefixed entries is preserved.
+    if (entry.startsWith(".")) continue;
     const path = join(root, entry);
     let child: Awaited<ReturnType<typeof lstat>>;
     try {
@@ -124,7 +140,10 @@ export function addCleanupPath(
     sameOrInside(rootPath, directory)
   ) {
     if (layout === "flat" && directory === rootPath) break;
-    allowed.add(directory);
+    // Hidden directories never take part in cleanup: seeding one would let a
+    // persisted hidden logical key make the sync remove a hidden directory
+    // (v0.4.1). Non-hidden ancestors are still seeded normally.
+    if (!basename(directory).startsWith(".")) allowed.add(directory);
     directory = dirname(directory);
   }
 }

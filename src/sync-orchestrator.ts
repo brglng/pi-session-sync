@@ -17,7 +17,12 @@ import {
   scanSessions,
   type TombstonedFileStatus,
 } from "./scan.ts";
-import { isSyncUri, type LocalDirectoryMapping, nativeNameIdentity } from "./session-paths.ts";
+import {
+  hasHiddenPathSegment,
+  isSyncUri,
+  type LocalDirectoryMapping,
+  nativeNameIdentity,
+} from "./session-paths.ts";
 import {
   emptyScope,
   emptyState,
@@ -66,7 +71,6 @@ import {
   layoutFromMachineScopeKey,
   machineScopeKeyFor,
   mappingForNativeName,
-  namingConfigMatches,
   nativeCompatiblePortableMappings,
   recordValueForNativeName,
   sameCwdPath,
@@ -112,7 +116,7 @@ import {
   targetPathForKey,
   validateActiveSessionOwnership,
 } from "./sync-paths-keys.ts";
-import { collectTargetDirLegacyWarnings, validateSyncRoots } from "./sync-paths-validate.ts";
+import { validateSyncRoots } from "./sync-paths-validate.ts";
 import {
   decisionHasBlockedLocalMutation,
   mappingHasBlockedLocalMutation,
@@ -140,6 +144,12 @@ import {
   validateStateEntries,
   validateStateMappings,
 } from "./sync-state-core.ts";
+import {
+  emptyForeignStateParts,
+  extractForeignState,
+  type ForeignStateParts,
+  mergeForeignState,
+} from "./sync-state-foreign.ts";
 import {
   canonicalStatePortableName,
   normalizeStateEntryKeys,
@@ -194,20 +204,25 @@ function copyCwdEvidence(
  * Derive the current machine's evidence localName from a persisted portable
  * session label. Mission evidence records store the localName of the machine
  * that recorded them; a machine with a different HOME derives a different Pi
- * directory name for the same HOME/ROOT label. Nested evidence always uses the
- * current machine's derivation so another machine's records stay usable here;
- * flat evidence keys are sessions-root relative paths and are already machine
- * independent, so they are kept verbatim.
+ * directory name for the same HOME/ROOT label, so nested evidence uses the
+ * CURRENT machine's derivation while flat evidence keys (sessions-root
+ * relative paths) are already machine independent and kept verbatim.
+ *
+ * A portable label that cannot be decoded under the CURRENT naming
+ * configuration belongs to another machine's labels. A foreign label must
+ * never be seeded into the current resolver (whose output is written as a
+ * portable URI), so it returns `undefined`: callers skip that evidence, which
+ * stays preserved in state verbatim.
  */
 function currentMachineEvidenceLocalName(
   layout: DecisionContext["layout"],
   storedLocalName: string,
   portableName: string,
   namingOptions: DecisionContext["namingOptions"],
-): string {
-  if (layout !== "nested") return storedLocalName;
+): string | undefined {
   const decoded = decodePortableSessionDirName(portableName, namingOptions);
-  if (decoded === null) return storedLocalName;
+  if (decoded === null) return undefined;
+  if (layout !== "nested") return storedLocalName;
   return defaultSessionDirName(decoded.cwd);
 }
 
@@ -241,10 +256,27 @@ function patchMissionSessionMappings(
     string,
     Record<string, string>
   >;
+  // A persisted hidden (dot-prefixed) relative segment never participates in
+  // the sync (v0.4.1), so it is never carried forward into next state.
+  const withoutHiddenMappings = (record: Record<string, string>): Record<string, string> => {
+    const filtered: Record<string, string> = Object.create(null) as Record<string, string>;
+    for (const [localName, portableName] of Object.entries(record)) {
+      if (hasHiddenPathSegment(localName)) continue;
+      Object.defineProperty(filtered, localName, {
+        value: portableName,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
+    return filtered;
+  };
   for (const [machineKey, machineRecord] of Object.entries(previous ?? {})) {
     if (machineKey === machineId) continue;
+    const filtered = withoutHiddenMappings(machineRecord);
+    if (Object.keys(filtered).length === 0) continue;
     Object.defineProperty(copy, machineKey, {
-      value: { ...machineRecord },
+      value: filtered,
       writable: true,
       enumerable: true,
       configurable: true,
@@ -255,7 +287,7 @@ function patchMissionSessionMappings(
     // evidence for a localName the persisted record does not carry is added;
     // an incompatible label for the SAME localName stops the sync instead of
     // overwriting a label the unreadable target content may still require.
-    const merged: Record<string, string> = { ...previousMachine };
+    const merged: Record<string, string> = withoutHiddenMappings(previousMachine);
     for (const [localName, portableName] of record ?? []) {
       const existing = recordValueForNativeName(merged, localName);
       if (existing === undefined) {
@@ -320,12 +352,19 @@ function addPersistedMissionEvidence(
     // carry-forward; it just never feeds this layout's resolver.
     if (layoutFromMachineScopeKey(machineKey) !== ctx.layout) continue;
     for (const [storedLocalName, portableName] of Object.entries(machineRecord)) {
+      // A hidden (dot-prefixed) relative segment never participates in the sync
+      // (v0.4.1): a persisted mapping key naming one seeds no resolver mapping.
+      if (hasHiddenPathSegment(storedLocalName)) continue;
       const localName = currentMachineEvidenceLocalName(
         ctx.layout,
         storedLocalName,
         portableName,
         ctx.namingOptions,
       );
+      // A foreign label that cannot decode under the current configuration
+      // seeds no current mapping: it is preserved in state verbatim, never
+      // reused under a stored localName that never matched it.
+      if (localName === undefined) continue;
       const existing = mappingForNativeName(mappings, localName);
       if (existing === undefined) {
         mappings.set(localName, portableName);
@@ -614,15 +653,19 @@ async function syncSessionsInternal(
   ctx.sessionsTargetRoot = validatedRoots.sessionsTargetRoot;
   ctx.missionsTargetRoot = validatedRoots.missionsTargetRoot;
   validateActiveSessionOwnership(ctx);
-  const targetDirLegacyWarnings = await collectTargetDirLegacyWarnings(targetDir, STATE_FILE_NAME);
+  // Direct entries under `targetDir` that the current layout does not
+  // participate in (old portable session directories, old layout files, ...)
+  // are ignored silently (v0.4.2): they are never read, written, deleted,
+  // created, or entered into state/mapping, and they produce no warning. Only
+  // unknown root entries inside `targetDir/sessions` and `targetDir/missions`
+  // are reported by their scanners.
   // Initialized before state load so hard errors during state validation or
   // the early checks still report any warnings collected so far.
-  let accumulatedWarnings = [...targetDirLegacyWarnings];
+  let accumulatedWarnings: string[] = [];
   // Early hard failures (state load, normalization, validation) happen before
   // the main staging try below, so they must merge the warnings collected so
-  // far themselves; otherwise the target-root legacy warnings never reach the
-  // reported SyncFailure. Hard state errors keep their message and stay
-  // hard errors; only the warning set is enriched.
+  // far themselves. Hard state errors keep their message and stay hard errors;
+  // only the warning set is enriched.
   const earlyFailure = (error: unknown): SyncFailure =>
     new SyncFailure(errorMessage(error), [
       ...new Set([...accumulatedWarnings, ...(error instanceof SyncFailure ? error.warnings : [])]),
@@ -641,24 +684,32 @@ async function syncSessionsInternal(
   // content would make recovery impossible and would masquerade as an
   // implicit migration). Current-state files always commit normally.
   const preserveOldStateManifest = loadedState.kind === "old";
-  const stateWarnings = [
-    ...(loadedState.kind === "old" ? loadedState.warnings : []),
-    ...targetDirLegacyWarnings,
-  ];
+  const stateWarnings = [...(loadedState.kind === "old" ? loadedState.warnings : [])];
   accumulatedWarnings = [...stateWarnings];
   const state = loadedState.kind === "valid" ? loadedState.state : emptyState();
+  // Foreign state — portable labels belonging to another machine's naming
+  // configuration — is extracted BEFORE any current-machine normalization or
+  // validation and merged back verbatim on write. Differing naming
+  // configurations are never compared or rejected, and the foreign
+  // entries/mappings never participate in current-machine decisions,
+  // tombstones, mapping evidence, or cleanup (v0.4.2 cross-machine rule).
+  let foreignStateParts: ForeignStateParts;
+  try {
+    foreignStateParts =
+      loadedState.kind === "valid"
+        ? extractForeignState(state, ctx.namingOptions)
+        : emptyForeignStateParts();
+  } catch (error) {
+    // A malformed foreign logical key or mapping key hard-fails like any other
+    // malformed state: it must never be hidden by opaque preservation.
+    throw earlyFailure(error);
+  }
   let stateScope: StateScope;
   try {
     if (loadedState.kind === "valid") {
       const validState = loadedState.state;
       normalizeStateEntryKeys(state, ctx.namingOptions);
       for (const [storedScopeKey, storedScope] of Object.entries(validState.scopes)) {
-        if (!namingConfigMatches(storedScope.namingConfig, ctx.namingOptions)) {
-          throw new SyncFailure(
-            `Naming configuration mismatch in state scope: ${storedScopeKey}`,
-            [],
-          );
-        }
         try {
           normalizeStateScopePortableNames(storedScope, ctx.namingOptions);
           validateStateMappings(storedScope, ctx.namingOptions, storedScopeKey === scopeKey);
@@ -669,15 +720,17 @@ async function syncSessionsInternal(
     }
     stateScope =
       loadedState.kind !== "valid"
-        ? emptyScope(layout, sessionsRoot, ctx.namingOptions)
+        ? emptyScope(layout, sessionsRoot)
         : (Object.entries(loadedState.state.scopes).find(([storedKey]) =>
             sameScopeKey(storedKey, scopeKey),
-          )?.[1] ?? emptyScope(layout, sessionsRoot, ctx.namingOptions));
+          )?.[1] ?? emptyScope(layout, sessionsRoot));
     normalizeStateScopePortableNames(stateScope, ctx.namingOptions);
+    // Naming configuration is never persisted or compared (v0.4.2): another
+    // machine's differing homeLabel/rootLabel/extraPrefixes must not block
+    // sync or migration, so scope identity is layout plus sessions root only.
     if (
       stateScope.layout !== layout ||
-      scopeRootIdentity(stateScope.sessionsRoot) !== scopeRootIdentity(sessionsRoot) ||
-      !namingConfigMatches(stateScope.namingConfig, ctx.namingOptions)
+      scopeRootIdentity(stateScope.sessionsRoot) !== scopeRootIdentity(sessionsRoot)
     ) {
       throw new SyncFailure(`Invalid state scope: ${scopeKey}`, []);
     }
@@ -3347,17 +3400,14 @@ async function syncSessionsInternal(
             nextEvidenceByKey.set(key, merged);
           }
           for (const [localName, portableName] of Object.entries(persisted)) {
-            mergeGenericMapping(
-              merged,
-              currentMachineEvidenceLocalName(
-                ctx.layout,
-                localName,
-                portableName,
-                ctx.namingOptions,
-              ),
+            const evidenceLocalName = currentMachineEvidenceLocalName(
+              ctx.layout,
+              localName,
               portableName,
-              ctx,
+              ctx.namingOptions,
             );
+            if (evidenceLocalName === undefined) continue;
+            mergeGenericMapping(merged, evidenceLocalName, portableName, ctx);
           }
         }
         // A nested label replacement whose state-key migration was rolled back
@@ -3381,17 +3431,14 @@ async function syncSessionsInternal(
             nextEvidenceByKey.set(oldKey, merged);
           }
           for (const [localName, portableName] of Object.entries(persisted)) {
-            mergeGenericMapping(
-              merged,
-              currentMachineEvidenceLocalName(
-                ctx.layout,
-                localName,
-                portableName,
-                ctx.namingOptions,
-              ),
+            const evidenceLocalName = currentMachineEvidenceLocalName(
+              ctx.layout,
+              localName,
               portableName,
-              ctx,
+              ctx.namingOptions,
             );
+            if (evidenceLocalName === undefined) continue;
+            mergeGenericMapping(merged, evidenceLocalName, portableName, ctx);
           }
         }
       }
@@ -3488,9 +3535,9 @@ async function syncSessionsInternal(
         }
       }
       const nextScope: StateScope = {
+        format: 2,
         layout: ctx.layout,
         sessionsRoot: ctx.sessionsRoot,
-        namingConfig: ctx.namingOptions,
         directories,
         flatFiles,
         ...(nextGenericDirectories === undefined
@@ -3597,6 +3644,11 @@ async function syncSessionsInternal(
       } catch (error) {
         throw new SyncFailure(errorMessage(error), warnings);
       }
+      // Merge the extracted foreign state back verbatim only AFTER the
+      // generated next state has been validated: another machine's labels are
+      // preserved as opaque persisted evidence, never revalidated or decoded
+      // under this machine's configuration.
+      mergeForeignState(nextState, foreignStateParts);
       const commitDecisions = [...decisions].sort((a, b) => {
         const aStaleDelete =
           (a.previousEntry !== undefined &&

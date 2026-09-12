@@ -212,13 +212,14 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("rejects out-of-root Markdown parentSession before writing state or files", async () => {
+  it("preserves an out-of-root Markdown parentSession verbatim with a warning", async () => {
     const fixture = await makeFixture();
     const source = join(fixture.localTree, "notes.md");
+    const rawParent = "/machine-specific/session.jsonl";
     const localText = [
       "---",
       `cwd: ${fixture.cwd}`,
-      "parentSession: /machine-specific/session.jsonl",
+      `parentSession: ${rawParent}`,
       "---",
       "body",
       "",
@@ -226,21 +227,27 @@ describe("bidirectional session sync core", () => {
     try {
       await writeFile(source, localText);
       await utimes(source, 1, 1);
-      // Local source: an out-of-root absolute parentSession is a strict file
-      // error before staging; it is never silently preserved or copied.
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
+      // v0.4.1: an out-of-root absolute parentSession cannot be encoded as a
+      // portable path, so it is copied verbatim with a warning instead of
+      // stopping the sync.
+      const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
 
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 1_000,
-        }),
-      ).rejects.toThrow(/parentSession must reference a session file/);
-      // Markdown stays unchanged and no state or files are written.
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 1_000,
+      });
+      expect(summary.copied).toBe(1);
+      expect(
+        summary.warnings.some((warning) =>
+          warning.includes("Invalid local parentSession preserved verbatim"),
+        ),
+      ).toBe(true);
+      const target = join(fixture.targetDir, "sessions", fixture.portableName, "notes.md");
+      expect(await readFile(target, "utf8")).toContain(`parentSession: ${rawParent}`);
+      // The local source keeps its own bytes; only canonical hashing normalizes
+      // the equivalent representations.
       expect(await readFile(source, "utf8")).toBe(localText);
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-      expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
     } finally {
       await cleanup(fixture.root);
     }
@@ -942,7 +949,9 @@ describe("bidirectional session sync core", () => {
         now: 10_000,
       });
       expect(first.warnings.some((warning) => warning.includes(malformedRoot))).toBe(true);
-      expect(first.warnings.some((warning) => warning.includes(unknownRoot))).toBe(true);
+      // An empty (or hidden-only) unknown directory is not an unknown entry:
+      // it holds nothing to ignore, so it stays silent (v0.4.1).
+      expect(first.warnings.some((warning) => warning.includes(unknownRoot))).toBe(false);
       await expect(
         readFile(
           join(fixture.targetDir, "sessions", fixture.portableName, "ignored.jsonl"),
@@ -1047,7 +1056,7 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("preserves control characters in parent URI values with a warning while copying", async () => {
+  it("preserves unsafe parent URI segments on target source with a warning", async () => {
     const fixture = await makeFixture();
     const targetFile = join(
       fixture.targetDir,
@@ -1064,9 +1073,11 @@ describe("bidirectional session sync core", () => {
     try {
       await mkdir(dirname(targetFile), { recursive: true });
       await writeFile(targetFile, original);
+      // v0.4.2: a relative segment that percent-decodes to a control character
+      // is malformed current-format content preserved verbatim with a bounded
+      // warning instead of stopping the sync.
       const summary = await syncSessions({
         missionsRoot: fixture.missionsRoot,
-
         sessionsRoot: fixture.sessionsRoot,
         targetDir: fixture.targetDir,
         now: 10_002,
@@ -1074,23 +1085,16 @@ describe("bidirectional session sync core", () => {
       expect(summary.copied).toBe(1);
       expect(
         summary.warnings.some((warning) =>
-          warning.includes("Invalid pi-session-sync URI preserved verbatim"),
+          warning.includes("Malformed pi-session-sync value preserved verbatim"),
         ),
       ).toBe(true);
       expect(await readFile(targetFile, "utf8")).toBe(original);
-      const localContent = await readFile(join(fixture.localTree, "bad-parent.jsonl"), "utf8");
-      // The valid cwd decodes to the local path; only the invalid parent URI
-      // is preserved verbatim.
-      const localEntry = JSON.parse(localContent) as {
-        cwd: string;
-        parentSession: string;
-      };
-      expect(localEntry.cwd).toBe(fixture.cwd);
-      expect(localEntry.parentSession).toBe(
+      const local = JSON.parse(
+        await readFile(join(fixture.localTree, "bad-parent.jsonl"), "utf8"),
+      ) as { cwd: string; parentSession: string };
+      expect(local.cwd).toBe(fixture.cwd);
+      expect(local.parentSession).toBe(
         `pi-session-sync://sessions/${fixture.portableName}/bad%01name.jsonl`,
-      );
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).resolves.toContain(
-        "bad-parent.jsonl",
       );
     } finally {
       await cleanup(fixture.root);

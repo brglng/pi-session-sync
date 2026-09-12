@@ -1,7 +1,7 @@
 /// <reference types="node" />
 
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { access, lstat, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { SessionLayout } from "./config.ts";
 import {
@@ -21,6 +21,7 @@ import {
 } from "./portable-name.ts";
 import {
   generatedLocalSessionDirName,
+  hasHiddenPathSegment,
   isCrossPlatformSafePathSegment,
   isSyncUri,
   type LocalDirectoryMapping,
@@ -37,11 +38,12 @@ import { canonicalRootUri } from "./sync-paths.ts";
 import { type ParsedLogicalKey, parseLogicalKey } from "./sync-state-core.ts";
 import {
   createParentPathResolver,
+  fileScopedTransformWarning,
   type ParentPathResolver,
   type ParentSessionReference,
+  type StreamedJsonlContent,
   type TransformMode,
   transformFile,
-  transformFileText,
 } from "./transform.ts";
 
 export type ScanSide = "local" | "target";
@@ -199,8 +201,25 @@ export interface ScannedFile {
   relativePath: string;
   mtimeMs: number;
   hash: string;
+  /**
+   * Whole-file transformed text. Empty when `streamedContent` is set: the
+   * file was above the streaming threshold (or its size was unknown) and the
+   * rewritten bytes are re-emitted from `streamedContent` at staging time
+   * instead of being held as one JS string for every scanned file.
+   */
   outputText: string;
+  /**
+   * Whole-file canonical-target text used for content comparison. Empty when
+   * `streamedContent` is set; `hash` (the canonical hash) is authoritative
+   * for streamed and materialized files alike.
+   */
   canonicalText: string;
+  /**
+   * Set for a JSONL file transformed with bounded memory: `outputText` and
+   * `canonicalText` stay empty and the rewritten bytes are re-emitted at
+   * staging time (`canonicalHash` is the canonical-target hash).
+   */
+  streamedContent?: StreamedJsonlContent;
   cwdValues: string[];
   sessionCwdPresent?: boolean;
   sessionHeaderValid?: boolean;
@@ -349,6 +368,21 @@ function isSessionExtension(name: string): boolean {
   return name.endsWith(".json") || name.endsWith(".jsonl") || name.endsWith(".md");
 }
 
+/**
+ * True when a directory holds at least one visible (non-dot-prefixed) entry.
+ * An empty directory, or one holding only dot-prefixed entries, is not an
+ * unknown entry (v0.4.1) and stays silent. Unreadable directories count as
+ * non-empty so their warning is preserved.
+ */
+async function hasVisibleEntries(path: string): Promise<boolean> {
+  try {
+    const entries = await readdir(path);
+    return entries.some((entry) => !entry.startsWith("."));
+  } catch {
+    return true;
+  }
+}
+
 function hashText(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -474,15 +508,100 @@ function isForbiddenSymlinkTarget(
   );
 }
 
-function uniqueCwd(values: string[], path: string): string | undefined {
+/**
+ * Distinct cwd values in native-identity order (first-seen wins). One file or
+ * directory can legitimately carry several cwd values (nested custom entries,
+ * sub-session content); callers must preserve them instead of failing.
+ */
+function distinctCwds(values: readonly string[]): string[] {
   const unique: string[] = [];
   for (const cwd of values) {
     if (!unique.some((existing) => sameCwd(existing, cwd))) unique.push(cwd);
   }
-  if (unique.length > 1) {
-    throw new Error(`Multiple cwd values in session file ${path}: ${unique.join(", ")}`);
+  return unique;
+}
+
+/**
+ * Maximum number of cwd values echoed in the bounded multiple-cwd warning. The
+ * conflict is never fatal but the message must stay bounded even when a file
+ * carries arbitrarily many (or arbitrarily long) cwd values.
+ */
+const MULTIPLE_CWD_VALUE_LIMIT = 3;
+
+/**
+ * Maximum characters echoed for one cwd value in the bounded multiple-cwd
+ * warning: a hostile or very long value must never produce unbounded output.
+ */
+const MULTIPLE_CWD_VALUE_PREVIEW = 120;
+
+function boundedCwdPreview(value: string): string {
+  return value.length <= MULTIPLE_CWD_VALUE_PREVIEW
+    ? value
+    : `${value.slice(0, MULTIPLE_CWD_VALUE_PREVIEW)}…`;
+}
+
+function multipleCwdWarning(path: string, cwds: readonly string[]): string {
+  const previews: string[] = [];
+  for (const cwd of cwds.slice(0, MULTIPLE_CWD_VALUE_LIMIT)) {
+    previews.push(boundedCwdPreview(cwd));
   }
-  return unique[0];
+  const extra = cwds.length > MULTIPLE_CWD_VALUE_LIMIT ? ", …" : "";
+  return `Multiple cwd values in session file ${path}: ${previews.join(", ")}${extra}`;
+}
+
+/**
+ * Missing cwd paths are still portable values: existence is not required for
+ * encoding or decoding. Report their local absence without changing the file
+ * or stopping the sync.
+ */
+async function warnMissingCwdPaths(
+  path: string,
+  cwdValues: readonly string[],
+  warnings: string[],
+): Promise<void> {
+  for (const cwd of distinctCwds(cwdValues)) {
+    try {
+      await access(cwd);
+    } catch {
+      warnings.push(
+        fileScopedTransformWarning(
+          path,
+          `cwd path does not exist or is inaccessible: ${boundedCwdPreview(cwd)}`,
+        ),
+      );
+    }
+  }
+}
+
+/**
+ * Single cwd value for a dedup decision: undefined when a tree carries
+ * conflicting cwd values, so the deterministic representative rule falls back
+ * to persisted-state naming instead of guessing. Never throws.
+ */
+function singleCwd(values: readonly string[]): string | undefined {
+  const unique = distinctCwds(values);
+  return unique.length === 1 ? unique[0] : undefined;
+}
+
+/**
+ * A session file's cwd values should belong to its containing session
+ * directory. A mismatch is nonfatal: the file remains in its containing tree,
+ * each encodable cwd is still portable-encoded/decoded, and unconvertible
+ * values remain verbatim with a warning.
+ */
+function checkFileCwdAttribution(
+  cwdValues: readonly string[],
+  expectedCwd: string,
+  path: string,
+  mismatchMessage: string,
+  warnings: string[],
+): void {
+  const distinct = distinctCwds(cwdValues);
+  if (distinct.length === 0) return;
+  if (!distinct.some((value) => sameCwd(value, expectedCwd))) {
+    warnings.push(`${mismatchMessage} ${path}`);
+  }
+  if (distinct.length > 1) warnings.push(multipleCwdWarning(path, distinct));
 }
 
 function deriveRootDirectories(
@@ -521,6 +640,13 @@ async function collectTreeFiles(
   files: CandidateFile[];
   directories: Set<string>;
   ignoredSymlinks: CandidateSymlink[];
+  /**
+   * True when the scanned ROOT directory itself held no visible entry after
+   * dot-prefixed entries were excluded. Such an empty root is not an unknown
+   * entry and must stay silent (v0.4.1): callers suppress the unknown-root
+   * warning for it while still dropping the file-less tree.
+   */
+  rootEmpty: boolean;
 }> {
   const files: CandidateFile[] = [];
   const ignoredSymlinks: CandidateSymlink[] = [];
@@ -555,8 +681,9 @@ async function collectTreeFiles(
     };
     const transformed = await transformFile(physicalPath, mode, resolver, { namingOptions });
     for (const warning of transformed.warnings ?? []) {
-      warnings.push(`${logicalPath}: ${warning}`);
+      warnings.push(fileScopedTransformWarning(logicalPath, warning));
     }
+    await warnMissingCwdPaths(logicalPath, transformed.cwdValues, warnings);
     files.push({
       absolutePath: logicalPath,
       ...(leafRealPath === undefined ? {} : { physicalPath: leafRealPath }),
@@ -577,7 +704,7 @@ async function collectTreeFiles(
     logicalDirectory: string,
     physicalDirectory: string,
     isRoot = false,
-  ): Promise<"ok" | "repeated"> => {
+  ): Promise<"ok" | "repeated" | "empty"> => {
     if (followSymlinks) {
       let identityInfo: Awaited<ReturnType<typeof lstat>> | undefined;
       let realDir: string | undefined;
@@ -622,11 +749,13 @@ async function collectTreeFiles(
     let entries: string[];
     try {
       // Sorted traversal: real-node dedup and mapping precedence must never
-      // depend on filesystem readdir order.
-      entries = (await readdir(physicalDirectory)).sort();
+      // depend on filesystem readdir order. Dot-prefixed entries are excluded
+      // before any lstat: they never participate in the sync (v0.4.1).
+      entries = (await readdir(physicalDirectory)).filter((entry) => !entry.startsWith(".")).sort();
     } catch (error) {
       throw new Error(`Cannot read session directory ${logicalDirectory}: ${String(error)}`);
     }
+    const directoryHasEntries = entries.length > 0;
     for (const entry of entries) {
       const logicalPath = join(logicalDirectory, entry);
       const physicalPath = join(physicalDirectory, entry);
@@ -708,7 +837,10 @@ async function collectTreeFiles(
             }
           }
           const result = await walk(logicalPath, real);
-          if (result !== "repeated" && files.length === 0) {
+          if (mode !== "inspect-local" && result === "ok" && files.length === 0) {
+            // Local source trees ignore unrecognized session directories
+            // silently (v0.4.1): unknown content never participates in the sync
+            // and produces no warning. Target trees keep the warning.
             warnings.push(`Ignored unknown session directory: ${logicalPath}`);
           }
           continue;
@@ -734,7 +866,9 @@ async function collectTreeFiles(
       if (info.isDirectory()) {
         const filesBefore = files.length;
         const result = await walk(logicalPath, physicalPath);
-        if (result !== "repeated" && files.length === filesBefore) {
+        if (mode !== "inspect-local" && result === "ok" && files.length === filesBefore) {
+          // Local source trees ignore unrecognized session directories
+          // silently (v0.4.1); target trees keep the warning.
           warnings.push(`Ignored unknown session directory: ${logicalPath}`);
         }
         continue;
@@ -753,12 +887,12 @@ async function collectTreeFiles(
       }
       await collect(logicalPath, physicalPath, info);
     }
-    return "ok";
+    return directoryHasEntries ? "ok" : "empty";
   };
 
-  await walk(rootPath, rootPath, true);
+  const rootResult = await walk(rootPath, rootPath, true);
   const directories = deriveRootDirectories(rootPath, files);
-  return { files, directories, ignoredSymlinks };
+  return { files, directories, ignoredSymlinks, rootEmpty: rootResult === "empty" };
 }
 
 function mappingFromState(
@@ -825,11 +959,17 @@ function mapLocalTree(
   tree: CandidateTree,
   state: SessionScopeState,
   namingOptions: PortableNameOptions,
+  warnings: string[],
 ): LocalDirectoryMapping | undefined {
-  const cwd = uniqueCwd(
-    tree.files.flatMap((file) => file.cwdValues),
-    tree.rootPath,
-  );
+  // v0.4.1: several different cwd values inside one session tree are preserved
+  // as one bounded warning instead of stopping the sync. The value that
+  // matches the Pi session directory name attributes the tree when present;
+  // otherwise the first value is used and the ordinary directory-name check
+  // below still applies. No cwd is ever guessed over another.
+  const cwds = distinctCwds(tree.files.flatMap((file) => file.cwdValues));
+  if (cwds.length > 1) warnings.push(multipleCwdWarning(tree.rootPath, cwds));
+  const cwd =
+    cwds.find((value) => sameNativeName(defaultSessionDirName(value), tree.rootName)) ?? cwds[0];
   if (cwd !== undefined) {
     const localName = defaultSessionDirName(cwd);
     if (!sameNativeName(localName, tree.rootName)) {
@@ -895,10 +1035,7 @@ async function resolveNestedClaimForRoot(
   });
   const sharedCwd = (() => {
     try {
-      return uniqueCwd(
-        claimOwnFiles.flatMap((file) => file.cwdValues),
-        owner.rootPath,
-      );
+      return singleCwd(claimOwnFiles.flatMap((file) => file.cwdValues));
     } catch {
       return undefined;
     }
@@ -980,7 +1117,10 @@ async function discoverTreesUnsafe(
   try {
     // Sorted root discovery: deterministic pre-order below, and deterministic
     // candidate processing overall, must not depend on readdir order.
-    entries = (await readdir(rootPath)).sort();
+    // Dot-prefixed entries are excluded before any lstat: they never
+    // participate in the sync and stay completely silent (v0.4.1); the root
+    // state file is also dot-prefixed and is handled by the state rules.
+    entries = (await readdir(rootPath)).filter((entry) => !entry.startsWith(".")).sort();
   } catch (error) {
     if (side === "local") {
       const failure = classifyRootAvailabilityFailure(error);
@@ -1125,7 +1265,11 @@ async function discoverTreesUnsafe(
     let cwdFromRoot: string | undefined;
     if (side === "local") {
       if (!isDefaultSessionDirName(entry)) {
-        warnings.push(`Ignored unknown local root directory: ${path}`);
+        // An empty (or hidden-only) unknown directory is not an unknown entry:
+        // it holds nothing to ignore, so it stays silent (v0.4.1).
+        if (await hasVisibleEntries(path)) {
+          warnings.push(`Ignored unknown local root directory: ${path}`);
+        }
         continue;
       }
       // A Pi default session root generated from a CWD containing
@@ -1148,7 +1292,11 @@ async function discoverTreesUnsafe(
         namingOptions,
       );
       if (decoded === null) {
-        warnings.push(`Ignored unknown target session directory: ${path}`);
+        // An empty (or hidden-only) target directory is not an unknown entry:
+        // it holds nothing to ignore, so it stays silent (v0.4.1).
+        if (await hasVisibleEntries(path)) {
+          warnings.push(`Ignored unknown target session directory: ${path}`);
+        }
         continue;
       }
       // Legacy loose encodeURIComponent spellings of a portable name are
@@ -1228,10 +1376,7 @@ async function discoverTreesUnsafe(
         try {
           return claimant === undefined
             ? undefined
-            : uniqueCwd(
-                claimant.files.flatMap((file) => file.cwdValues),
-                claimant.rootPath,
-              );
+            : singleCwd(claimant.files.flatMap((file) => file.cwdValues));
         } catch {
           return undefined;
         }
@@ -1346,7 +1491,11 @@ async function discoverTreesUnsafe(
         for (const [claimedReal, claim] of nestedTreeClaims) {
           if (claim.ownerRootPath === path) nestedTreeClaims.delete(claimedReal);
         }
-        warnings.push(`Ignored unknown local root directory: ${path}`);
+        // A root directory that is empty after dot-prefixed entries are
+        // excluded is not an unknown entry (v0.4.1): stay silent.
+        if (!collected.rootEmpty) {
+          warnings.push(`Ignored unknown local root directory: ${path}`);
+        }
         continue;
       }
       const tree: CandidateTree = {
@@ -1388,10 +1537,7 @@ async function discoverTreesUnsafe(
             : logicalPath;
         const sharedCwd = (() => {
           try {
-            return uniqueCwd(
-              claimant.files.flatMap((file) => file.cwdValues),
-              claimant.rootPath,
-            );
+            return singleCwd(claimant.files.flatMap((file) => file.cwdValues));
           } catch {
             return undefined;
           }
@@ -1477,7 +1623,11 @@ async function discoverTreesUnsafe(
         nestedTreeClaims,
       );
       if (collected.files.length === 0) {
-        warnings.push(`Ignored unknown local root directory: ${path}`);
+        // A root directory that is empty after dot-prefixed entries are
+        // excluded is not an unknown entry (v0.4.1): stay silent.
+        if (!collected.rootEmpty) {
+          warnings.push(`Ignored unknown local root directory: ${path}`);
+        }
         continue;
       }
       const tree: CandidateTree = {
@@ -1512,10 +1662,7 @@ async function discoverTreesUnsafe(
       const cwdMatching = group.find((tree) => {
         let cwd: string | undefined;
         try {
-          cwd = uniqueCwd(
-            tree.files.flatMap((file) => file.cwdValues),
-            tree.rootPath,
-          );
+          cwd = singleCwd(tree.files.flatMap((file) => file.cwdValues));
         } catch {
           return false;
         }
@@ -1635,8 +1782,9 @@ async function collectFlatFiles(
       namingOptions,
     });
     for (const warning of transformed.warnings ?? []) {
-      warnings.push(`${logicalPath}: ${warning}`);
+      warnings.push(fileScopedTransformWarning(logicalPath, warning));
     }
+    await warnMissingCwdPaths(logicalPath, transformed.cwdValues, warnings);
     files.push({
       absolutePath: logicalPath,
       ...(leafRealPath === undefined ? {} : { physicalPath: leafRealPath }),
@@ -1661,7 +1809,7 @@ async function collectFlatFiles(
     logicalDirectory: string,
     physicalDirectory: string,
     isRoot = false,
-  ): Promise<"ok" | "repeated"> => {
+  ): Promise<"ok" | "repeated" | "empty"> => {
     let identityInfo: Awaited<ReturnType<typeof lstat>> | undefined;
     let realDir: string;
     try {
@@ -1714,8 +1862,9 @@ async function collectFlatFiles(
     let entries: string[];
     try {
       // Sorted traversal: real-node dedup and mapping precedence must never
-      // depend on filesystem readdir order.
-      entries = (await readdir(physicalDirectory)).sort();
+      // depend on filesystem readdir order. Dot-prefixed entries are excluded
+      // before any lstat: they never participate in the sync (v0.4.1).
+      entries = (await readdir(physicalDirectory)).filter((entry) => !entry.startsWith(".")).sort();
     } catch (error) {
       const failure = classifyRootAvailabilityFailure(error);
       if (isRoot) {
@@ -1731,6 +1880,7 @@ async function collectFlatFiles(
       }
       throw new Error(`Cannot read flat session directory ${logicalDirectory}: ${String(error)}`);
     }
+    const directoryHasEntries = entries.length > 0;
     for (const entry of entries) {
       const logicalPath = join(logicalDirectory, entry);
       const physicalPath = join(physicalDirectory, entry);
@@ -1791,10 +1941,10 @@ async function collectFlatFiles(
           continue;
         }
         if (realInfo.isDirectory()) {
-          const result = await walk(logicalPath, real);
-          if (result !== "repeated" && files.length === 0) {
-            warnings.push(`Ignored unknown session directory: ${logicalPath}`);
-          }
+          // An unrecognized flat subdirectory (a flat custom sessionDir holds
+          // session FILES at the root; unknown nested directories never
+          // participate) is ignored silently (v0.4.1).
+          await walk(logicalPath, real);
           continue;
         }
         if (realInfo.isFile()) {
@@ -1815,11 +1965,10 @@ async function collectFlatFiles(
         continue;
       }
       if (info.isDirectory()) {
-        const filesBefore = files.length;
-        const result = await walk(logicalPath, physicalPath);
-        if (result !== "repeated" && files.length === filesBefore) {
-          warnings.push(`Ignored unknown session directory: ${logicalPath}`);
-        }
+        // Unrecognized flat subdirectories are ignored silently (v0.4.1): a
+        // flat sessionDir root holds session files, and unknown nested content
+        // never participates in the sync.
+        await walk(logicalPath, physicalPath);
         continue;
       }
       if (!info.isFile()) {
@@ -1836,7 +1985,7 @@ async function collectFlatFiles(
       }
       await collect(logicalPath, physicalPath, info);
     }
-    return "ok";
+    return directoryHasEntries ? "ok" : "empty";
   };
   await walk(rootPath, rootPath, true);
   return { files, directories, ignoredSymlinks };
@@ -1939,7 +2088,7 @@ function localFlatMapping(
     | ((relativePath: string, portableName: string) => boolean)
     | undefined = undefined,
 ): LocalDirectoryMapping | undefined {
-  const cwd = uniqueCwd(file.cwdValues, file.absolutePath);
+  const cwd = distinctCwds(file.cwdValues)[0];
   if (cwd !== undefined) {
     const persisted = mappingFromFlatState(file.relativePath, state, namingOptions);
     if (persisted !== undefined && !excludedIdentity?.(file.relativePath, persisted.portableName)) {
@@ -2198,11 +2347,19 @@ async function scanFlatLocalUnsafe(
       namingOptions,
       portableName: mapping.portableName,
     });
-    for (const value of transformed.cwdValues) {
-      if (!sameCwd(value, mapping.cwd)) {
-        throw new Error(`cwd does not match flat session file ${candidate.absolutePath}`);
-      }
+    // Flat local scans propagate transformed warnings exactly like the nested
+    // and missions scans, so preserved/lentient values still reach the caller
+    // in SyncSummary.warnings instead of being dropped.
+    for (const warning of transformed.warnings ?? []) {
+      warnings.push(fileScopedTransformWarning(candidate.absolutePath, warning));
     }
+    checkFileCwdAttribution(
+      transformed.cwdValues,
+      mapping.cwd,
+      candidate.absolutePath,
+      "cwd does not match flat session file",
+      warnings,
+    );
     const key = `${SESSIONS_LOGICAL_KEY_PREFIX}${portableNameKeyIdentity(mapping.portableName, namingOptions)}/${canonicalLogicalRelativePath(candidate.relativePath)}`;
     if (files.has(key)) throw new Error(`Duplicate logical session file: ${key}`);
     files.set(key, {
@@ -2213,9 +2370,12 @@ async function scanFlatLocalUnsafe(
       rootPath,
       relativePath: candidate.relativePath,
       mtimeMs: candidate.mtimeMs,
-      hash: hashText(transformed.canonicalText),
+      hash: transformed.streamedContent?.canonicalHash ?? hashText(transformed.canonicalText),
       outputText: transformed.outputText,
       canonicalText: transformed.canonicalText,
+      ...(transformed.streamedContent === undefined
+        ? {}
+        : { streamedContent: transformed.streamedContent }),
       cwdValues: transformed.cwdValues,
       sessionCwdPresent: transformed.sessionCwdPresent ?? false,
       sessionHeaderValid: transformed.sessionHeaderValid ?? false,
@@ -2625,7 +2785,6 @@ async function scanNestedSessions(
         const decoded = decodePortableSessionDirName(oldPortableName, namingOptions);
         if (decoded === null) return undefined;
         const oldLocalName = defaultSessionDirName(decoded.cwd);
-        const text = await readFile(file.absolutePath, "utf8");
         const probeResolver = createParentPathResolver(
           localSessionsRoot,
           (localKey) => {
@@ -2639,10 +2798,18 @@ async function scanNestedSessions(
           undefined,
           namingOptions,
         );
-        const probe = transformFileText(file.absolutePath, text, "to-local", probeResolver, {
+        // Size-aware transform: a streamed file is re-hashed record by record
+        // without ever decoding the whole file into one string, exactly like
+        // its scanned hash, so an unchanged medium file still matches its
+        // old-label recovery hash instead of being presumed changed. A
+        // materialized file yields the same canonical text as before.
+        const probe = await transformFile(file.absolutePath, "to-local", probeResolver, {
           namingOptions,
         });
-        return { hash: hashText(probe.canonicalText), canonicalText: probe.canonicalText };
+        return {
+          hash: probe.streamedContent?.canonicalHash ?? hashText(probe.canonicalText),
+          canonicalText: probe.canonicalText,
+        };
       } catch {
         return undefined;
       }
@@ -2700,6 +2867,10 @@ async function scanNestedSessions(
           if (relativePath.length === 0 || relativePath.startsWith("../")) {
             throw new Error(`parentSession path is outside flat sessions root: ${reference.value}`);
           }
+          // A hidden (dot-prefixed) relative segment never participates in the
+          // sync (v0.4.1): the referencing file keeps its URI bytes, but the
+          // reference seeds no parent-only flat mapping.
+          if (hasHiddenPathSegment(relativePath)) continue;
           const portableName = syncParentUriToPortableName(reference.value, namingOptions);
           const decoded = decodePortableSessionDirName(portableName, namingOptions);
           if (decoded === null) {
@@ -2768,6 +2939,10 @@ async function scanNestedSessions(
           if (slash <= 0) {
             throw new Error(`Invalid nested parentSession path: ${reference.value}`);
           }
+          // A hidden (dot-prefixed) relative segment never participates in the
+          // sync (v0.4.1): the referencing file keeps its URI bytes, but the
+          // reference seeds no parent-only directory mapping.
+          if (hasHiddenPathSegment(relativePath)) continue;
           const localName = relativePath.slice(0, slash);
           const portableName = syncParentUriToPortableName(reference.value, namingOptions);
           const decoded = decodePortableSessionDirName(portableName, namingOptions);
@@ -2800,7 +2975,7 @@ async function scanNestedSessions(
   for (const candidate of candidates) {
     let mapping: LocalDirectoryMapping | undefined;
     if (side === "local") {
-      mapping = mapLocalTree(candidate, state, namingOptions);
+      mapping = mapLocalTree(candidate, state, namingOptions, warnings);
       if (candidate.files.length > 0 && mapping === undefined) {
         // The tree itself is unmapped, but every candidate processed before it
         // is safe proven evidence. Defer the failure so the partial mappings
@@ -2839,18 +3014,20 @@ async function scanNestedSessions(
       throw new Error(`No cwd mapping for session directory ${candidate.rootPath}`);
     }
     if (candidate.cwdFromRoot !== undefined && !sameCwd(candidate.cwdFromRoot, cwd)) {
-      throw new Error(`Target directory cwd does not match ${candidate.rootPath}`);
+      warnings.push(`Target directory cwd does not match ${candidate.rootPath}`);
     }
     for (const file of candidate.files) {
-      for (const value of file.cwdValues) {
-        if (!sameCwd(value, cwd)) {
-          throw new Error(`cwd does not match containing session directory ${file.absolutePath}`);
-        }
-      }
+      checkFileCwdAttribution(
+        file.cwdValues,
+        cwd,
+        file.absolutePath,
+        "cwd does not match containing session directory",
+        warnings,
+      );
       if (candidate.portableNameFromRoot !== undefined) {
         for (const portableName of file.cwdPortableNames) {
           if (!samePortableMapping(portableName, candidate.portableNameFromRoot, namingOptions)) {
-            throw new Error(
+            warnings.push(
               `cwd portable label does not match containing session directory ${file.absolutePath}`,
             );
           }
@@ -3184,15 +3361,15 @@ async function scanNestedSessions(
           ...(side === "local" ? { portableName: tree.portableName } : {}),
         },
       );
-      for (const value of transformed.cwdValues) {
-        if (!sameCwd(value, tree.cwd)) {
-          throw new Error(
-            `cwd does not match containing session directory ${candidateFile.absolutePath}`,
-          );
-        }
-      }
+      checkFileCwdAttribution(
+        transformed.cwdValues,
+        tree.cwd,
+        candidateFile.absolutePath,
+        "cwd does not match containing session directory",
+        warnings,
+      );
       for (const warning of transformed.warnings ?? []) {
-        warnings.push(`${candidateFile.absolutePath}: ${warning}`);
+        warnings.push(fileScopedTransformWarning(candidateFile.absolutePath, warning));
       }
       const key = `${SESSIONS_LOGICAL_KEY_PREFIX}${portableNameKeyIdentity(tree.portableName, namingOptions)}/${canonicalLogicalRelativePath(candidateFile.relativePath)}`;
       if (files.has(key)) throw new Error(`Duplicate logical session file: ${key}`);
@@ -3206,12 +3383,15 @@ async function scanNestedSessions(
       // candidate. Unknown old-label canonicalization keeps the scanned hash
       // (conservative: never silently treated as unchanged).
       let scannedCanonicalText = transformed.canonicalText;
+      let scannedHash =
+        transformed.streamedContent?.canonicalHash ?? hashText(scannedCanonicalText);
       if (side === "target" && tombstonedFiles !== undefined && tombstonedFiles.size > 0) {
         const matched = tombstoneStatusForKey(key);
         if (matched !== undefined && matched.status.recoveryHash !== null) {
           const probe = await probeTombstoneRecovery(candidateFile, matched.oldPortableName);
           if (probe !== undefined && probe.hash === matched.status.recoveryHash) {
             scannedCanonicalText = probe.canonicalText;
+            scannedHash = probe.hash;
           }
         }
       }
@@ -3225,9 +3405,12 @@ async function scanNestedSessions(
         rootPath: tree.rootPath,
         relativePath: candidateFile.relativePath,
         mtimeMs: candidateFile.mtimeMs,
-        hash: hashText(scannedCanonicalText),
+        hash: scannedHash,
         outputText: transformed.outputText,
         canonicalText: scannedCanonicalText,
+        ...(transformed.streamedContent === undefined
+          ? {}
+          : { streamedContent: transformed.streamedContent }),
         cwdValues: transformed.cwdValues,
         sessionCwdPresent: transformed.sessionCwdPresent ?? false,
         sessionHeaderValid: transformed.sessionHeaderValid ?? false,

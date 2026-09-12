@@ -7,7 +7,6 @@ import {
   canonicalPortableSessionDirName,
   decodePortableSessionDirName,
   type PortableNameOptions,
-  portableNameOptionsFingerprint,
   strictPortableNameIdentity,
 } from "./portable-name.ts";
 import { nativeNameIdentity } from "./session-paths.ts";
@@ -70,12 +69,6 @@ export function layoutFromMachineScopeKey(machineKey: string): SessionLayout | u
   return prefix === "nested" || prefix === "flat" ? prefix : undefined;
 }
 
-export function namingConfigMatches(
-  configured: PortableNameOptions,
-  expected: PortableNameOptions,
-): boolean {
-  return portableNameOptionsFingerprint(configured) === portableNameOptionsFingerprint(expected);
-}
 export function sameCwdPath(a: string, b: string): boolean {
   const left = resolve(a);
   const right = resolve(b);
