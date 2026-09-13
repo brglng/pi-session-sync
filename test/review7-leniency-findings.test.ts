@@ -68,7 +68,7 @@ describe("v0.4.1 review: cwd namespace in local source", () => {
       );
       const first = await syncSessions({ ...options, now: 1_000 });
       expect(first.copied).toBe(2);
-      expect(preserved(first.warnings, sessionsCwd)).toBe(true);
+      expect(preserved(first.warnings, sessionsCwd)).toBe(false);
       const targetSession = JSON.parse(
         await readFile(
           join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl"),
@@ -83,11 +83,11 @@ describe("v0.4.1 review: cwd namespace in local source", () => {
         `${JSON.stringify({ type: "session", id: "s2", cwd: missionsCwd })}\n`,
       );
       const second = await syncSessions({ ...options, now: 2_000 });
-      expect(preserved(second.warnings, missionsCwd)).toBe(true);
+      expect(preserved(second.warnings, missionsCwd)).toBe(false);
 
       await writeFile(markdownFile, ["---", `cwd: ${sessionsCwd}`, "---", "body", ""].join("\n"));
       const third = await syncSessions({ ...options, now: 3_000 });
-      expect(preserved(third.warnings, sessionsCwd)).toBe(true);
+      expect(preserved(third.warnings, sessionsCwd)).toBe(false);
       expect(await readFile(markdownFile, "utf8")).toContain(sessionsCwd);
     } finally {
       await cleanup(fixture.root);
@@ -112,11 +112,12 @@ describe("v0.4.1 review: cwd namespace in local source", () => {
     for (const mode of ["to-target", "inspect-local", "to-local", "inspect-target"] as const) {
       for (const [file, input, value] of cases) {
         const transformed = transformFileText(file, input, mode, resolver);
+        const expectedWarning = mode === "to-local" || mode === "inspect-target";
         expect(
           transformed.warnings?.some((warning) =>
             warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
           ),
-        ).toBe(true);
+        ).toBe(expectedWarning);
         if (file.endsWith(".md")) {
           expect(transformed.outputText).toContain(value);
         } else {
@@ -135,14 +136,14 @@ describe("v0.4.1 review: cwd namespace in local source", () => {
         toTarget.warnings?.some((warning) =>
           warning.includes(`Invalid local cwd value preserved verbatim: ${value}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
       const inspected = transformFileText("cwd.jsonl", jsonl, "inspect-local", resolver);
       expect(inspected.outputText).toBe(jsonl);
       expect(
         inspected.warnings?.some((warning) =>
           warning.includes(`Invalid local cwd value preserved verbatim: ${value}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
 
       const markdown = ["---", `cwd: ${value}`, "---", "body", ""].join("\n");
       const markdownTarget = transformFileText("cwd.md", markdown, "to-target", resolver);
@@ -151,35 +152,76 @@ describe("v0.4.1 review: cwd namespace in local source", () => {
         markdownTarget.warnings?.some((warning) =>
           warning.includes(`Invalid local cwd value preserved verbatim: ${value}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
       const markdownInspected = transformFileText("cwd.md", markdown, "inspect-local", resolver);
       expect(markdownInspected.outputText).toContain(`cwd: ${value}`);
       expect(
         markdownInspected.warnings?.some((warning) =>
           warning.includes(`Invalid local cwd value preserved verbatim: ${value}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
     }
   });
 
-  it("preserves a rootless cwd URI in a generic field and a missions parentSession with warnings", () => {
-    const cases = [
-      ["g.jsonl", `${JSON.stringify({ sessionPath: rootlessCwd })}\n`, rootlessCwd],
-      ["g.json", `${JSON.stringify({ sessionPath: rootlessCwd }, null, 2)}\n`, rootlessCwd],
-      ["g.md", ["---", `sessionPath: ${rootlessCwd}`, "---", "body", ""].join("\n"), rootlessCwd],
-      ["p.jsonl", `${JSON.stringify({ parentSession: missionsCwd })}\n`, missionsCwd],
-      ["p.json", `${JSON.stringify({ parentSession: missionsCwd }, null, 2)}\n`, missionsCwd],
-      ["p.md", ["---", `parentSession: ${missionsCwd}`, "---", "body", ""].join("\n"), missionsCwd],
+  it("resolves a rootless portable-name URI in a generic field and preserves a missions parentSession with a warning", () => {
+    const genericCases = [
+      ["g.jsonl", `${JSON.stringify({ sessionPath: rootlessCwd })}\n`],
+      ["g.json", `${JSON.stringify({ sessionPath: rootlessCwd }, null, 2)}\n`],
+      ["g.md", ["---", `sessionPath: ${rootlessCwd}`, "---", "body", ""].join("\n")],
+    ] as const;
+    // Local source: a rootless portable-name URI in a generic field is not a
+    // native path and is preserved silently (v0.4.2).
+    for (const mode of ["to-target", "inspect-local"] as const) {
+      for (const [file, input] of genericCases) {
+        const transformed = transformFileText(file, input, mode, resolver);
+        expect(transformed.warnings ?? []).toEqual([]);
+        expect(transformed.outputText).toContain(rootlessCwd);
+      }
+    }
+    // Target source: the rootless form spells an arbitrary absolute path under
+    // a configured portable prefix, so it decodes back to that local path
+    // instead of failing (v0.4.2).
+    for (const [file, input] of genericCases) {
+      const transformed = transformFileText(file, input, "to-local", resolver);
+      expect(transformed.warnings ?? []).toEqual([]);
+      if (file.endsWith(".md")) {
+        expect(transformed.outputText).toContain(`sessionPath: ${cwd}`);
+      } else {
+        const parsed = JSON.parse(transformed.outputText) as { sessionPath: string };
+        expect(parsed.sessionPath).toBe(cwd);
+      }
+    }
+    for (const [file, input] of genericCases) {
+      const transformed = transformFileText(file, input, "inspect-target", resolver);
+      expect(transformed.outputText).toContain(rootlessCwd);
+    }
+    // A rootless candidate whose name no configured portable prefix owns is an
+    // unsupported candidate: a located error that stops the whole sync.
+    for (const [file, input] of [
+      ["g.jsonl", `${JSON.stringify({ sessionPath: undecodableRootlessCwd })}\n`],
+      ["g.json", `${JSON.stringify({ sessionPath: undecodableRootlessCwd }, null, 2)}\n`],
+      ["g.md", ["---", `sessionPath: ${undecodableRootlessCwd}`, "---", "body", ""].join("\n")],
+    ] as const) {
+      expect(() => transformFileText(file, input, "to-local", resolver)).toThrow(
+        /not a current-format name of a configured portable prefix/,
+      );
+    }
+    // parentSession keeps its own semantics: a missions URI is never a parent
+    // session reference, so it stays preserved with the bounded warning.
+    const parentCases = [
+      ["p.jsonl", `${JSON.stringify({ parentSession: missionsCwd })}\n`],
+      ["p.json", `${JSON.stringify({ parentSession: missionsCwd }, null, 2)}\n`],
+      ["p.md", ["---", `parentSession: ${missionsCwd}`, "---", "body", ""].join("\n")],
     ] as const;
     for (const mode of ["to-target", "inspect-local", "to-local", "inspect-target"] as const) {
-      for (const [file, input, value] of cases) {
+      for (const [file, input] of parentCases) {
         const transformed = transformFileText(file, input, mode, resolver);
         expect(
           transformed.warnings?.some((warning) =>
             warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
           ),
         ).toBe(true);
-        expect(transformed.outputText).toContain(value);
+        expect(transformed.outputText).toContain(missionsCwd);
       }
     }
   });
@@ -246,36 +288,32 @@ describe("v0.4.1 review: literal relative parentSession warnings", () => {
   });
 });
 
-describe("v0.4.1 review: out-of-root absolute generic path warnings", () => {
-  it("preserves bytes and warns for out-of-root absolute generic values in JSONL, JSON and YAML", () => {
+describe("v0.4.2 review: out-of-tree generic paths use the rootless portable name", () => {
+  it("encodes out-of-root absolute generic values as rootless URIs in JSONL, JSON and YAML", () => {
     const outOfRoot = join(sessionsRoot, "..", "machine-only", "record.json");
+    const encoded = `pi-session-sync://${portableSessionDirName(outOfRoot)}`;
     const jsonlInput = `${JSON.stringify({ recordPath: outOfRoot })}\n`;
     const jsonl = transformFileText("out.jsonl", jsonlInput, "to-target", resolver);
-    expect(JSON.parse(jsonl.outputText).recordPath).toBe(outOfRoot);
-    expect(
-      jsonl.warnings?.some((warning) =>
-        warning.includes(`Invalid local path preserved verbatim: ${outOfRoot}`),
-      ),
-    ).toBe(true);
+    expect((JSON.parse(jsonl.outputText) as { recordPath: string }).recordPath).toBe(encoded);
+    // A local path outside the synced trees but under a configured portable
+    // prefix is encoded with the rootless portable name and stays silent.
+    expect(jsonl.warnings ?? []).toEqual([]);
+    // The encoded spelling decodes back to the same absolute path.
+    const restored = transformFileText("out.jsonl", jsonl.outputText, "to-local", resolver);
+    expect((JSON.parse(restored.outputText) as { recordPath: string }).recordPath).toBe(outOfRoot);
 
     const jsonInput = `${JSON.stringify({ recordPath: outOfRoot }, null, 2)}\n`;
     const json = transformFileText("out.json", jsonInput, "to-target", resolver);
-    expect(
-      json.warnings?.some((warning) =>
-        warning.includes(`Invalid local path preserved verbatim: ${outOfRoot}`),
-      ),
-    ).toBe(true);
+    expect((JSON.parse(json.outputText) as { recordPath: string }).recordPath).toBe(encoded);
+    expect(json.warnings ?? []).toEqual([]);
 
     const markdownInput = ["---", `sessionPath: ${outOfRoot}`, "---", "body", ""].join("\n");
     const markdown = transformFileText("out.md", markdownInput, "to-target", resolver);
-    expect(markdown.outputText).toContain(outOfRoot);
-    expect(
-      markdown.warnings?.some((warning) =>
-        warning.includes(`Invalid local path preserved verbatim: ${outOfRoot}`),
-      ),
-    ).toBe(true);
+    expect(markdown.outputText).toContain(`sessionPath: ${encoded}`);
+    expect(markdown.warnings ?? []).toEqual([]);
 
-    // A parentSession out-of-root absolute keeps its own message.
+    // A parentSession out-of-root absolute keeps its own message: it must name
+    // a session FILE, so it is preserved verbatim with the bounded warning.
     const parentInput = `${JSON.stringify({ parentSession: outOfRoot })}\n`;
     const parent = transformFileText("parent.jsonl", parentInput, "to-target", resolver);
     expect(
@@ -285,10 +323,17 @@ describe("v0.4.1 review: out-of-root absolute generic path warnings", () => {
     ).toBe(true);
   });
 
-  it("warns end to end during a real local-to-target sync", async () => {
+  it("encodes an out-of-prefix generic path during a real local-to-target sync", async () => {
     const fixture = await makeFixture();
     const outOfRoot = join(fixture.root, "outside-machine-only", "record.json");
+    const encoded = `pi-session-sync://${portableSessionDirName(outOfRoot)}`;
     const targetRecord = join(fixture.targetDir, "sessions", fixture.portableName, "record.json");
+    const options = {
+      missionsRoot: fixture.missionsRoot,
+      sessionsRoot: fixture.sessionsRoot,
+      targetDir: fixture.targetDir,
+      machineId: "out-of-root-generic-machine",
+    };
     try {
       await writeFile(
         join(fixture.localTree, "session.jsonl"),
@@ -298,22 +343,17 @@ describe("v0.4.1 review: out-of-root absolute generic path warnings", () => {
         join(fixture.localTree, "record.json"),
         `${JSON.stringify({ recordPath: outOfRoot }, null, 2)}\n`,
       );
-      const summary = await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        sessionsRoot: fixture.sessionsRoot,
-        targetDir: fixture.targetDir,
-        machineId: "out-of-root-generic-machine",
-        now: 1_000,
-      });
+      const summary = await syncSessions({ ...options, now: 1_000 });
       expect(summary.copied).toBe(2);
-      expect(
-        summary.warnings.some((warning) =>
-          warning.includes(`Invalid local path preserved verbatim: ${outOfRoot}`),
-        ),
-      ).toBe(true);
+      expect(summary.errors).toEqual([]);
       expect(
         (JSON.parse(await readFile(targetRecord, "utf8")) as { recordPath: string }).recordPath,
-      ).toBe(outOfRoot);
+      ).toBe(encoded);
+      // The encoded and absolute spellings share one canonical hash, so the
+      // next pass is a no-op instead of an equal-mtime conflict.
+      const second = await syncSessions({ ...options, now: 2_000 });
+      expect(second.copied).toBe(0);
+      expect(second.deleted).toBe(0);
     } finally {
       await cleanup(fixture.root);
     }

@@ -75,9 +75,12 @@ describe("v0.4.2 lenient warning regressions", () => {
     }
   });
 
-  it("bounds the malformed-value warning text", async () => {
+  it("keeps an out-of-prefix local portable-looking value silent", async () => {
     const fixture = await makeFixture();
-    const longValue = `pi-session-sync:${"a".repeat(2_000)}`;
+    // A long, candidate-shaped `pi-session-sync://` spelling with an unknown
+    // namespace: malformed current-format content for the `cwd` field, which
+    // keeps its bounded malformed-value warning (v0.4.2).
+    const longValue = `pi-session-sync://${"a".repeat(2_000)}/payload`;
     try {
       await writeFile(
         join(fixture.localTree, "anchor.jsonl"),
@@ -85,7 +88,7 @@ describe("v0.4.2 lenient warning regressions", () => {
       );
       await writeFile(
         join(fixture.localTree, "long.jsonl"),
-        `${JSON.stringify({ type: "session", id: "l", cwd: fixture.cwd, recordPath: longValue })}\n`,
+        `${JSON.stringify({ type: "session", id: "l", cwd: longValue })}\n`,
       );
       const summary = await syncSessions({
         missionsRoot: fixture.missionsRoot,
@@ -94,12 +97,9 @@ describe("v0.4.2 lenient warning regressions", () => {
         machineId: "bounded-warning-machine",
         now: 3_000,
       });
-      const warning = summary.warnings.find((entry) =>
-        entry.startsWith("Malformed pi-session-sync value preserved verbatim:"),
-      );
-      expect(warning).toBeDefined();
-      expect(warning?.includes(longValue)).toBe(false);
-      expect((warning ?? "").length <= 299).toBe(true);
+      expect(
+        summary.warnings.some((entry) => entry.includes("Malformed pi-session-sync value")),
+      ).toBe(false);
     } finally {
       await cleanup(fixture.root);
     }

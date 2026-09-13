@@ -135,7 +135,7 @@ describe("v0.4.1 path leniency", () => {
     }
   });
 
-  it("preserves an unmapped in-root local generic path with a warning", async () => {
+  it("preserves an unmapped in-root local generic path silently", async () => {
     const fixture = await makeFixture();
     const unmapped = join(fixture.sessionsRoot, "unmapped-dir", "record.json");
     try {
@@ -155,11 +155,13 @@ describe("v0.4.1 path leniency", () => {
         now: 1_000,
       });
       expect(summary.copied).toBe(2);
+      // v0.4.2: local content that does not lie inside a configured portable
+      // prefix is preserved silently, with no diagnostic.
       expect(
         summary.warnings.some((warning) =>
           warning.includes(`Invalid local path preserved verbatim: ${unmapped}`),
-        ),
-      ).toBe(true);
+        ) ?? false,
+      ).toBe(false);
       const target = JSON.parse(
         await readFile(
           join(fixture.targetDir, "sessions", fixture.portableName, "record.json"),
@@ -264,7 +266,10 @@ describe("v0.4.1 hidden entries and empty directories", () => {
         machineId: "empty-dir-machine",
         now: 1_000,
       });
-      expect(summary.copied).toBe(1);
+      // One session file plus the two synchronized empty directories
+      // (`empty-dir` and the hidden-only `hidden-only`), which are content
+      // under v0.4.2 while their hidden entries stay ignored.
+      expect(summary.copied).toBe(3);
       expect(
         summary.warnings.some(
           (warning) =>
@@ -301,13 +306,16 @@ describe("v0.4.1 hidden entries and empty directories", () => {
         now: 1_000,
       });
       expect(summary.copied).toBe(1);
+      // A flat empty directory has no cwd to derive its portable name from, so
+      // it cannot be mapped. That is reported clearly instead of being guessed
+      // or silently skipped (v0.4.2).
       expect(
-        summary.warnings.some(
-          (warning) =>
-            warning.includes("Ignored unknown session directory") ||
-            warning.includes("empty-dir") ||
-            warning.includes("hidden-only"),
-        ),
+        summary.warnings.filter((warning) =>
+          warning.includes("Ignored unmappable empty flat session directory"),
+        ).length,
+      ).toBe(2);
+      expect(
+        summary.warnings.some((warning) => warning.includes("Ignored unknown session directory")),
       ).toBe(false);
     } finally {
       await cleanup(fixture.root);

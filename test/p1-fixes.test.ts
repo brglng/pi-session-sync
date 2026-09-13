@@ -1,7 +1,7 @@
 /// <reference types="node" />
 /// <reference path="./vitest-shim.d.ts" />
 
-import { mkdir, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defaultSessionDirName, portableSessionDirName } from "../src/portable-name.ts";
@@ -18,7 +18,7 @@ const currentScope = (
 ): Record<string, unknown> => ({
   layout,
   sessionsRoot,
-  namingConfig: { homeLabel: "HOME", rootLabel: "ROOT", extraPrefixes: {} },
+  namingOptions: { homeLabel: "HOME", rootLabel: "ROOT", extraPrefixes: {} },
   directories: {},
   flatFiles: {},
 });
@@ -169,7 +169,9 @@ describe("latest reviewer fixes", () => {
           missionsRoot: fixture.missionsRoot,
           now: 1_000,
         });
-        expect(summary.copied).toBe(2);
+        // Two session files plus the empty local `missions/index` directory,
+        // which is synchronized content (v0.4.2) and is created on the target.
+        expect(summary.copied).toBe(3);
         const target = JSON.parse(
           await readFile(
             join(fixture.targetDir, "sessions", fixture.portableName, "meta.json"),
@@ -242,31 +244,20 @@ describe("latest reviewer fixes", () => {
           })}\n`,
         );
         await utimes(targetFile, 100, 100);
-        const summary = await syncSessions({
-          missionsRoot: join(root, "missions"),
-          sessionsRoot,
-          targetDir,
-          layout: "nested",
-          now: 200_000,
-        });
-        expect(summary.copied).toBe(1);
-        const local = JSON.parse(
-          await readFile(join(localTree, "session.jsonl"), "utf8"),
-        ) as Record<string, unknown>;
-        // Loose legacy URI values are invalid current-format target content:
-        // preserved verbatim with warnings, never decoded or rewritten.
-        expect(local.cwd).toBe(`pi-session-sync://${looseName}`);
-        expect(local.recordPath).toBe(`pi-session-sync://sessions/${looseName}/record.json`);
-        expect(
-          summary.warnings.some((warning) =>
-            warning.includes("Invalid target cwd value preserved verbatim"),
-          ),
-        ).toBe(true);
-        expect(
-          summary.warnings.some((warning) =>
-            warning.includes("Invalid pi-session-sync URI preserved verbatim"),
-          ),
-        ).toBe(true);
+        // v0.4.2: a generic field carrying an exact `pi-session-sync://`
+        // candidate that is not a current-format name of a configured portable
+        // prefix is a located file error from target content, and the sync
+        // stops before writing either side.
+        await expect(
+          syncSessions({
+            missionsRoot: join(root, "missions"),
+            sessionsRoot,
+            targetDir,
+            layout: "nested",
+            now: 200_000,
+          }),
+        ).rejects.toThrow(/not a current-format name of a configured portable prefix/);
+        await expect(access(join(localTree, "session.jsonl"))).rejects.toThrow();
       } finally {
         await rm(root, { recursive: true, force: true });
         await rm(cwd, { recursive: true, force: true });
@@ -308,9 +299,9 @@ describe("latest reviewer fixes", () => {
           summary.warnings.some((warning) =>
             warning.includes("Malformed pi-session-sync value preserved verbatim"),
           ),
-        ).toBe(true);
-        // The loose legacy URI value is invalid current-format content:
-        // preserved verbatim with a warning, never decoded or rewritten.
+        ).toBe(false);
+        // v0.4.2: local content is never a portable-URI diagnostic source, so
+        // the loose legacy URI value is preserved verbatim and silently.
         const targetFile = join(targetDir, "sessions", strictName, "session.jsonl");
         const target = JSON.parse(await readFile(targetFile, "utf8")) as Record<string, unknown>;
         expect(target.cwd).toBe(`pi-session-sync://${strictName}`);

@@ -499,7 +499,7 @@ describe("session file transformation", () => {
     ).toBe(1);
   });
 
-  it("does not rewrite unrelated scalar aliases sharing a cwd anchor", () => {
+  it("rewrites scalar aliases sharing a cwd anchor recursively", () => {
     const anchored = transformFileText(
       "shared-cwd-anchor.md",
       [
@@ -515,10 +515,9 @@ describe("session file transformation", () => {
       "to-target",
       resolver,
     );
-    expect(anchored.outputText).toContain(`base: &cwd ${cwd}`);
+    expect(anchored.outputText).toContain(`base: &cwd pi-session-sync://${portableName}`);
     expect(anchored.outputText).toContain(`cwd: pi-session-sync://${portableName}`);
     expect(anchored.outputText).toContain("value: *cwd");
-    expect(anchored.outputText.includes("metadata:\n  value: pi-session-sync://")).toBe(false);
     expect(anchored.cwdValues).toEqual([cwd]);
 
     const restored = transformFileText(
@@ -533,7 +532,7 @@ describe("session file transformation", () => {
     expect(restored.cwdValues).toEqual([cwd]);
   });
 
-  it("preserves unrelated aliases when cwd owns a scalar anchor", () => {
+  it("rewrites aliases when cwd owns a scalar anchor", () => {
     const anchored = transformFileText(
       "cwd-owned-anchor.md",
       [
@@ -550,7 +549,7 @@ describe("session file transformation", () => {
     );
     expect(anchored.outputText).toContain(`cwd: pi-session-sync://${portableName}`);
     expect(anchored.outputText.includes(`cwd: &cwd pi-session-sync://${portableName}`)).toBe(false);
-    expect(anchored.outputText).toContain(`first: &cwd ${cwd}`);
+    expect(anchored.outputText).toContain(`first: &cwd pi-session-sync://${portableName}`);
     expect(anchored.outputText).toContain("second: *cwd");
     expect(anchored.cwdValues).toEqual([cwd]);
 
@@ -588,9 +587,10 @@ describe("session file transformation", () => {
     expect(anchored.outputText).toContain(`cwd: pi-session-sync://${portableName}`);
     expect(anchored.outputText).toContain(`first:\n  cwd: pi-session-sync://${portableName}`);
     expect(anchored.outputText).toContain(`second:\n  cwd: pi-session-sync://${portableName}`);
-    expect(anchored.outputText).toContain(`metadata:\n  first: &cwd ${cwd}`);
+    expect(anchored.outputText).toContain(
+      `metadata:\n  first: &cwd pi-session-sync://${portableName}`,
+    );
     expect(anchored.outputText).toContain("  second: *cwd");
-    expect(anchored.outputText.includes("metadata:\n  first: &cwd pi-session-sync://")).toBe(false);
     expect(anchored.cwdValues).toEqual([cwd, cwd, cwd]);
 
     const restored = transformFileText(
@@ -613,7 +613,7 @@ describe("session file transformation", () => {
       "to-target",
       resolver,
     );
-    expect(anchored.outputText).toContain(`base: &cwd ${cwd}`);
+    expect(anchored.outputText).toContain(`base: &cwd pi-session-sync://${portableName}`);
     expect(anchored.outputText).toContain(`cwd: pi-session-sync://${portableName}`);
     expect(anchored.outputText.includes("cwd: *cwd")).toBe(false);
     expect(anchored.cwdValues).toEqual([cwd]);
@@ -710,9 +710,9 @@ describe("session file transformation", () => {
     }
   });
 
-  it("preserves malformed pi-session-sync URIs verbatim in every direction", () => {
+  it("preserves non-candidate sync spellings silently in every direction", () => {
     // A relative non-URI cwd ("garbage") is not treated as the current
-    // process directory: it is preserved verbatim and silently (v0.4.1).
+    // process directory: it is preserved verbatim and silently.
     const lenient = `${JSON.stringify({ cwd: "garbage" })}\n`;
     const local = transformFileText("bad.jsonl", lenient, "to-local", resolver);
     expect(local.outputText).toBe(lenient);
@@ -720,30 +720,23 @@ describe("session file transformation", () => {
     expect(local.cwdValues).toEqual([]);
     expect(local.warnings ?? []).toEqual([]);
 
-    // v0.4.2: a malformed scheme prefix and a traversal relative path are
-    // preserved verbatim with a bounded warning in both directions instead of
-    // being file errors.
+    // v0.4.2: `pi-session-sync:` without the `//` authority is not a portable
+    // candidate and is preserved byte-for-byte without any diagnostic.
     const malformedPrefix = `${JSON.stringify({
       cwd: `pi-session-sync://${portableName}`,
       parentSession: "pi-session-sync:not-a-uri",
     })}\n`;
-    const traversal = `${JSON.stringify({
-      cwd: `pi-session-sync://${portableName}`,
-      missionPath: `pi-session-sync://sessions/${portableName}/../escape.json`,
-    })}\n`;
-    for (const content of [malformedPrefix, traversal]) {
-      for (const mode of ["to-local", "to-target", "inspect-local"] as const) {
-        const transformed = transformFileText("bad.jsonl", content, mode, resolver);
-        expect(transformed.outputText).toContain("pi-session-sync:");
-        expect(
-          transformed.warnings?.some((warning) =>
-            warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
-          ),
-        ).toBe(true);
-      }
+    for (const mode of ["to-local", "to-target", "inspect-local"] as const) {
+      const transformed = transformFileText("bad.jsonl", malformedPrefix, mode, resolver);
+      expect(transformed.outputText).toContain("pi-session-sync:not-a-uri");
+      expect(
+        transformed.warnings?.some((warning) =>
+          warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
+        ) ?? false,
+      ).toBe(false);
     }
-    // The malformed values survive a target→local pass byte-for-byte, while
-    // the valid rootless cwd URI is still decoded to its local path.
+    // The non-candidate value survives a target→local pass byte-for-byte,
+    // while the valid rootless cwd URI is still decoded to its local path.
     const roundTrip = transformFileText("bad.jsonl", malformedPrefix, "to-local", resolver);
     const roundTripRecord = JSON.parse(roundTrip.outputText) as {
       cwd: string;
@@ -751,66 +744,59 @@ describe("session file transformation", () => {
     };
     expect(roundTripRecord.cwd).toBe(cwd);
     expect(roundTripRecord.parentSession).toBe("pi-session-sync:not-a-uri");
-    const roundTripTraversal = transformFileText("bad.jsonl", traversal, "to-local", resolver);
-    expect((JSON.parse(roundTripTraversal.outputText) as { missionPath: string }).missionPath).toBe(
-      `pi-session-sync://sessions/${portableName}/../escape.json`,
-    );
-    // A local→target pass preserves the malformed values byte-for-byte too.
+    // A local→target pass preserves the value byte-for-byte too.
     expect(transformFileText("bad.jsonl", malformedPrefix, "to-target", resolver).outputText).toBe(
       malformedPrefix,
     );
-    expect(transformFileText("bad.jsonl", traversal, "to-target", resolver).outputText).toBe(
-      traversal,
+
+    // v0.4.2: a targeting value that begins with the exact candidate prefix but
+    // cannot be legally decoded is a located file error from target content and
+    // stays silent on local source.
+    const traversal = `${JSON.stringify({
+      cwd: `pi-session-sync://${portableName}`,
+      missionPath: `pi-session-sync://sessions/${portableName}/../escape.json`,
+    })}\n`;
+    expect(transformFileText("bad.jsonl", traversal, "to-target", resolver).warnings ?? []).toEqual(
+      [],
+    );
+    expect(() => transformFileText("bad.jsonl", traversal, "to-local", resolver)).toThrow(
+      /invalid pi-session-sync URI in target content/,
     );
   });
 
-  it("preserves unmappable absolute JSON values and malformed sync URIs", () => {
+  it("preserves unmappable absolute JSON values silently and rejects undecodable target candidates", () => {
     const unmappedInRoot = join(sessionsRoot, "unmapped", "record.json");
     const input = `${JSON.stringify({ sessionPath: unmappedInRoot }, null, 2)}\n`;
     const local = transformFileText("bad.json", input, "to-local", resolver);
     expect(local.outputText).toBe(input);
     // Canonical hashing keeps the target machine-local absolute spelling
     // byte-identical so content equality and conflicts compare the original
-    // values.
+    // values, and a non-candidate value produces no diagnostic (v0.4.2).
     expect(local.canonicalText).toBe(input);
-    expect(
-      local.warnings?.some((warning) =>
-        warning.includes(`Invalid target path preserved verbatim: ${unmappedInRoot}`),
-      ),
-    ).toBe(true);
+    expect(local.warnings ?? []).toEqual([]);
     // Two identical values hash to the same canonical text.
     const again = transformFileText("bad.json", input, "to-local", resolver);
     expect(again.canonicalText).toBe(local.canonicalText);
-    // v0.4.2: a malformed `pi-session-sync:` prefix is preserved verbatim with
-    // a bounded warning in every direction.
+    // `pi-session-sync:` without the `//` authority is not a candidate either.
     const malformed = `${JSON.stringify({ recordPath: "pi-session-sync:broken" }, null, 2)}\n`;
     for (const mode of ["to-local", "to-target"] as const) {
       const transformed = transformFileText("bad.json", malformed, mode, resolver);
       expect(transformed.outputText).toBe(malformed);
       expect(transformed.canonicalText).toBe(malformed);
-      expect(
-        transformed.warnings?.some((warning) =>
-          warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
-        ),
-      ).toBe(true);
+      expect(transformed.warnings ?? []).toEqual([]);
     }
   });
 
   it("keeps mappable target absolute generic paths raw in bytes and canonical hash", () => {
     // Phase 2: a target path field that is NOT a portable path is copied back
     // to local verbatim, so its canonical hash must use the same raw bytes
-    // (user clarification). The mappable spelling is in-root, unlike the
-    // unmappable case above.
+    // (user clarification), silently (v0.4.2).
     const inRootRecord = join(sessionsRoot, localName, "record.json");
     const jsonlInput = `${JSON.stringify({ recordPath: inRootRecord, nested: { owner: inRootRecord } })}\n`;
     const jsonl = transformFileText("raw.jsonl", jsonlInput, "to-local", resolver);
     expect(jsonl.outputText).toBe(jsonlInput);
     expect(jsonl.canonicalText).toBe(jsonlInput);
-    expect(
-      jsonl.warnings?.some((warning) =>
-        warning.includes(`Invalid target path preserved verbatim: ${inRootRecord}`),
-      ),
-    ).toBe(true);
+    expect(jsonl.warnings ?? []).toEqual([]);
 
     const jsonInput = `${JSON.stringify({ recordPath: inRootRecord }, null, 2)}\n`;
     const json = transformFileText("raw.json", jsonInput, "to-local", resolver);
@@ -870,17 +856,19 @@ describe("session file transformation", () => {
         warning.includes("Invalid target cwd value preserved verbatim"),
       ),
     ).toBe(true);
+    // A generic target path that is not a portable candidate is silent.
     expect(
       local.warnings?.some((warning) =>
         warning.includes(`Invalid target path preserved verbatim: ${unmappedInRoot}`),
-      ),
-    ).toBe(true);
+      ) ?? false,
+    ).toBe(false);
     // Canonical hashing keeps the preserved values verbatim.
     expect(local.canonicalText).toContain("pi-session-sync://garbage");
     expect(local.canonicalText).toContain(unmappedInRoot);
 
-    // v0.4.2: a malformed scheme prefix and a missions traversal are preserved
-    // verbatim with a bounded warning in both directions.
+    // v0.4.2: a non-candidate `pi-session-sync:` value is preserved silently in
+    // both directions, while an exact-prefix value that cannot be decoded is a
+    // located file error from target content.
     const malformedInput = [
       "---",
       `cwd: pi-session-sync://${portableName}`,
@@ -895,22 +883,16 @@ describe("session file transformation", () => {
       "---",
       "body",
     ].join("\n");
-    for (const content of [malformedInput, traversalInput]) {
-      for (const mode of ["to-local", "to-target"] as const) {
-        const transformed = transformFileText("bad.md", content, mode, resolver);
-        expect(transformed.outputText).toContain("pi-session-sync:");
-        expect(
-          transformed.warnings?.some((warning) =>
-            warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
-          ),
-        ).toBe(true);
-      }
+    for (const mode of ["to-local", "to-target"] as const) {
+      const transformed = transformFileText("bad.md", malformedInput, mode, resolver);
+      expect(transformed.outputText).toContain("parentSession: pi-session-sync:bad");
+      expect(transformed.warnings ?? []).toEqual([]);
     }
-    expect(transformFileText("bad.md", malformedInput, "to-local", resolver).outputText).toContain(
-      "parentSession: pi-session-sync:bad",
-    );
-    expect(transformFileText("bad.md", traversalInput, "to-local", resolver).outputText).toContain(
+    expect(transformFileText("bad.md", traversalInput, "to-target", resolver).outputText).toContain(
       "pi-session-sync://missions/../escape.json",
+    );
+    expect(() => transformFileText("bad.md", traversalInput, "to-local", resolver)).toThrow(
+      /invalid pi-session-sync URI in target content/,
     );
   });
 
@@ -936,7 +918,7 @@ describe("session file transformation", () => {
     expect(transformed.outputText).toContain(`sessionPath: ${join(sessionDirPath, "child.jsonl")}`);
   });
 
-  it("emits warnings for preserved out-of-root absolute generic values in target-to-local", () => {
+  it("emits warnings for preserved cwd values and keeps generic out-of-root paths silent", () => {
     const outOfRoot = join(sessionsRoot, "..", "machine-only", "x.jsonl");
     const input = [
       "---",
@@ -948,11 +930,7 @@ describe("session file transformation", () => {
     ].join("\n");
     const transformed = transformFileText("out-of-root.md", input, "to-local", resolver);
     expect(transformed.outputText).toContain(outOfRoot);
-    expect(
-      transformed.warnings?.some((warning) =>
-        warning.includes("Invalid target path preserved verbatim"),
-      ),
-    ).toBe(true);
+    expect(transformed.warnings ?? []).toEqual([]);
 
     const jsonlInput = `${JSON.stringify({
       cwd: `pi-session-sync://${portableName}`,
@@ -960,9 +938,7 @@ describe("session file transformation", () => {
     })}\n`;
     const jsonl = transformFileText("out-of-root.jsonl", jsonlInput, "to-local", resolver);
     expect(jsonl.outputText).toContain(outOfRoot);
-    expect(
-      jsonl.warnings?.some((warning) => warning.includes("Invalid target path preserved verbatim")),
-    ).toBe(true);
+    expect(jsonl.warnings ?? []).toEqual([]);
   });
 
   it("keeps generic sessions URIs out of parentSession reference evidence", () => {
@@ -1115,28 +1091,22 @@ describe("session file transformation", () => {
     );
   });
 
-  it("preserves missions URIs verbatim when no missions root exists", () => {
+  it("rejects missions URIs when no missions root is configured", () => {
     const genericResolver = createGenericPathResolver(
       sessionsRoot,
       undefined,
       () => undefined,
       "nested",
     );
-    const target = transformFileText(
-      "mission-ref.json",
-      `${JSON.stringify({ missionPath: "pi-session-sync://missions/index/x.json" })}\n`,
-      "to-local",
-      genericResolver,
-    );
-    // Without a missions root a mission URI cannot decode: target source
-    // leniency preserves it verbatim with a warning instead of guessing a
-    // process-cwd path.
-    expect(JSON.parse(target.outputText).missionPath).toBe(
-      "pi-session-sync://missions/index/x.json",
-    );
-    expect((target.warnings ?? []).some((w) => w.includes("Invalid pi-session-sync URI"))).toBe(
-      true,
-    );
+    const value = "pi-session-sync://missions/index/x.json";
+    expect(() =>
+      transformFileText(
+        "mission-ref.json",
+        `${JSON.stringify({ missionPath: value })}\n`,
+        "to-local",
+        genericResolver,
+      ),
+    ).toThrow(/mission-ref\.json:1: missionPath:.*cannot be decoded/);
   });
 });
 

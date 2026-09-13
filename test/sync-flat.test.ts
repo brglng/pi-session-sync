@@ -850,7 +850,7 @@ describe("bidirectional session sync flat layout", () => {
     }
   });
 
-  it("preserves unresolved flat parent references verbatim with a warning", async () => {
+  it("preserves unresolved flat parent references verbatim silently", async () => {
     const fixture = await makeFixture();
     const flatRoot = join(fixture.root, "unresolved-local-parent-flat-sessions");
     const firstCwd = join(fixture.root, "first-parent-project");
@@ -863,8 +863,8 @@ describe("bidirectional session sync flat layout", () => {
         `${JSON.stringify({ cwd: firstCwd, parentSession: localParent })}\n`,
       );
       await writeFile(join(flatRoot, "second.jsonl"), `${JSON.stringify({ cwd: secondCwd })}\n`);
-      // v0.4.1: an in-root flat parent with no unambiguous mapping cannot be
-      // encoded as a portable path, so it is preserved verbatim with a warning
+      // v0.4.2: an in-root flat parent with no unambiguous mapping cannot be
+      // encoded as a portable path, so it is preserved verbatim silently
       // instead of failing the sync.
       const summary = await syncSessions({
         missionsRoot: fixture.missionsRoot,
@@ -880,7 +880,7 @@ describe("bidirectional session sync flat layout", () => {
         summary.warnings.some((warning) =>
           warning.includes(`Invalid local parentSession preserved verbatim: ${localParent}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
       const target = JSON.parse(
         await readFile(
           join(fixture.targetDir, "sessions", portableSessionDirName(firstCwd), "first.jsonl"),

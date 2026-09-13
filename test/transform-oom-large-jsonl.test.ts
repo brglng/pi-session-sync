@@ -25,7 +25,8 @@ const resolver = createParentPathResolver(sessionsRoot, (name) =>
  * are large enough to pressure the old `outputLines.join(...)` path but stay
  * bounded for CI.
  */
-const TOOL_TEXT = "pi-session-sync://sessions/ROOT /var/www/file.ts cwd parentSession\n";
+const TOOL_TEXT =
+  "tool output mentions pi-session-sync://sessions/ROOT /var/www/file.ts cwd parentSession\n";
 const TOOL_BLOCK = TOOL_TEXT.repeat(8);
 const RECORD_COUNT = 15_000;
 

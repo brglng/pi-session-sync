@@ -15,7 +15,7 @@ import {
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import extension from "../src/index.ts";
+import extension, { SYNC_LOG_INFO_WINDOW, SYNC_LOG_WIDGET_KEY } from "../src/index.ts";
 import { MACHINE_ID_FILE_NAME } from "../src/machine.ts";
 import { defaultSessionDirName, portableSessionDirName } from "../src/portable-name.ts";
 
@@ -66,8 +66,15 @@ describe("Pi extension registration", () => {
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
 
-      expect(notifications[0]).toContain("synchronization failed");
+      // v0.4.2: the command publishes no aggregate summary. The failure is
+      // reported as one error notification naming the overlap.
       expect(notifications[0]).toContain("overlap");
+      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
+        false,
+      );
+      expect(notifications.some((message) => message.includes("Session sync complete"))).toBe(
+        false,
+      );
       // The overlap is rejected before the machine identity is loaded, so the
       // machine id is never minted and the target child roots stay uncreated.
       await expect(
@@ -75,7 +82,7 @@ describe("Pi extension registration", () => {
       ).rejects.toThrow();
       await expect(lstat(join(targetDir, "sessions"))).rejects.toThrow();
       await expect(lstat(join(targetDir, "missions"))).rejects.toThrow();
-      await expect(lstat(join(targetDir, ".pi-session-sync-state.json"))).rejects.toThrow();
+      await expect(lstat(join(targetDir, "pi-session-sync-state.json"))).rejects.toThrow();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgent;
@@ -131,8 +138,14 @@ describe("Pi extension registration", () => {
         },
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
-      expect(notifications[0]).toContain("root-unknown.txt");
-      expect(notifications[0]).toContain("synchronization failed");
+      // v0.4.2: the collected scan warning is published as its own warning
+      // notification, followed by one non-aggregate error notification. No
+      // aggregate summary is shown.
+      expect(notifications.some((message) => message.includes("root-unknown.txt"))).toBe(true);
+      expect(notifications.some((message) => message.includes("invalid JSON"))).toBe(true);
+      expect(notifications.some((message) => message.includes("Session sync complete"))).toBe(
+        false,
+      );
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgent;
@@ -200,8 +213,13 @@ describe("Pi extension registration", () => {
         },
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
-      expect(notifications[0]).toContain("root-unknown.txt");
-      expect(notifications[0]).toContain("synchronization failed");
+      // v0.4.2: the collected scan warning is published individually, followed
+      // by one non-aggregate error notification instead of a summary.
+      expect(notifications.some((message) => message.includes("root-unknown.txt"))).toBe(true);
+      expect(notifications.some((message) => message.startsWith("pi-session-sync: "))).toBe(true);
+      expect(notifications.some((message) => message.includes("Session sync complete"))).toBe(
+        false,
+      );
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgent;
@@ -409,9 +427,9 @@ describe("Pi extension registration", () => {
       expect(
         await readFile(join(targetDir, "sessions", otherName, "other.jsonl"), "utf8"),
       ).toContain(`pi-session-sync://${otherName}`);
-      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
-        false,
-      );
+      // A successful run publishes only realtime events: no host-level
+      // error/warning notice and no aggregate summary.
+      expect(notifications.some((message) => message.startsWith("pi-session-sync: "))).toBe(false);
     } finally {
       process.argv = previousArgv;
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -507,9 +525,7 @@ describe("Pi extension registration", () => {
       );
       await definition.handler("", context);
       await assertFlat();
-      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
-        false,
-      );
+      expect(notifications.some((message) => message.startsWith("pi-session-sync: "))).toBe(false);
     } finally {
       process.argv = previousArgv;
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -588,14 +604,12 @@ describe("Pi extension registration", () => {
         await readFile(join(targetDir, "sessions", portable, "resumed.jsonl"), "utf8"),
       ).toContain(`pi-session-sync://${portable}`);
       const state = JSON.parse(
-        await readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
+        await readFile(join(targetDir, "pi-session-sync-state.json"), "utf8"),
       ) as { scopes: Record<string, { layout: string; sessionsRoot: string }> };
       const scope = Object.values(state.scopes)[0];
       expect(scope?.layout).toBe("nested");
       expect(scope?.sessionsRoot).toBe(join(agentDir, "sessions"));
-      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
-        false,
-      );
+      expect(notifications.some((message) => message.startsWith("pi-session-sync: "))).toBe(false);
     } finally {
       process.chdir(previousCwd);
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -656,11 +670,9 @@ describe("Pi extension registration", () => {
         },
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
-      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
-        false,
-      );
+      expect(notifications.some((message) => message.startsWith("pi-session-sync: "))).toBe(false);
       const state = JSON.parse(
-        await readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
+        await readFile(join(targetDir, "pi-session-sync-state.json"), "utf8"),
       ) as { scopes: Record<string, { layout: string; sessionsRoot: string }> };
       const scope = Object.values(state.scopes)[0];
       expect(scope?.layout).toBe("nested");
@@ -724,12 +736,15 @@ describe("Pi extension registration", () => {
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
 
+      // v0.4.2: only the run's realtime events are notified; the command prints
+      // no aggregate summary.
       expect(
         notifications.some((message) => message.toLowerCase().includes("session sync complete")),
-      ).toBe(true);
+      ).toBe(false);
+      expect(notifications.some((message) => message.includes("Staged "))).toBe(true);
       await expect(readFile(machineIdPath, "utf8")).resolves.toBeDefined();
       await expect(
-        readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
+        readFile(join(targetDir, "pi-session-sync-state.json"), "utf8"),
       ).resolves.toBeDefined();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -794,7 +809,7 @@ describe("Pi extension registration", () => {
       expect(await readFile(sessionsRoot, "utf8")).toBe(sourceText);
       await expect(readFile(machineIdPath, "utf8")).rejects.toThrow();
       await expect(
-        readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
+        readFile(join(targetDir, "pi-session-sync-state.json"), "utf8"),
       ).rejects.toThrow();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -813,7 +828,7 @@ describe("Pi extension registration", () => {
     const sessionsRoot = join(root, "missing-sessions");
     const targetDir = join(root, "target");
     const machineIdPath = join(agentDir, "extensions", "pi-session-sync", "machine-id");
-    const statePath = join(targetDir, ".pi-session-sync-state.json");
+    const statePath = join(targetDir, "pi-session-sync-state.json");
     try {
       await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
       await mkdir(targetDir);
@@ -852,9 +867,11 @@ describe("Pi extension registration", () => {
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
 
+      // v0.4.2: only realtime events are notified; no aggregate summary.
       expect(
         notifications.some((message) => message.toLowerCase().includes("session sync complete")),
-      ).toBe(true);
+      ).toBe(false);
+      expect(notifications.some((message) => message.includes("Staged "))).toBe(true);
       await expect(readFile(machineIdPath, "utf8")).resolves.toBeDefined();
       await expect(readFile(statePath, "utf8")).resolves.toBeDefined();
     } finally {
@@ -910,7 +927,7 @@ describe("Pi extension registration", () => {
       expect(waits).toBe(0);
       expect(notifications[0]).toContain("in-memory");
       await expect(
-        readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
+        readFile(join(targetDir, "pi-session-sync-state.json"), "utf8"),
       ).rejects.toThrow();
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -973,14 +990,17 @@ describe("Pi extension registration", () => {
       } as unknown as ExtensionCommandContext;
       await definition.handler("", context);
 
-      const success = notifications.filter((notification) =>
-        notification.message.includes("Session sync complete"),
-      );
-      expect(success.length).toBe(1);
-      // The sync succeeded but the forbidden link error must reach the host
-      // at error severity, not buried at info level.
-      expect(success[0]?.type).toBe("error");
-      expect(success[0]?.message).toContain("Blocked local source symlink into targetDir");
+      // v0.4.2: no aggregate summary is notified. The sync succeeded, and the
+      // forbidden-link security error reaches the host at error severity
+      // through the run's own realtime events.
+      const securityErrors = notifications.filter((entry) => entry.type === "error");
+      expect(securityErrors.length).toBeGreaterThan(0);
+      expect(securityErrors[0]?.message).toContain("Blocked local source symlink");
+      expect(
+        notifications.some((notification) =>
+          notification.message.includes("Session sync complete"),
+        ),
+      ).toBe(false);
       expect(notifications.some((n) => n.message.includes("synchronization failed"))).toBe(false);
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -1056,12 +1076,17 @@ describe("Pi extension registration", () => {
       await symlink(join(targetDir, "sessions"), join(sessionsRoot, "evil"), "dir");
       await definition.handler("", context);
 
-      const refresh = notifications.filter((notification) =>
-        notification.message.includes("Session sync committed; refreshing active session"),
-      );
-      expect(refresh.length).toBe(1);
-      expect(refresh[0]?.type).toBe("error");
-      expect(refresh[0]?.message).toContain("Blocked local source symlink into targetDir");
+      // v0.4.2: the refresh still happens, but the aggregate
+      // "committed; refreshing" summary is gone. The forbidden-link security
+      // error is surfaced by the run's own realtime error event.
+      const securityErrors = notifications.filter((entry) => entry.type === "error");
+      expect(securityErrors.length).toBeGreaterThan(0);
+      expect(securityErrors[0]?.message).toContain("Blocked local source symlink");
+      expect(
+        notifications.some((notification) =>
+          notification.message.includes("Session sync committed; refreshing active session"),
+        ),
+      ).toBe(false);
       expect(JSON.parse(await readFile(activeFile, "utf8")).value).toBe("target");
     } finally {
       if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -1138,8 +1163,9 @@ describe("Pi extension registration", () => {
       await definition.handler("", context);
       expect(switchCalls).toEqual([activeFile]);
       expect(JSON.parse(await readFile(activeFile, "utf8")).value).toBe("target");
+      // v0.4.2: the refresh happens, but no aggregate summary is notified.
       expect(notifications.some((message) => message.includes("Session sync committed"))).toBe(
-        true,
+        false,
       );
       cancelRefresh = true;
       await writeFile(
@@ -1318,9 +1344,9 @@ describe("Pi extension registration", () => {
       releaseIdle?.();
       await running;
 
-      expect(notifications.some((message) => message.includes("synchronization failed"))).toBe(
-        true,
-      );
+      expect(
+        notifications.some((message) => message.includes("Missing pi-session-sync config")),
+      ).toBe(true);
       expect(lock.reserved).toBe(false);
       expect(lock.active).toBe(false);
       expect(lock.refreshSessionFile).toBeUndefined();
@@ -1458,6 +1484,242 @@ describe("Pi extension registration", () => {
     const guard = events.get("session_before_switch");
     expect(guard !== undefined).toBe(true);
     expect(await guard?.()).toBe(undefined);
+  });
+});
+
+describe("realtime sync log widget", () => {
+  interface CapturedWidgetCall {
+    key: string;
+    content: unknown;
+    notifications: number;
+  }
+
+  interface RenderedWidgetLine {
+    color: string;
+    text: string;
+  }
+
+  function renderWidget(content: unknown): RenderedWidgetLine[] {
+    if (content === undefined) return [];
+    if (Array.isArray(content)) {
+      return content.map((text) => ({ color: "plain", text: String(text) }));
+    }
+    const rendered: RenderedWidgetLine[] = [];
+    const factory = content as (
+      tui: unknown,
+      theme: { fg: (color: string, text: string) => string },
+    ) => unknown;
+    factory(
+      {},
+      {
+        fg: (color, text) => {
+          rendered.push({ color, text });
+          return text;
+        },
+      },
+    );
+    return rendered;
+  }
+
+  interface CapturedNotification {
+    message: string;
+    type: "info" | "warning" | "error" | undefined;
+  }
+
+  interface WidgetFixturePaths {
+    sessionsRoot: string;
+    targetDir: string;
+    cwd: string;
+  }
+
+  async function runWithWidget(
+    prefix: string,
+    configure?: (paths: WidgetFixturePaths) => Promise<void>,
+  ): Promise<{
+    notifications: CapturedNotification[];
+    widgetCalls: CapturedWidgetCall[];
+    root: string;
+  }> {
+    const root = await makeTempRoot(prefix);
+    const previousAgent = process.env.PI_CODING_AGENT_DIR;
+    const previousSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const agentDir = join(root, "agent");
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const cwd = join(root, "project");
+    const notifications: CapturedNotification[] = [];
+    const widgetCalls: CapturedWidgetCall[] = [];
+    let notifyCount = 0;
+    try {
+      await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
+      await mkdir(sessionsRoot);
+      await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
+      await writeFile(
+        join(agentDir, "extensions", "pi-session-sync", "config.json"),
+        JSON.stringify({ targetDir }),
+      );
+      await configure?.({ sessionsRoot, targetDir, cwd });
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
+
+      const commands = new Map<string, unknown>();
+      const pi = {
+        on() {},
+        registerCommand(name: string, definition: unknown) {
+          commands.set(name, definition);
+        },
+      } as unknown as ExtensionAPI;
+      extension(pi);
+      const definition = commands.get("session-sync") as {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      };
+      const context = {
+        cwd,
+        waitForIdle: async () => {},
+        sessionManager: {
+          getSessionDir: () => sessionsRoot,
+          usesDefaultSessionDir: () => false,
+        },
+        ui: {
+          notify(message: string, type?: "info" | "warning" | "error") {
+            notifications.push({ message, type });
+            notifyCount += 1;
+          },
+          setWidget(key: string, content: unknown) {
+            widgetCalls.push({ key, content, notifications: notifyCount });
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      await definition.handler("", context);
+      return { notifications, widgetCalls, root };
+    } finally {
+      if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgent;
+      if (previousSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessions;
+    }
+  }
+
+  it("rolls the last five info lines while keeping every warning line visible", async () => {
+    const { notifications, widgetCalls, root } = await runWithWidget(
+      "pi-session-sync-widget-roll-",
+      async ({ sessionsRoot, cwd }) => {
+        for (const name of ["a.jsonl", "b.jsonl", "c.jsonl", "d.jsonl"]) {
+          await writeFile(
+            join(sessionsRoot, name),
+            `${JSON.stringify({ type: "session", id: name, cwd })}\n`,
+          );
+        }
+        // An unsupported root file produces a warning line that must never roll
+        // out of the window.
+        await writeFile(join(sessionsRoot, "notes.txt"), "unknown\n");
+      },
+    );
+    try {
+      // A new run replaces the previous window instead of appending to it.
+      expect(widgetCalls[0]?.key).toBe(SYNC_LOG_WIDGET_KEY);
+      expect(widgetCalls[0]?.content).toBeUndefined();
+      expect(widgetCalls.every((call) => call.key === SYNC_LOG_WIDGET_KEY)).toBe(true);
+
+      const snapshots = widgetCalls.filter((call) => call.content !== undefined);
+      // In TUI mode the widget is the sole realtime log surface; transient
+      // notifications are intentionally suppressed to avoid a duplicate dark
+      // notification area below the widget.
+      expect(notifications).toEqual([]);
+      expect(snapshots.length).toBeGreaterThan(SYNC_LOG_INFO_WINDOW + 1);
+
+      const finalRendered = renderWidget(snapshots.at(-1)?.content);
+      const finalLines = finalRendered.map((line) => line.text);
+      const infoLines = finalRendered
+        .filter((line) => line.color === "dim")
+        .map((line) => line.text);
+      expect(infoLines.length).toBe(SYNC_LOG_INFO_WINDOW);
+      expect(finalRendered.some((line) => line.text.includes("notes.txt"))).toBe(true);
+      expect(
+        finalLines.indexOf(infoLines.at(-1) ?? "") <
+          finalLines.findIndex((line) => line.includes("notes.txt")),
+      ).toBe(true);
+      expect(finalRendered.filter((line) => line.color === "dim").length).toBe(
+        SYNC_LOG_INFO_WINDOW,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("splits embedded newlines into individual screen lines", async () => {
+    const root = await makeTempRoot("pi-session-sync-widget-newlines-");
+    const previousAgent = process.env.PI_CODING_AGENT_DIR;
+    const previousSessions = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const agentDir = join(root, "agent");
+    const sessionsRoot = join(root, "sessions");
+    const targetDir = join(root, "target");
+    const widgetCalls: Array<{ content: unknown }> = [];
+    const notifications: CapturedNotification[] = [];
+    try {
+      await mkdir(join(agentDir, "extensions", "pi-session-sync"), { recursive: true });
+      await mkdir(sessionsRoot);
+      await mkdir(targetDir);
+      await mkdir(join(targetDir, "sessions"));
+      await writeFile(
+        join(agentDir, "extensions", "pi-session-sync", "config.json"),
+        JSON.stringify({ targetDir }),
+      );
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      process.env.PI_CODING_AGENT_SESSION_DIR = sessionsRoot;
+
+      const commands = new Map<string, unknown>();
+      const pi = {
+        on() {},
+        registerCommand(name: string, definition: unknown) {
+          commands.set(name, definition);
+        },
+      } as unknown as ExtensionAPI;
+      extension(pi);
+      const definition = commands.get("session-sync") as {
+        handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+      };
+      const context = {
+        cwd: join(root, "project"),
+        waitForIdle: async () => {
+          throw new Error("idle-timed-out");
+        },
+        sessionManager: {
+          getSessionDir: () => sessionsRoot,
+          usesDefaultSessionDir: () => false,
+        },
+        ui: {
+          notify(message: string, type?: "info" | "warning" | "error") {
+            notifications.push({ message, type });
+          },
+          setWidget(_key: string, content: unknown) {
+            widgetCalls.push({ content });
+          },
+        },
+      } as unknown as ExtensionCommandContext;
+      await definition.handler("", context);
+
+      const finalContent = widgetCalls.filter((call) => call.content !== undefined).at(-1)?.content;
+      const finalRendered = renderWidget(finalContent);
+      const finalLines = finalRendered.map((line) => line.text);
+      expect(finalLines).toContain("pi-session-sync: could not wait for Pi to become idle");
+      expect(finalLines).toContain("idle-timed-out");
+      expect(finalLines.some((line) => line.includes("\n"))).toBe(false);
+      // The multiline error is split into screen lines that all follow the
+      // retained info block: no info line may appear among or after them.
+      expect(notifications).toEqual([]);
+      expect(finalLines).toEqual([
+        "pi-session-sync: could not wait for Pi to become idle",
+        "idle-timed-out",
+      ]);
+    } finally {
+      if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgent;
+      if (previousSessions === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessions;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

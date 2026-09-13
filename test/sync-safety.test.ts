@@ -119,7 +119,7 @@ describe("bidirectional session sync safety", () => {
     }
   });
 
-  it("cleans known nested paths after both sides delete before sync", async () => {
+  it("preserves synchronized empty nested directories after both sides delete before sync", async () => {
     const fixture = await makeFixture();
     const nested = join(fixture.localTree, "nested", "deep");
     const relativeSessionPath = "nested/deep/session.jsonl";
@@ -149,10 +149,19 @@ describe("bidirectional session sync safety", () => {
         targetDir: fixture.targetDir,
         now: 12_250,
       });
-      await expect(lstat(fixture.localTree)).rejects.toThrow();
-      await expect(
-        lstat(join(fixture.targetDir, "sessions", fixture.portableName)),
-      ).rejects.toThrow();
+      // Empty non-hidden directories are synchronized content (v0.4.2): the
+      // emptied session tree is preserved on both sides instead of being
+      // cleaned as a leftover of the deleted files.
+      expect((await lstat(fixture.localTree)).isDirectory()).toBe(true);
+      expect((await lstat(join(fixture.localTree, "nested", "deep"))).isDirectory()).toBe(true);
+      expect(
+        (await lstat(join(fixture.targetDir, "sessions", fixture.portableName))).isDirectory(),
+      ).toBe(true);
+      expect(
+        (
+          await lstat(join(fixture.targetDir, "sessions", fixture.portableName, "nested", "deep"))
+        ).isDirectory(),
+      ).toBe(true);
     } finally {
       await cleanup(fixture.root);
     }

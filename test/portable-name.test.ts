@@ -379,10 +379,13 @@ describe("portable session names", () => {
       "lpt9.txt",
       "a\u0000b",
       "a\u0001b",
+      // A dot-prefixed spelling is a hidden label, which is rejected for a
+      // different reason than the reserved (non-hidden) state file name.
+      ".PI-SESSION-SYNC-STATE.JSON",
     ]) {
       expect(() => normalizePortableNameOptions({ homeLabel: label, rootLabel: "ROOT" })).toThrow();
     }
-    for (const label of [RESERVED_STATE_FILE_NAME, ".PI-SESSION-SYNC-STATE.JSON"]) {
+    for (const label of [RESERVED_STATE_FILE_NAME]) {
       expect(() => normalizePortableNameOptions({ homeLabel: label, rootLabel: "ROOT" })).toThrow(
         /reserved/,
       );

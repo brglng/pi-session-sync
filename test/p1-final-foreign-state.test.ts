@@ -241,11 +241,13 @@ describe("final P1: undecodable foreign mission evidence never seeds current map
 
       const summary = await syncSessions({ ...options, now: 200_000 });
       expect(summary.errors).toEqual([]);
+      // v0.4.2: an unmappable in-root local path in a generic field is
+      // preserved silently, never rewritten into a foreign URI.
       expect(
         summary.warnings.some((warning) =>
           warning.includes(`Invalid local path preserved verbatim: ${unmappedReference}`),
-        ),
-      ).toBe(true);
+        ) ?? false,
+      ).toBe(false);
 
       const targetText = await readFile(targetPath, "utf8");
       expect(targetText).not.toContain(TEAM_FOREIGN_NAME);

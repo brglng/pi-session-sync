@@ -21,8 +21,8 @@ function inRoot(name: string): string {
   return join(sessionsRoot, localName, name);
 }
 
-describe("fixed structured path fields (v0.4.1)", () => {
-  it("rewrites every allowlisted field, including nested structures and array elements", () => {
+describe("field-agnostic recursive path fields (v0.4.2)", () => {
+  it("rewrites path-shaped fields wherever they appear, including nested and unknown fields", () => {
     const entry = {
       type: "session",
       id: "s1",
@@ -32,6 +32,12 @@ describe("fixed structured path fields (v0.4.1)", () => {
       details: { readFiles: [inRoot("r.ts")], modifiedFiles: [inRoot("m.ts")] },
       nested: { recordPath: inRoot("record.json") },
       deep: { level: { sessionPath: inRoot("deep.json") } },
+      // v0.4.2 removed the fixed-field allowlist: a path-shaped value in a
+      // field the extension has never heard of is rewritten exactly like the
+      // documented ones.
+      projectRoot: inRoot("project"),
+      unknownField: inRoot("unknown.json"),
+      list: [inRoot("list-item.json")],
     };
     const transformed = transformFileText(
       "fields.jsonl",
@@ -57,12 +63,48 @@ describe("fixed structured path fields (v0.4.1)", () => {
     expect(
       ((out.deep as Record<string, unknown>).level as Record<string, unknown>).sessionPath,
     ).toBe(`pi-session-sync://sessions/${portableName}/deep.json`);
+    expect(out.projectRoot).toBe(`pi-session-sync://sessions/${portableName}/project`);
+    expect(out.unknownField).toBe(`pi-session-sync://sessions/${portableName}/unknown.json`);
+    expect(out.list).toEqual([`pi-session-sync://sessions/${portableName}/list-item.json`]);
     expect(transformed.warnings ?? []).toEqual([]);
   });
 
-  it("keeps arbitrary session content byte-identical and silent in both directions", () => {
+  it("encodes an arbitrary nested field that names a project path outside the synced roots", () => {
+    // A path-shaped value in an unknown, deeply nested field that lives outside
+    // both synced file trees but under a configured portable prefix is encoded
+    // with the rootless portable name (v0.4.2) and decodes back to the same
+    // absolute project path.
+    const projectPath = join(sessionsRoot, "..", "projects", "demo", "src", "index.ts");
+    const encoded = `pi-session-sync://${portableSessionDirName(projectPath)}`;
+    const entry = {
+      type: "session",
+      id: "s1",
+      cwd,
+      details: { summary: { unknownField: { nestedPath: projectPath, items: [projectPath] } } },
+    };
+    const forward = transformFileText(
+      "project.jsonl",
+      `${JSON.stringify(entry)}\n`,
+      "to-target",
+      resolver,
+      { portableName },
+    );
+    type Nested = { nestedPath: string; items: string[] };
+    type Shape = { details: { summary: { unknownField: Nested } } };
+    const out = JSON.parse(forward.outputText) as Shape;
+    expect(out.details.summary.unknownField.nestedPath).toBe(encoded);
+    expect(out.details.summary.unknownField.items).toEqual([encoded]);
+    expect(forward.warnings ?? []).toEqual([]);
+
+    const back = transformFileText("project.jsonl", forward.outputText, "to-local", resolver);
+    const restored = JSON.parse(back.outputText) as Shape;
+    expect(restored.details.summary.unknownField.nestedPath).toBe(projectPath);
+    expect(restored.details.summary.unknownField.items).toEqual([projectPath]);
+    expect(back.warnings ?? []).toEqual([]);
+  });
+
+  it("keeps ordinary free-form content byte-identical and silent in both directions", () => {
     const toolOutput = "pi-session-sync: SYNC REFUSED because another sync is running";
-    const targetCwdUri = "pi-session-sync://|TARGET_CWD_URI|/some/path.jsonl";
     const sourceSnippet = 'const uri = "pi-session-sync://sessions/ROOT%2Fx/y.jsonl";';
     const absoluteText = `failed to read ${inRoot("secret.ts")}`;
     const freeform = {
@@ -74,13 +116,11 @@ describe("fixed structured path fields (v0.4.1)", () => {
         toolName: "bash",
         content: [
           { type: "text", text: toolOutput },
-          { type: "text", text: targetCwdUri },
+          { type: "text", text: sourceSnippet },
         ],
-        details: { note: sourceSnippet },
+        details: { note: absoluteText },
       },
-      thinking: targetCwdUri,
-      unknownPathField: inRoot("secret.ts"),
-      unknownSyncField: "pi-session-sync:broken",
+      thinking: toolOutput,
       unknownText: absoluteText,
     };
     const forward = transformFileText(
@@ -91,10 +131,10 @@ describe("fixed structured path fields (v0.4.1)", () => {
       { portableName },
     );
     const out = JSON.parse(forward.outputText) as Record<string, unknown>;
+    // Tool output, thinking, source snippets, and prose that merely embeds a
+    // path are not path-shaped values: they stay byte-identical and silent.
     expect(out.message).toEqual(freeform.message);
     expect(out.thinking).toBe(freeform.thinking);
-    expect(out.unknownPathField).toBe(freeform.unknownPathField);
-    expect(out.unknownSyncField).toBe(freeform.unknownSyncField);
     expect(out.unknownText).toBe(freeform.unknownText);
     expect(out.cwd).toBe(`pi-session-sync://${portableName}`);
     expect(forward.warnings ?? []).toEqual([]);
@@ -107,7 +147,6 @@ describe("fixed structured path fields (v0.4.1)", () => {
       cwd: `pi-session-sync://${portableName}`,
       message: freeform.message,
       thinking: freeform.thinking,
-      unknownSyncField: freeform.unknownSyncField,
       unknownText: freeform.unknownText,
     };
     const backward = transformFileText(
@@ -119,18 +158,17 @@ describe("fixed structured path fields (v0.4.1)", () => {
     const restored = JSON.parse(backward.outputText) as Record<string, unknown>;
     expect(restored.message).toEqual(freeform.message);
     expect(restored.thinking).toBe(freeform.thinking);
-    expect(restored.unknownSyncField).toBe(freeform.unknownSyncField);
     expect(restored.unknownText).toBe(freeform.unknownText);
     expect(restored.cwd).toBe(cwd);
     expect(backward.warnings ?? []).toEqual([]);
   });
 
-  it("keeps unspecified JSON and Markdown frontmatter content silent", () => {
+  it("keeps unspecified JSON and Markdown frontmatter content unchanged when it is not a path", () => {
     const syncText = "pi-session-sync: SYNC REFUSED";
     const json = {
       cwd,
       message: { role: "assistant", content: [{ type: "text", text: syncText }] },
-      payload: { missing: "pi-session-sync://|TARGET_CWD_URI|" },
+      payload: { missing: "pi-session-sync:a11y-marker" },
     };
     const jsonTransformed = transformFileText(
       "freeform.json",
@@ -149,7 +187,7 @@ describe("fixed structured path fields (v0.4.1)", () => {
       `cwd: ${cwd}`,
       "message:",
       `  text: ${JSON.stringify(syncText)}`,
-      `unknownPath: ${inRoot("secret.ts")}`,
+      "unknownText: prose that mentions sync but is not a path",
       "---",
       `body keeps pi-session-sync: raw and ${inRoot("secret.ts")} untouched`,
       "",
@@ -158,11 +196,36 @@ describe("fixed structured path fields (v0.4.1)", () => {
       portableName,
     });
     expect(markdownTransformed.outputText).toContain(syncText);
-    expect(markdownTransformed.outputText).toContain(`unknownPath: ${inRoot("secret.ts")}`);
+    expect(markdownTransformed.outputText).toContain(
+      "unknownText: prose that mentions sync but is not a path",
+    );
     expect(markdownTransformed.outputText).toContain(
       `body keeps pi-session-sync: raw and ${inRoot("secret.ts")} untouched`,
     );
     expect(markdownTransformed.warnings ?? []).toEqual([]);
+  });
+
+  it("reports a candidate-shaped pi-session-sync value in target content as a located error", () => {
+    // `pi-session-sync://|NOT_A_NAMESPACE|/x.jsonl` begins with the exact
+    // candidate prefix but is not a valid URI: target content must not silently
+    // write it into a local file (v0.4.2), so the transform fails with the
+    // file, line, field key, and a bounded value.
+    const value = "pi-session-sync://|NOT_A_NAMESPACE|/x.jsonl";
+    const input = `${JSON.stringify({ thinking: value, cwd: `pi-session-sync://${portableName}` })}\n`;
+    expect(() => transformFileText("bad-tool-output.jsonl", input, "to-local", resolver)).toThrow(
+      /invalid pi-session-sync URI in target content/,
+    );
+    try {
+      transformFileText("bad-tool-output.jsonl", input, "to-local", resolver);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain("bad-tool-output.jsonl:1");
+      expect(message).toContain("thinking");
+      expect(message).toContain("value=pi-session-sync://|NOT_A_NAMESPACE|/x.jsonl");
+    }
+    // The same value in local content is not a native path and stays silent.
+    const forward = transformFileText("local-tool-output.jsonl", input, "to-target", resolver);
+    expect(forward.warnings ?? []).toEqual([]);
   });
 
   it("preserves a conflicting cwd value instead of stopping the sync", async () => {

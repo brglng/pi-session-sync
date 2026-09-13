@@ -192,11 +192,13 @@ describe("session JSON synchronization", () => {
         now: 3_000,
       });
       expect(summary.copied).toBe(1);
+      // v0.4.2: only exact `pi-session-sync://` values are portable candidates
+      // in target content, so an out-of-root absolute path is silent.
       expect(
         summary.warnings.some((warning) =>
           warning.includes("Invalid target path preserved verbatim"),
-        ),
-      ).toBe(true);
+        ) ?? false,
+      ).toBe(false);
       const local = JSON.parse(
         await readFile(join(fixture.localTree, "lenient.json"), "utf8"),
       ) as Record<string, unknown>;

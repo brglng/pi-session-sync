@@ -23,7 +23,8 @@ const resolver = createParentPathResolver(sessionsRoot, (name) =>
  * reported OOM case: a huge record with no rewritten path field must stay
  * byte-identical instead of being re-serialized with `JSON.stringify`.
  */
-const HUGE_TOOL_TEXT = "pi-session-sync://sessions/ROOT /var/www/file.ts\n".repeat(4000);
+const HUGE_TOOL_TEXT =
+  "tool output mentions pi-session-sync://sessions/ROOT /var/www/file.ts\n".repeat(4000);
 
 const hugeRecord = {
   type: "toolResult",

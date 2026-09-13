@@ -19,7 +19,7 @@ interface ScopeShape {
 
 async function firstScope(targetDir: string): Promise<ScopeShape> {
   const state = JSON.parse(
-    await readFile(join(targetDir, ".pi-session-sync-state.json"), "utf8"),
+    await readFile(join(targetDir, "pi-session-sync-state.json"), "utf8"),
   ) as { scopes: Record<string, ScopeShape> };
   return Object.values(state.scopes)[0] as ScopeShape;
 }
@@ -185,7 +185,7 @@ describe("review2 item4: old-schema scopes with stage-2 generic fields", () => {
   it("hard-errors when an old-schema scope carries generic evidence fields", async () => {
     const fixture = await makeFixture();
     try {
-      const statePath = join(fixture.targetDir, ".pi-session-sync-state.json");
+      const statePath = join(fixture.targetDir, "pi-session-sync-state.json");
       const base = { layout: "nested", sessionsRoot: "/x", directories: {}, flatFiles: {} };
       for (const extra of [
         { genericDirectories: {} },
@@ -209,7 +209,7 @@ describe("review2 item4: old-schema scopes with stage-2 generic fields", () => {
   it("still ignores an unambiguously old-schema scope", async () => {
     const fixture = await makeFixture();
     try {
-      const statePath = join(fixture.targetDir, ".pi-session-sync-state.json");
+      const statePath = join(fixture.targetDir, "pi-session-sync-state.json");
       await writeFile(
         statePath,
         stateWithScope({ layout: "nested", sessionsRoot: "/x", directories: {}, flatFiles: {} }),

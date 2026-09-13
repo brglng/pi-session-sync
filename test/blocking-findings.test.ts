@@ -42,7 +42,10 @@ describe("phase-2 blocking findings", () => {
         machineId: "f1-machine",
         now: 3_000,
       });
-      expect(third.deleted).toBe(0);
+      // The emptied `index` directory was not synchronized empty content: after
+      // the target copy was deleted, the one-sided directory deletion now
+      // propagates and removes the surviving local copy.
+      expect(third.deleted).toBe(1);
       expect(third.copied).toBe(0);
       const state = JSON.parse(
         await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
@@ -53,9 +56,9 @@ describe("phase-2 blocking findings", () => {
       expect(entries.length).toBe(1);
       const entry = entries[0]?.[1];
       expect(entry?.tombstone).not.toBeNull();
-      // Recreation with unchanged content: no resurrection. The both-deleted
-      // tombstone cleanup removed the emptied mission directory, so recreate it
-      // together with the file.
+      // Recreation with unchanged content: no resurrection. The emptied
+      // mission directory was removed by the propagated directory deletion, so
+      // recreate it together with the file.
       await mkdir(dirname(missionPath), { recursive: true });
       await writeFile(missionPath, `${JSON.stringify({ value: "v" }, null, 2)}\n`);
       const fourth = await syncSessions({

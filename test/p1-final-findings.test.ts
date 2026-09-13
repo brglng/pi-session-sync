@@ -97,7 +97,7 @@ function makeScan(
 }
 
 describe("v0.4.1 final P1: legacy loose rootless cwd URI in local source", () => {
-  it("preserves a legacy loose rootless cwd URI with a warning across local modes", () => {
+  it("preserves a legacy loose rootless cwd URI silently across local modes", () => {
     const jsonl = `${JSON.stringify({ cwd: legacyRootlessCwd })}\n`;
     const markdown = ["---", `cwd: ${legacyRootlessCwd}`, "---", "body", ""].join("\n");
     for (const mode of ["to-target", "inspect-local"] as const) {
@@ -107,18 +107,18 @@ describe("v0.4.1 final P1: legacy loose rootless cwd URI in local source", () =>
         jsonlOut.warnings?.some((warning) =>
           warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
         ),
-      ).toBe(true);
+      ).toBe(false);
       const markdownOut = transformFileText("cwd.md", markdown, mode, resolver);
       expect(markdownOut.outputText).toContain(`cwd: ${legacyRootlessCwd}`);
       expect(
         markdownOut.warnings?.some((warning) =>
           warning.startsWith("Malformed pi-session-sync value preserved verbatim:"),
         ),
-      ).toBe(true);
+      ).toBe(false);
     }
   });
 
-  it("keeps current and valid-but-undecodable rootless cwd URIs lenient in local source", () => {
+  it("keeps current and valid-but-undecodable rootless cwd URIs silent in local source", () => {
     const undecodable = "pi-session-sync://BOGUS%2Fproject";
     for (const value of [`pi-session-sync://${mappedPortableName}`, undecodable]) {
       const jsonl = `${JSON.stringify({ cwd: value })}\n`;
@@ -128,7 +128,7 @@ describe("v0.4.1 final P1: legacy loose rootless cwd URI in local source", () =>
         toTarget.warnings?.some((warning) =>
           warning.includes(`Invalid local cwd value preserved verbatim: ${value}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
 
       const markdown = ["---", `cwd: ${value}`, "---", "body", ""].join("\n");
       const inspected = transformFileText("cwd.md", markdown, "inspect-local", resolver);
@@ -137,7 +137,7 @@ describe("v0.4.1 final P1: legacy loose rootless cwd URI in local source", () =>
         inspected.warnings?.some((warning) =>
           warning.includes(`Invalid local cwd value preserved verbatim: ${value}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
     }
   });
 

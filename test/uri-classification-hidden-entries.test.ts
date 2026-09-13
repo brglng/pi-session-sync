@@ -34,12 +34,14 @@ describe("v0.4.2 malformed vs undecodable pi-session-sync URIs", () => {
         now: 1_000,
       });
       expect(summary.copied).toBe(1);
+      // v0.4.2: `pi-session-sync:` without the `//` authority is not a portable
+      // candidate and produces no diagnostic.
       expect(
         summary.warnings.some((warning) =>
           warning.includes("Malformed pi-session-sync value preserved verbatim"),
-        ),
-      ).toBe(true);
-      // The target file is never rewritten in place; the malformed value is
+        ) ?? false,
+      ).toBe(false);
+      // The target file is never rewritten in place; the non-candidate value is
       // preserved byte-for-byte on the local copy.
       expect(await readFile(targetFile, "utf8")).toBe(original);
       const localRecord = JSON.parse(
@@ -79,8 +81,8 @@ describe("v0.4.2 malformed vs undecodable pi-session-sync URIs", () => {
       expect(
         summary.warnings.some((warning) =>
           warning.includes("Malformed pi-session-sync value preserved verbatim"),
-        ),
-      ).toBe(true);
+        ) ?? false,
+      ).toBe(false);
       expect(await readFile(targetFile, "utf8")).toBe(original);
       const localText = await readFile(join(fixture.localTree, "bad.md"), "utf8");
       expect(localText).toContain("parentSession: pi-session-sync:bad");
@@ -274,13 +276,17 @@ describe("v0.4.1 empty and hidden-only directories", () => {
         machineId: "hidden-mission-machine",
         now: 8_000,
       });
-      expect(summary.copied).toBe(1);
+      // One session file plus the non-hidden empty mission directory
+      // `visible-empty`, which is synchronized empty content (v0.4.2).
+      expect(summary.copied).toBe(2);
       for (const warning of summary.warnings) {
         expect(warning).not.toContain(".hidden-dir");
         expect(warning).not.toContain("visible-empty");
       }
       expect(await exists(join(fixture.targetDir, "missions", ".hidden-dir"))).toBe(false);
-      expect(await exists(join(fixture.targetDir, "missions", "visible-empty"))).toBe(false);
+      // A non-hidden mission directory with no visible entry is synchronized
+      // content (v0.4.2): it is created on the target side.
+      expect(await exists(join(fixture.targetDir, "missions", "visible-empty"))).toBe(true);
     } finally {
       await cleanup(fixture.root);
     }
