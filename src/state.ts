@@ -221,9 +221,9 @@ function parseTombstone(value: unknown): Tombstone | null {
 
 function parseEntry(value: unknown): StateEntry {
   if (!isRecord(value)) throw new Error("Invalid entry in pi-session-sync state");
-  // Current state never drops an unknown entry field on rewrite: an unknown
-  // field means the file is not the exact current format, so it is malformed
-  // current state rather than content to silently discard.
+  // Mapping/evidence fields are legacy compatibility input only. They are
+  // deliberately ignored: the current machine derives mappings from its
+  // naming configuration and current scan evidence.
   if (!hasOwnKeysWithin(value, STATE_ENTRY_FIELDS, STATE_ENTRY_REQUIRED_FIELDS)) {
     throw new Error("Invalid entry fields in pi-session-sync state");
   }
@@ -236,143 +236,19 @@ function parseEntry(value: unknown): StateEntry {
   }
   const localSnapshots = safeRecord<SideSnapshot | null>();
   for (const [machineId, snapshot] of Object.entries(value.localSnapshots)) {
-    if (machineId.length === 0)
-      throw new Error("Invalid empty machine id in pi-session-sync state");
+    if (machineId.length === 0) throw new Error("Invalid empty machine id in pi-session-sync state");
     setOwnRecordValue(
       localSnapshots,
       machineId,
       parseSnapshot(snapshot, `local snapshot for ${machineId}`),
     );
   }
-  const cwdEvidence = safeRecord<Record<string, string>>();
-  if (value.cwdEvidence !== undefined) {
-    if (!isRecord(value.cwdEvidence)) {
-      throw new Error("Invalid cwd evidence in pi-session-sync state");
-    }
-    for (const [machineKey, record] of Object.entries(value.cwdEvidence)) {
-      if (machineKey.length === 0) {
-        throw new Error("Invalid empty machine key in pi-session-sync cwd evidence");
-      }
-      if (!isRecord(record)) {
-        throw new Error(
-          `Invalid cwd evidence record for machine ${machineKey} in pi-session-sync state`,
-        );
-      }
-      const parsedRecord = safeRecord<string>();
-      for (const [cwd, portableName] of Object.entries(record)) {
-        if (cwd.length === 0 || typeof portableName !== "string" || portableName.length === 0) {
-          throw new Error(
-            `Invalid cwd evidence for machine ${machineKey} in pi-session-sync state`,
-          );
-        }
-        setOwnRecordValue(parsedRecord, cwd, portableName);
-      }
-      setOwnRecordValue(cwdEvidence, machineKey, parsedRecord);
-    }
-  }
-  const missionSessionMappings = safeRecord<Record<string, string>>();
-  if (value.missionSessionMappings !== undefined) {
-    if (!isRecord(value.missionSessionMappings)) {
-      throw new Error("Invalid mission session mappings in pi-session-sync state");
-    }
-    for (const [machineKey, rawRecord] of Object.entries(value.missionSessionMappings)) {
-      if (machineKey.length === 0) {
-        throw new Error("Invalid empty machine key in pi-session-sync mission session mappings");
-      }
-      if (!isRecord(rawRecord)) {
-        throw new Error(
-          `Invalid mission session mappings for machine ${machineKey} in pi-session-sync state`,
-        );
-      }
-      const parsedRecord = safeRecord<string>();
-      for (const [localName, portableName] of Object.entries(rawRecord)) {
-        if (
-          localName.length === 0 ||
-          !localName.split("/").every((segment) => isCrossPlatformSafePathSegment(segment)) ||
-          typeof portableName !== "string" ||
-          portableName.length === 0
-        ) {
-          throw new Error(`Invalid mission session mapping in pi-session-sync state: ${localName}`);
-        }
-        setOwnRecordValue(parsedRecord, localName, portableName);
-      }
-      if (Object.keys(parsedRecord).length > 0) {
-        setOwnRecordValue(missionSessionMappings, machineKey, parsedRecord);
-      }
-    }
-  }
   return {
     baselineHash,
     localSnapshots,
     target: parseSnapshot(value.target, "target"),
     tombstone: parseTombstone(value.tombstone),
-    ...(Object.keys(cwdEvidence).length > 0 ? { cwdEvidence } : {}),
-    ...(Object.keys(missionSessionMappings).length > 0 ? { missionSessionMappings } : {}),
   };
-}
-
-/**
- * Parse and validate one persisted generic sessions-URI mapping record
- * (`genericDirectories` / `genericFlatFiles`). Keys must be non-empty and
- * cross-platform-safe (a single safe segment for nested directory names, safe
- * segments for flat relative paths); values must be non-empty strings. The
- * strict/decodable portable-name contract is enforced later by
- * `normalizeStateScopePortableNames` / `validateStateMappings` under the
- * CURRENT naming configuration, because state no longer stores a config
- * snapshot to validate against (v0.4.2). Referenced paths are never required
- * to exist. Empty records are dropped so the optional fields stay absent.
- */
-function parseGenericMappingRecord(
-  value: unknown,
-  context: string,
-  allowSlashSeparatedKeys: boolean,
-): Record<string, string> | undefined {
-  if (value === undefined) return undefined;
-  if (!isRecord(value)) {
-    throw new Error(`Invalid ${context} in pi-session-sync state`);
-  }
-  const record = safeRecord<string>();
-  for (const [name, portableName] of Object.entries(value)) {
-    if (name.length === 0) {
-      throw new Error(`Invalid empty key in ${context} in pi-session-sync state`);
-    }
-    const segments = allowSlashSeparatedKeys ? name.split("/") : [name];
-    if (!segments.every((segment) => isCrossPlatformSafePathSegment(segment))) {
-      throw new Error(`Invalid key in ${context} in pi-session-sync state: ${name}`);
-    }
-    if (typeof portableName !== "string" || portableName.length === 0) {
-      throw new Error(`Invalid ${context} in pi-session-sync state: ${name}`);
-    }
-    setOwnRecordValue(record, name, portableName);
-  }
-  return Object.keys(record).length > 0 ? record : undefined;
-}
-
-/**
- * Parse and validate the per-logical-file generic evidence provenance record.
- * Outer keys are `sessions/` logical file keys; inner records carry the same
- * generic mapping contract as `genericDirectories` / `genericFlatFiles`.
- * Empty records are dropped so the optional field stays absent.
- */
-function parseGenericEvidence(
-  value: unknown,
-  context: string,
-  flatLayout: boolean,
-): Record<string, Record<string, string>> | undefined {
-  if (value === undefined) return undefined;
-  if (!isRecord(value)) {
-    throw new Error(`Invalid ${context} in pi-session-sync state`);
-  }
-  const result = safeRecord<Record<string, string>>();
-  for (const [key, rawRecord] of Object.entries(value)) {
-    if (!key.startsWith("sessions/")) {
-      throw new Error(`Invalid ${context} logical key in pi-session-sync state: ${key}`);
-    }
-    const record = parseGenericMappingRecord(rawRecord, `${context} for ${key}`, flatLayout);
-    if (record === undefined) continue;
-    setOwnRecordValue(result, key, record);
-  }
-  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 const STATE_TOP_LEVEL_FIELDS = ["version", "scopes", "entries"] as const;
@@ -431,7 +307,7 @@ const STATE_SCOPE_FIELDS = [
   "genericFlatFiles",
   "genericEvidence",
 ] as const;
-const STATE_SCOPE_REQUIRED_FIELDS = ["layout", "sessionsRoot", "directories", "flatFiles"] as const;
+const STATE_SCOPE_REQUIRED_FIELDS = ["layout", "sessionsRoot"] as const;
 
 function parseState(value: unknown): SyncState {
   if (!isRecord(value) || value.version !== 1) {
@@ -445,8 +321,9 @@ function parseState(value: unknown): SyncState {
     if (!isRecord(rawScope)) {
       throw new Error(`Invalid session scope in pi-session-sync state: ${scopeKey}`);
     }
-    // Unknown scope fields are rejected instead of dropped, so no persisted
-    // evidence (current or stage-2 generic) is ever silently rewritten away.
+    // Mapping fields are accepted only as legacy input and discarded. The
+    // persisted schema is machine-independent: each machine derives labels
+    // from its own naming configuration and current scan evidence.
     if (!hasOwnKeysWithin(rawScope, STATE_SCOPE_FIELDS, STATE_SCOPE_REQUIRED_FIELDS)) {
       throw new Error(
         `Invalid pi-session-sync state scope fields (unknown or missing field): ${scopeKey}`,
@@ -458,74 +335,15 @@ function parseState(value: unknown): SyncState {
     if (typeof rawScope.sessionsRoot !== "string" || rawScope.sessionsRoot.length === 0) {
       throw new Error(`Invalid session scope root in pi-session-sync state: ${scopeKey}`);
     }
-    if (!isRecord(rawScope.directories) || !isRecord(rawScope.flatFiles)) {
-      throw new Error(`Invalid mappings in pi-session-sync state scope: ${scopeKey}`);
-    }
-    // A legacy scope carries a `namingConfig` snapshot (v0.4.1 and earlier);
-    // v0.4.2 never reads or compares it, so it is accepted and dropped on
-    // rewrite. A current scope carries `format: 2`; any other explicit format
-    // value is an unsupported future schema.
     if (rawScope.format !== undefined && rawScope.format !== 2) {
-      throw new Error(`Invalid pi-session-sync state scope format: ${scopeKey}`);
+      throw new Error(`Invalid session scope format in pi-session-sync state: ${scopeKey}`);
     }
-    const scopeFormat = 2;
-    // Layout-specific generic evidence must match the scope layout: a nested
-    // scope never writes `genericFlatFiles` and a flat scope never writes
-    // `genericDirectories`, so a mismatched field is malformed current state.
-    // Silently dropping (or rewriting away) it would discard persisted evidence
-    // without telling the user.
-    if (rawScope.layout === "flat" && rawScope.genericDirectories !== undefined) {
-      throw new Error(
-        `Generic directory mappings are not valid in a flat pi-session-sync state scope: ${scopeKey}`,
-      );
-    }
-    if (rawScope.layout === "nested" && rawScope.genericFlatFiles !== undefined) {
-      throw new Error(
-        `Generic flat file mappings are not valid in a nested pi-session-sync state scope: ${scopeKey}`,
-      );
-    }
-    const directories = safeRecord<string>();
-    for (const [localName, portableName] of Object.entries(rawScope.directories)) {
-      if (typeof portableName !== "string" || portableName.length === 0) {
-        throw new Error(`Invalid directory mapping in pi-session-sync state: ${localName}`);
-      }
-      setOwnRecordValue(directories, localName, portableName);
-    }
-    const flatFiles = safeRecord<string>();
-    for (const [relativePath, portableName] of Object.entries(rawScope.flatFiles)) {
-      if (
-        relativePath.length === 0 ||
-        typeof portableName !== "string" ||
-        portableName.length === 0
-      ) {
-        throw new Error(`Invalid flat file mapping in pi-session-sync state: ${relativePath}`);
-      }
-      setOwnRecordValue(flatFiles, relativePath, portableName);
-    }
-    const genericDirectories = parseGenericMappingRecord(
-      rawScope.genericDirectories,
-      `generic directory mapping in scope ${scopeKey}`,
-      false,
-    );
-    const genericFlatFiles = parseGenericMappingRecord(
-      rawScope.genericFlatFiles,
-      `generic flat file mapping in scope ${scopeKey}`,
-      true,
-    );
-    const genericEvidence = parseGenericEvidence(
-      rawScope.genericEvidence,
-      `generic evidence in scope ${scopeKey}`,
-      rawScope.layout === "flat",
-    );
     setOwnRecordValue(scopes, scopeKey, {
-      format: scopeFormat,
+      format: 2,
       layout: rawScope.layout,
       sessionsRoot: rawScope.sessionsRoot,
-      directories,
-      flatFiles,
-      ...(genericDirectories === undefined ? {} : { genericDirectories }),
-      ...(genericFlatFiles === undefined ? {} : { genericFlatFiles }),
-      ...(genericEvidence === undefined ? {} : { genericEvidence }),
+      directories: safeRecord<string>(),
+      flatFiles: safeRecord<string>(),
     });
   }
   const entries = safeRecord<StateEntry>();
@@ -743,5 +561,29 @@ export async function loadState(path: string): Promise<LoadStateResult> {
 }
 
 export function serializeState(state: SyncState): string {
-  return `${JSON.stringify(state, null, 2)}\n`;
+  // Persist only machine-independent synchronization state. Local↔portable
+  // mappings and mapping evidence are derived from the current machine's
+  // configuration and current scan, then intentionally omitted here.
+  const scopes = Object.fromEntries(
+    Object.entries(state.scopes).map(([key, scope]) => [key, {
+      format: scope.format,
+      layout: scope.layout,
+      sessionsRoot: scope.sessionsRoot,
+    }]),
+  );
+  const entries = Object.fromEntries(
+    Object.entries(state.entries).map(([key, entry]) => [key, {
+      baselineHash: entry.baselineHash,
+      localSnapshots: entry.localSnapshots,
+      target: entry.target,
+      tombstone: entry.tombstone,
+    }]),
+  );
+  const persisted = {
+    version: state.version,
+    scopes,
+    entries,
+    ...(state.directories === undefined ? {} : { directories: state.directories }),
+  };
+  return `${JSON.stringify(persisted, null, 2)}\n`;
 }

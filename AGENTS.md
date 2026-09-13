@@ -209,3 +209,12 @@
 - sessions 与 missions 中的非隐藏空目录也属于同步内容：一侧创建的空目录必须在另一侧创建；一侧删除的已同步目录必须在另一侧删除。根目录、隐藏目录、符号链接和安全校验规则继续适用。
 - state manifest 使用非隐藏文件名 `pi-session-sync-state.json`，该文件只由扩展自身管理，不作为普通 session/mission 文件同步。
 - `/session-sync` 的实时输出中，warning 和 error 必须全部保留并显示；info 在同一个屏幕 widget 中滚动显示且始终只保留最后 5 行，并排列在 warning/error 行之前；不得恢复最终汇总输出。
+
+## v0.5.0：state 不持久化本地映射
+
+以下规则覆盖此前关于 state mapping、generic evidence 和 machine mapping continuity 的要求：
+
+- state 文件不记录本地 session 目录或 flat 相对路径与 portable name 的映射关系；不记录 generic mapping、cwd evidence 或 mission session mapping。
+- 映射关系完全由当前机器的配置和当前同步扫描得到的文件／目录证据决定；state 中的文件 baseline、snapshot、tombstone、空目录 baseline 和 machine snapshot 仍然保留。
+- 读取旧 state 时允许忽略上述 legacy mapping 字段；写回 state 时不得再次写入这些字段。
+- 不检查、比较或拒绝不同机器之间的 mapping 是否一致；跨机器 mapping continuity 不属于扩展保证范围，是扩展的固有限制。
