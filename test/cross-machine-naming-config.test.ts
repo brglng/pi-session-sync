@@ -64,13 +64,15 @@ describe("v0.4.2 cross-machine naming configuration", () => {
 
       const stateText = await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8");
       const state = JSON.parse(stateText) as {
-        scopes: Record<string, { directories: Record<string, string> }>;
+        scopes: Record<string, Record<string, unknown>>;
         entries: Record<string, unknown>;
       };
       const machineAScopeKey = `nested:${machineASessions}`;
-      expect(state.scopes[machineAScopeKey]?.directories?.[machineALocalName]).toBe(
-        teamPortableName,
-      );
+      expect(Object.keys(state.scopes[machineAScopeKey] ?? {}).sort()).toEqual([
+        "format",
+        "layout",
+        "sessionsRoot",
+      ]);
       expect(Object.hasOwn(state.entries, `sessions/${teamPortableName}/session.jsonl`)).toBe(true);
       // No config snapshot is ever persisted (v0.4.2).
       expect(stateText.includes("namingConfig")).toBe(false);

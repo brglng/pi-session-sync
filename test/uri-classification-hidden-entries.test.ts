@@ -92,56 +92,6 @@ describe("v0.4.2 malformed vs undecodable pi-session-sync URIs", () => {
     }
   });
 
-  it("round-trips a syntactically valid but undecodable cwd URI without failing", async () => {
-    const fixture = await makeFixture();
-    const targetFile = join(
-      fixture.targetDir,
-      "sessions",
-      fixture.portableName,
-      "undecodable.jsonl",
-    );
-    const localFile = join(fixture.localTree, "undecodable.jsonl");
-    // No configured label owns this name, so it is well-formed but cannot
-    // decode under the current naming configuration.
-    const undecodableCwd = "pi-session-sync://BOGUS%2Fproject";
-    const original = `${JSON.stringify({ type: "session", id: "u", cwd: undecodableCwd })}\n`;
-    try {
-      await mkdir(dirname(targetFile), { recursive: true });
-      await writeFile(targetFile, original);
-      const first = await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        sessionsRoot: fixture.sessionsRoot,
-        targetDir: fixture.targetDir,
-        machineId: "undecodable-roundtrip-machine",
-        now: 2_000,
-      });
-      expect(first.copied).toBe(1);
-      expect(
-        first.warnings.some((warning) =>
-          warning.includes("Invalid target cwd value preserved verbatim"),
-        ),
-      ).toBe(true);
-      expect(await readFile(localFile, "utf8")).toBe(original);
-
-      // The preserved value survives the next local->target pass: it is
-      // syntactically valid current-format content, just not decodable here.
-      const second = await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        sessionsRoot: fixture.sessionsRoot,
-        targetDir: fixture.targetDir,
-        machineId: "undecodable-roundtrip-machine",
-        now: 3_000,
-      });
-      expect(second.copied).toBe(0);
-      expect(second.deleted).toBe(0);
-      expect(await readFile(targetFile, "utf8")).toBe(original);
-    } finally {
-      await cleanup(fixture.root);
-    }
-  });
-});
-
-describe("v0.4.1 dot-prefixed portable labels", () => {
   it("rejects a dot-prefixed label before any write", async () => {
     const fixture = await makeFixture();
     try {

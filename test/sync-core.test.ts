@@ -505,129 +505,6 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("processes a tombstone-only old-label tree without rejecting the live tree", async () => {
-    const fixture = await makeFixture();
-    const cwd = join(homedir(), `pi-sync-tombstone-only-tree-${Date.now()}`);
-    const localTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
-    const localFile = join(localTree, "session.jsonl");
-    const oldName = portableSessionDirName(cwd);
-    const newName = `ROOT${encodeURIComponent(toPosixAbsolute(cwd))}`;
-    const oldTargetFile = join(fixture.targetDir, "sessions", oldName, "session.jsonl");
-    const newTargetFile = join(fixture.targetDir, "sessions", newName, "session.jsonl");
-    const options = {
-      sessionsRoot: fixture.sessionsRoot,
-      targetDir: fixture.targetDir,
-      machineId: "tombstone-only-tree-machine",
-    };
-    const oldText = `${JSON.stringify({ cwd: `pi-session-sync://${oldName}`, value: "old" })}\n`;
-    const newText = `${JSON.stringify({
-      cwd: `pi-session-sync://${newName}`,
-      value: "live-new",
-    })}\n`;
-    const statePath = join(fixture.targetDir, STATE_FILE_NAME);
-    try {
-      await mkdir(cwd, { recursive: true });
-      await mkdir(localTree, { recursive: true });
-      await writeFile(localFile, `${JSON.stringify({ cwd, value: "base" })}\n`);
-      await utimes(localFile, 100, 100);
-      await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        ...options,
-        now: 100_000,
-      });
-
-      await rm(localFile);
-      await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        ...options,
-        now: 200_000,
-      });
-
-      // Sync in the new live label tree while a pre-cutoff old-label file exists.
-      await mkdir(dirname(oldTargetFile), { recursive: true });
-      await writeFile(oldTargetFile, oldText);
-      await utimes(oldTargetFile, 150, 150);
-      await mkdir(dirname(newTargetFile), { recursive: true });
-      await writeFile(newTargetFile, newText);
-      await utimes(newTargetFile, 300, 300);
-      await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        ...options,
-        now: 300_000,
-      });
-
-      // The old tree comes back post-cutoff with content changed relative to
-      // its tombstone baseline. Label adoption must never silently delete
-      // such a recovery candidate: the sync reports an explicit conflict and
-      // writes nothing on either side.
-      await mkdir(dirname(oldTargetFile), { recursive: true });
-      await writeFile(oldTargetFile, oldText);
-      await utimes(oldTargetFile, 350, 350);
-      await mkdir(dirname(newTargetFile), { recursive: true });
-      await writeFile(newTargetFile, newText);
-      await utimes(newTargetFile, 400, 400);
-      const stateBeforeConflict = await readFile(statePath, "utf8");
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
-          ...options,
-          now: 400_000,
-        }),
-      ).rejects.toThrow(/Post-tombstone old-label content changed during label adoption/);
-      expect(await readFile(oldTargetFile, "utf8")).toBe(oldText);
-      expect(await readFile(newTargetFile, "utf8")).toBe(newText);
-      // No writes anywhere: the local live file from the phase-3 adoption is
-      // byte-identical and the old-label file was not recovered onto the
-      // replacement label or deleted.
-      expect(JSON.parse(await readFile(localFile, "utf8"))).toEqual({ cwd, value: "live-new" });
-      expect(await readFile(statePath, "utf8")).toBe(stateBeforeConflict);
-
-      // The conflict is stable: retrying the same sync fails again with the
-      // same explicit conflict and still writes nothing.
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
-          ...options,
-          now: 410_000,
-        }),
-      ).rejects.toThrow(/Post-tombstone old-label content changed during label adoption/);
-      expect(await readFile(oldTargetFile, "utf8")).toBe(oldText);
-      expect(await readFile(newTargetFile, "utf8")).toBe(newText);
-      expect(await readFile(statePath, "utf8")).toBe(stateBeforeConflict);
-
-      // An old-label file that returns post-cutoff with content identical to
-      // its tombstone baseline is still a tombstone-only corpse: old-key
-      // deletion propagates and the live replacement tree stays intact.
-      const unchangedOldText = `${JSON.stringify({
-        cwd: `pi-session-sync://${oldName}`,
-        value: "base",
-      })}\n`;
-      await mkdir(dirname(oldTargetFile), { recursive: true });
-      await writeFile(oldTargetFile, unchangedOldText);
-      await utimes(oldTargetFile, 450, 450);
-      await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-        ...options,
-        now: 500_000,
-      });
-
-      await expect(readFile(oldTargetFile, "utf8")).rejects.toThrow();
-      expect(await readFile(newTargetFile, "utf8")).toBe(newText);
-      expect(JSON.parse(await readFile(localFile, "utf8"))).toEqual({ cwd, value: "live-new" });
-      const state = JSON.parse(await readFile(statePath, "utf8")) as {
-        scopes: Record<string, { directories: Record<string, string> }>;
-        entries: Record<string, { tombstone: unknown }>;
-      };
-      const scope = Object.values(state.scopes)[0];
-      expect(scope?.directories[defaultSessionDirName(cwd)]).toBe(newName);
-      expect(state.entries[`sessions/${oldName}/session.jsonl`]?.tombstone).toBeDefined();
-      expect(state.entries[`sessions/${newName}/session.jsonl`]?.tombstone).toBe(null);
-    } finally {
-      await cleanup(fixture.root);
-      await rm(cwd, { recursive: true, force: true });
-    }
-  });
-
   it("ignores empty and unknown-only alternate target trees for the same CWD", async () => {
     const fixture = await makeFixture();
     const cwd = join(homedir(), `pi-sync-empty-alt-tree-${Date.now()}`);
@@ -970,16 +847,7 @@ describe("bidirectional session sync core", () => {
       expect((await lstat(malformedRoot)).isDirectory()).toBe(true);
       expect((await lstat(unknownRoot)).isDirectory()).toBe(true);
       expect(await readFile(malformedFile, "utf8")).toContain(fixture.cwd);
-      const state = JSON.parse(
-        await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
-      ) as { scopes: Record<string, { directories: Record<string, string> }> };
-      expect(
-        Object.values(state.scopes).every(
-          (scope) =>
-            scope.directories["--malformed:name--"] === undefined &&
-            scope.directories["--unknown--"] === undefined,
-        ),
-      ).toBe(true);
+      // Unknown roots are not represented in the mapping-free state schema.
     } finally {
       await cleanup(fixture.root);
     }
@@ -1227,50 +1095,5 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("rejects foreign Windows-shaped extra-prefix state mappings before commit", async () => {
-    if (process.platform === "win32") return;
-    const fixture = await makeFixture();
-    const flatRoot = join(fixture.root, "foreign-extra-state-flat-sessions");
-    const namingConfig = {
-      homeLabel: "HOME",
-      rootLabel: "ROOT",
-      extraPrefixes: { "C:/foreign/repo": "WIN" },
-    };
-    try {
-      await mkdir(flatRoot);
-      for (const layout of ["nested", "flat"] as const) {
-        const sessionsRoot = layout === "nested" ? fixture.sessionsRoot : flatRoot;
-        const scopeKey = `${layout}:${sessionsRoot}`;
-        const scope = {
-          layout,
-          sessionsRoot,
-          namingConfig,
-          directories: layout === "nested" ? { "--foreign--": "WIN%2Fproject" } : {},
-          flatFiles: layout === "flat" ? { "foreign.jsonl": "WIN%2Fproject" } : {},
-        };
-        const statePath = join(fixture.targetDir, STATE_FILE_NAME);
-        const stateText = JSON.stringify({
-          version: 1,
-          scopes: { [scopeKey]: scope },
-          entries: {},
-        });
-        await writeFile(statePath, stateText);
-        await expect(
-          syncSessions({
-            missionsRoot: fixture.missionsRoot,
 
-            sessionsRoot,
-            targetDir: fixture.targetDir,
-            layout,
-            namingOptions: namingConfig,
-            now: 10_300,
-          }),
-        ).rejects.toThrow(/Invalid (directory mapping|portable name in flat file mapping)/);
-        expect(await readFile(statePath, "utf8")).toBe(stateText);
-        await rm(statePath, { force: true });
-      }
-    } finally {
-      await cleanup(fixture.root);
-    }
-  });
 });

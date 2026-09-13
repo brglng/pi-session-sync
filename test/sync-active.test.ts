@@ -887,17 +887,10 @@ describe("bidirectional session sync active sessions", () => {
         scopes: Record<string, unknown>;
         entries: Record<string, unknown>;
       };
-      const foreignPortableName = `HOME${encodeURIComponent("/foreign/home/project")}`;
       state.scopes["nested:/foreign-machine/agent/sessions"] = {
+        format: 2,
         layout: "nested",
         sessionsRoot: "/foreign-machine/agent/sessions",
-        namingConfig: {
-          homeLabel: "HOME",
-          rootLabel: "ROOT",
-          extraPrefixes: {},
-        },
-        directories: { "--foreign-home-project--": foreignPortableName },
-        flatFiles: {},
       };
       await writeFile(statePath, JSON.stringify(state));
 
@@ -910,11 +903,13 @@ describe("bidirectional session sync active sessions", () => {
         now: 43_600,
       });
       const after = JSON.parse(await readFile(statePath, "utf8")) as {
-        scopes: Record<string, { directories: Record<string, string> }>;
+        scopes: Record<string, Record<string, unknown>>;
       };
-      expect(after.scopes["nested:/foreign-machine/agent/sessions"]?.directories).toEqual({
-        "--foreign-home-project--": foreignPortableName,
-      });
+      expect(Object.keys(after.scopes["nested:/foreign-machine/agent/sessions"] ?? {}).sort()).toEqual([
+        "format",
+        "layout",
+        "sessionsRoot",
+      ]);
     } finally {
       await cleanup(fixture.root);
     }

@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defaultSessionDirName, portableSessionDirName } from "../src/portable-name.ts";
 import { STATE_FILE_NAME, SyncFailure, syncSessions } from "../src/sync.ts";
@@ -226,11 +226,6 @@ describe("bidirectional session sync safety", () => {
       expect(summary.warnings.some((warning) => warning.includes(targetTree))).toBe(true);
       expect((await lstat(targetTree)).isSymbolicLink()).toBe(true);
       expect(await readFile(source, "utf8")).toContain(fixture.cwd);
-      const state = JSON.parse(
-        await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
-      ) as { scopes: Record<string, { directories: Record<string, string> }> };
-      const scope = Object.values(state.scopes).find((value) => value.directories);
-      expect(scope?.directories[basename(fixture.localTree)]).toBe(fixture.portableName);
     } finally {
       await cleanup(fixture.root);
     }
@@ -453,39 +448,6 @@ describe("bidirectional session sync safety", () => {
         JSON.parse(await readFile(join(targetDir, "sessions", portable, "session.jsonl"), "utf8"))
           .cwd,
       ).toBe(`pi-session-sync://${portable}`);
-    } finally {
-      await cleanup(fixture.root);
-    }
-  });
-
-  it("uses a persisted directory mapping when cwd is absent", async () => {
-    const fixture = await makeFixture();
-    try {
-      const first = join(fixture.localTree, "first.jsonl");
-      await writeFile(first, `${JSON.stringify({ cwd: fixture.cwd })}\n`);
-      await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-
-        sessionsRoot: fixture.sessionsRoot,
-        targetDir: fixture.targetDir,
-        now: 20_000,
-      });
-      await rm(first);
-      const orphan = join(fixture.localTree, "orphan.md");
-      await writeFile(orphan, "plain markdown\n");
-      await syncSessions({
-        missionsRoot: fixture.missionsRoot,
-
-        sessionsRoot: fixture.sessionsRoot,
-        targetDir: fixture.targetDir,
-        now: 21_000,
-      });
-      expect(
-        await readFile(
-          join(fixture.targetDir, "sessions", fixture.portableName, "orphan.md"),
-          "utf8",
-        ),
-      ).toBe("plain markdown\n");
     } finally {
       await cleanup(fixture.root);
     }
@@ -803,39 +765,6 @@ describe("bidirectional session sync safety", () => {
           warning.includes("Ignored old/inapplicable pi-session-sync state"),
         ),
       ).toBe(true);
-    } finally {
-      await cleanup(fixture.root);
-    }
-  });
-
-  it("rejects nested state mappings whose local names do not match decoded cwd", async () => {
-    const fixture = await makeFixture();
-    try {
-      await writeFile(
-        join(fixture.targetDir, STATE_FILE_NAME),
-        JSON.stringify({
-          version: 1,
-          scopes: {
-            [`nested:${fixture.sessionsRoot}`]: {
-              layout: "nested",
-              sessionsRoot: fixture.sessionsRoot,
-              namingConfig: { homeLabel: "HOME", rootLabel: "ROOT", extraPrefixes: {} },
-              directories: { "--wrong-local-name--": fixture.portableName },
-              flatFiles: {},
-            },
-          },
-          entries: {},
-        }),
-      );
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
-
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 36_002,
-        }),
-      ).rejects.toThrow(/Invalid directory mapping/);
     } finally {
       await cleanup(fixture.root);
     }

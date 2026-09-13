@@ -219,14 +219,6 @@ describe("bidirectional session sync tombstones", () => {
         machineId: "reuse-machine",
         now: 72_250,
       });
-      const stateAfterDelete = JSON.parse(
-        await readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8"),
-      ) as {
-        scopes: Record<string, { layout: string; flatFiles: Record<string, string> }>;
-      };
-      const scope = Object.values(stateAfterDelete.scopes).find((value) => value.layout === "flat");
-      expect(scope?.flatFiles[relativePath]).toBe(undefined);
-
       await writeFile(localFile, `${JSON.stringify({ cwd: secondCwd })}\n`);
       await syncSessions({
         missionsRoot: fixture.missionsRoot,
