@@ -628,6 +628,7 @@ function warnPreservedMalformedCandidateUri(value: string, context: VisitContext
  */
 function rewriteParentSessionValue(value: string, context: VisitContext): string {
   const { mode, resolver, parentSessionReferences } = context;
+  if (value.toLowerCase() === "pi-session-sync://") return value;
   if (isSyncUri(value) && !isSyncUriPathCandidate(value)) {
     // `pi-session-sync:` without the `//` authority, or a candidate-shaped
     // spelling carrying whitespace, is not a portable candidate at all: it is
@@ -815,6 +816,7 @@ function rewriteParentSessionValue(value: string, context: VisitContext): string
  */
 function rewriteRecursivePathValue(value: string, context: VisitContext): string {
   const { mode, resolver, genericPathReferences, namingConfig, namingOptions } = context;
+  if (value.toLowerCase() === "pi-session-sync://") return value;
   if (mode === "canonical-target") {
     // Canonical hashing never fails: a value that cannot be normalized hashes
     // exactly as the output pass left it. A rootless portable-name URI names a
@@ -887,7 +889,9 @@ function rewriteRecursivePathValue(value: string, context: VisitContext): string
       return value;
     }
   }
-  // Target source (to-local / inspect-target).
+  // Target source (to-local / inspect-target). The bare authority is an
+  // empty path value; preserve it verbatim in both directions.
+  if (value.toLowerCase() === "pi-session-sync://") return value;
   if (!isSyncUri(value)) {
     if (!isNativePathCandidate(value)) return value;
     if (mode === "inspect-target") {
@@ -982,6 +986,19 @@ function rewriteRecursivePathValue(value: string, context: VisitContext): string
 
 function visitValue(value: StructuredValue, context: VisitContext, key?: string): StructuredValue {
   const { mode, cwdValues, cwdPortableNames, namingOptions, portableName } = context;
+  // Pi conversation records contain arbitrary user text and tool arguments
+  // under these containers. They are content, not path metadata; do not walk
+  // them for URI/path candidates.
+  if (
+    key === "message" ||
+    key === "thinking" ||
+    key === "toolCall" ||
+    key === "toolResult" ||
+    key === "toolInput" ||
+    key === "toolOutput"
+  ) {
+    return value;
+  }
   if (key === "cwd" && typeof value !== "string") {
     throw new Error("cwd field must be a string");
   }
@@ -999,6 +1016,7 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
       // with a bounded warning instead of failing the sync; a
       // `pi-session-sync:` value without the `//` authority (or one carrying
       // whitespace) is ordinary content and stays silent (v0.4.2).
+      if (value.toLowerCase() === "pi-session-sync://") return value;
       if (isSyncUri(value) && !isSyncUriPathCandidate(value)) {
         return value;
       }

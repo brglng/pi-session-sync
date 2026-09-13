@@ -749,6 +749,38 @@ describe("session file transformation", () => {
       malformedPrefix,
     );
 
+    // The bare authority represents an empty path and is preserved verbatim
+    // instead of being parsed as a malformed portable URI.
+    const emptyPath = `${JSON.stringify({ cwd: "pi-session-sync://", parentSession: "pi-session-sync://", pattern: "pi-session-sync://" })}\n`;
+    const emptyPathOutput = emptyPath;
+    for (const mode of ["to-local", "to-target", "inspect-target"] as const) {
+      const transformed = transformFileText("empty-path.jsonl", emptyPath, mode, resolver);
+      expect(transformed.outputText).toBe(emptyPathOutput);
+      expect(transformed.warnings ?? []).toEqual([]);
+    }
+
+    // Conversation and tool argument text is not path metadata. URI-looking
+    // probes inside message.content remain byte-identical, while a real path
+    // field outside the message subtree is still rewritten.
+    const literalProbe = "pi-session-sync://" + "${fixture.portableName}";
+    const messageContent = `${JSON.stringify({
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", arguments: { pattern: literalProbe } }],
+      },
+      recordPath: `${sessionsRoot}/${localName}/record.json`,
+    })}\n`;
+    const messageResult = transformFileText("message.jsonl", messageContent, "to-target", resolver);
+    const messageOutput = JSON.parse(messageResult.outputText) as {
+      message: { content: Array<{ arguments: { pattern: string } }> };
+      recordPath: string;
+    };
+    expect(messageOutput.message.content[0]?.arguments.pattern).toBe(literalProbe);
+    expect(messageOutput.recordPath).toBe(
+      `pi-session-sync://sessions/${portableName}/record.json`,
+    );
+    expect(messageResult.warnings ?? []).toEqual([]);
+
     // v0.4.2: a targeting value that begins with the exact candidate prefix but
     // cannot be legally decoded is a located file error from target content and
     // stays silent on local source.

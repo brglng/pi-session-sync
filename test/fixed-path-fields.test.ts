@@ -205,27 +205,18 @@ describe("field-agnostic recursive path fields (v0.4.2)", () => {
     expect(markdownTransformed.warnings ?? []).toEqual([]);
   });
 
-  it("reports a candidate-shaped pi-session-sync value in target content as a located error", () => {
-    // `pi-session-sync://|NOT_A_NAMESPACE|/x.jsonl` begins with the exact
-    // candidate prefix but is not a valid URI: target content must not silently
-    // write it into a local file (v0.4.2), so the transform fails with the
-    // file, line, field key, and a bounded value.
+  it("preserves candidate-shaped URI text inside conversation content", () => {
     const value = "pi-session-sync://|NOT_A_NAMESPACE|/x.jsonl";
-    const input = `${JSON.stringify({ thinking: value, cwd: `pi-session-sync://${portableName}` })}\n`;
-    expect(() => transformFileText("bad-tool-output.jsonl", input, "to-local", resolver)).toThrow(
-      /invalid pi-session-sync URI in target content/,
-    );
-    try {
-      transformFileText("bad-tool-output.jsonl", input, "to-local", resolver);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      expect(message).toContain("bad-tool-output.jsonl:1");
-      expect(message).toContain("thinking");
-      expect(message).toContain("value=pi-session-sync://|NOT_A_NAMESPACE|/x.jsonl");
-    }
-    // The same value in local content is not a native path and stays silent.
-    const forward = transformFileText("local-tool-output.jsonl", input, "to-target", resolver);
-    expect(forward.warnings ?? []).toEqual([]);
+    const input = `${JSON.stringify({
+      message: { content: [{ type: "toolResult", text: value }] },
+      cwd: `pi-session-sync://${portableName}`,
+    })}\n`;
+    const transformed = transformFileText("tool-output.jsonl", input, "to-local", resolver);
+    const output = JSON.parse(transformed.outputText) as {
+      message: { content: Array<{ text: string }> };
+    };
+    expect(output.message.content[0]?.text).toBe(value);
+    expect(transformed.warnings ?? []).toEqual([]);
   });
 
   it("preserves a conflicting cwd value instead of stopping the sync", async () => {

@@ -46,7 +46,7 @@ Synchronization is manual. There is no background watcher.
 
 - Session files: `.json`, `.jsonl`, and `.md`.
 - Mission files: `.json`, `.jsonl`, and `.md`, preserving their relative tree.
-- Absolute paths under the sessions or missions roots are converted to `pi-session-sync://` URIs in the target and restored on reverse sync.
+- Absolute paths under the sessions or missions roots are converted to `pi-session-sync://` URIs in the target and restored on reverse sync. Known Pi conversation and tool-content subtrees, such as `message` content and tool arguments/results, are preserved as content and are not inspected for paths.
 - `cwd` uses a rootless URI such as `pi-session-sync://HOME/project`.
 - `parentSession` and other path-valued fields use the namespaced `sessions` or `missions` URI format.
 - Non-hidden empty descendant directories are synchronized and deletion is propagated. A session root that contains no synchronizable session file is not synchronized as a root.

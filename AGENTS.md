@@ -23,6 +23,7 @@ The current requirements below supersede earlier version sections. Do not use ol
 - Synchronization is manual through `/session-sync`; automatic background synchronization is not supported.
 - Sync `.json`, `.jsonl`, and `.md` files. Missions preserve their local relative tree.
 - Recursively rewrite path-valued fields according to the current portable URI rules. `cwd` uses a rootless URI; sessions and missions file paths use their respective namespaces; `parentSession` keeps its parent-file safety rules.
+- Known conversation and tool-content subtrees, including Pi `message` content and tool arguments/results, are content rather than path metadata and must be preserved without URI/path inspection. Actual path fields outside those subtrees remain recursively checked.
 - Non-hidden empty descendant directories are synchronizable content. A session root containing no synchronizable session file is not synchronizable as a root.
 - Propagate file and directory deletion with the existing baseline, mtime, hash, and tombstone rules.
 

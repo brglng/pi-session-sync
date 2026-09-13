@@ -171,7 +171,7 @@ describe("large JSONL sessions stream instead of decoding the whole file", () =>
     }
   });
 
-  it("still rewrites allowlisted path fields on later records of a large file", async () => {
+  it("preserves path-looking values inside tool content on later records of a large file", async () => {
     const fixture = await makeFixture();
     try {
       const sessionFile = join(fixture.localTree, "session.jsonl");
@@ -211,9 +211,7 @@ describe("large JSONL sessions stream instead of decoding the whole file", () =>
         message: { details: { fullOutputPath: string } };
         note: string;
       };
-      expect(stagedRecord.message.details.fullOutputPath).toBe(
-        `pi-session-sync://sessions/${fixture.portableName}/tool-output.txt`,
-      );
+      expect(stagedRecord.message.details.fullOutputPath).toBe(outputPath);
       // The free-form tool output on the same record keeps its exact bytes.
       expect(stagedRecord.note).toBe(TOOL_BLOCK);
     } finally {
@@ -397,7 +395,7 @@ describe("large JSONL sessions stream instead of decoding the whole file", () =>
     }
   });
 
-  it("still rewrites an allowlisted key separated from its colon by whitespace", async () => {
+  it("preserves tool content when JSON keys contain path-like names", async () => {
     const fixture = await makeFixture();
     try {
       const sessionFile = join(fixture.localTree, "session.jsonl");
@@ -437,9 +435,7 @@ describe("large JSONL sessions stream instead of decoding the whole file", () =>
         message: { details: { fullOutputPath: string } };
         note: string;
       };
-      expect(stagedRecord.message.details.fullOutputPath).toBe(
-        `pi-session-sync://sessions/${fixture.portableName}/tool-output.txt`,
-      );
+      expect(stagedRecord.message.details.fullOutputPath).toBe(outputPath);
       expect(stagedRecord.note).toBe(TOOL_BLOCK);
     } finally {
       injection.largePath = "";

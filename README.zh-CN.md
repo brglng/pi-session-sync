@@ -46,7 +46,7 @@ pi install npm:@brglng/pi-session-sync
 
 - Session 文件：`.json`、`.jsonl` 和 `.md`。
 - Mission 文件：`.json`、`.jsonl` 和 `.md`，保留 missions 根目录下的相对目录结构。
-- sessions 或 missions 根目录内的绝对路径，会在 target 中转换为 `pi-session-sync://` URI，反向同步时再恢复为本机路径。
+- sessions 或 missions 根目录内的绝对路径，会在 target 中转换为 `pi-session-sync://` URI，反向同步时再恢复为本机路径。Pi 对话和工具内容子树（例如 `message` 内容、工具参数和结果）视为普通内容，不进行路径或 URI 检查。
 - `cwd` 使用无根名 URI，例如 `pi-session-sync://HOME/project`。
 - `parentSession` 和其它路径字段使用带 `sessions` 或 `missions` 命名空间的 URI。
 - 非隐藏空子目录会同步，目录删除也会传播。没有可同步 session 文件的 session 根目录本身不参与同步。
