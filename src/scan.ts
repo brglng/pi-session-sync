@@ -32,16 +32,18 @@ import {
   syncParentUriToLocalPath,
   syncParentUriToPortableName,
 } from "./session-paths.ts";
-import type { SessionScopeState } from "./state.ts";
+import type { DirectoryBaseline, SessionScopeState } from "./state.ts";
 import { forbiddenSourceRootRealPath } from "./sync-fs-checks.ts";
 import { canonicalRootUri } from "./sync-paths.ts";
 import { type ParsedLogicalKey, parseLogicalKey } from "./sync-state-core.ts";
 import {
   createParentPathResolver,
+  fileScopedDiagnostics,
   fileScopedTransformWarning,
   type ParentPathResolver,
   type ParentSessionReference,
   type StreamedJsonlContent,
+  type TransformDiagnostic,
   type TransformMode,
   transformFile,
 } from "./transform.ts";
@@ -227,6 +229,12 @@ export interface ScannedFile {
   parentSessionReferences: ParentSessionReference[];
   /** Generated from generic (non-`parentSession`, non-`cwd`) path fields. */
   genericPathReferences: ParentSessionReference[];
+  /**
+   * Located diagnostics for this file with the file context the aggregated
+   * warnings carry. The orchestrator emits them as realtime events while the
+   * file is staged into its destination tree (v0.4.2).
+   */
+  diagnostics?: TransformDiagnostic[];
 }
 
 export interface SessionTree {
@@ -237,6 +245,8 @@ export interface SessionTree {
   cwd: string;
   files: ScannedFile[];
   directories: Set<string>;
+  /** See `CandidateTree.fileLess`. */
+  fileLess: boolean;
 }
 
 export interface ScanResult {
@@ -325,6 +335,14 @@ interface CandidateTree {
   files: CandidateFile[];
   directories: Set<string>;
   ignoredSymlinks: CandidateSymlink[];
+  /**
+   * True when the tree walk found NO visible regular file at all (supported or
+   * unknown): the tree's synchronized content is its directory structure
+   * alone. A one-sided file-less session tree root is synchronized content in
+   * its own right, so it is materialized from its directory observations
+   * instead of waiting for a file copy (v0.4.2 empty session roots).
+   */
+  fileLess: boolean;
   portableNameFromRoot?: string;
   cwdFromRoot?: string;
 }
@@ -647,9 +665,20 @@ async function collectTreeFiles(
    * warning for it while still dropping the file-less tree.
    */
   rootEmpty: boolean;
+  /**
+   * True when the walk found at least one visible regular file (supported or
+   * not) anywhere in the tree. A recognized Pi session root whose visible
+   * content is only directories holds no unknown entry at all: every one of
+   * those directories is empty, otherwise it would have contributed a file.
+   * Such a stale session directory is not an unknown local root item
+   * (v0.4.1) and must stay silent.
+   */
+  sawRegularFile: boolean;
 }> {
   const files: CandidateFile[] = [];
   const ignoredSymlinks: CandidateSymlink[] = [];
+  const directories = new Set<string>();
+  let sawRegularFile = false;
 
   const collect = async (
     logicalPath: string,
@@ -657,6 +686,11 @@ async function collectTreeFiles(
     physicalInfo: Awaited<ReturnType<typeof lstat>>,
     leafRealPath: string | undefined = undefined,
   ): Promise<boolean> => {
+    // Any visible regular file — even an unsupported one — makes the tree
+    // non-empty content. It is already reported by its own warning, so the
+    // containing recognized session root must keep reporting too instead of
+    // being mistaken for an empty (silent) Pi session directory.
+    sawRegularFile = true;
     const entry = basename(logicalPath);
     if (!isSessionExtension(entry)) {
       warnings.push(`Ignored unknown session file: ${logicalPath}`);
@@ -756,6 +790,10 @@ async function collectTreeFiles(
       throw new Error(`Cannot read session directory ${logicalDirectory}: ${String(error)}`);
     }
     const directoryHasEntries = entries.length > 0;
+    // Every walked non-hidden directory is synchronized content, including an
+    // empty one: record it so empty-directory sync can create/delete its
+    // counterpart (v0.4.2).
+    directories.add(logicalDirectory);
     for (const entry of entries) {
       const logicalPath = join(logicalDirectory, entry);
       const physicalPath = join(physicalDirectory, entry);
@@ -891,8 +929,13 @@ async function collectTreeFiles(
   };
 
   const rootResult = await walk(rootPath, rootPath, true);
-  const directories = deriveRootDirectories(rootPath, files);
-  return { files, directories, ignoredSymlinks, rootEmpty: rootResult === "empty" };
+  return {
+    files,
+    directories,
+    ignoredSymlinks,
+    rootEmpty: rootResult === "empty",
+    sawRegularFile,
+  };
 }
 
 function mappingFromState(
@@ -1097,6 +1140,7 @@ async function resolveNestedClaimForRoot(
     files: claimedFiles,
     directories: deriveRootDirectories(path, claimedFiles),
     ignoredSymlinks: rehomedIgnoredSymlinks,
+    fileLess: claimedFiles.length === 0,
   };
   if (claimedFiles.length > 0) trees.push(tree);
   return { kind: "rehomed", tree };
@@ -1112,6 +1156,7 @@ async function discoverTreesUnsafe(
   forbiddenSymlinkTarget: string | undefined = undefined,
   state: SessionScopeState | undefined = undefined,
   topLevelIgnoredSymlinks: string[] | undefined = undefined,
+  _directoryBaselines: Readonly<Record<string, DirectoryBaseline>> | undefined = undefined,
 ): Promise<CandidateTree[]> {
   let entries: string[];
   try {
@@ -1330,6 +1375,7 @@ async function discoverTreesUnsafe(
       files: collected.files,
       directories: collected.directories,
       ignoredSymlinks: collected.ignoredSymlinks,
+      fileLess: collected.files.length === 0 && !collected.sawRegularFile,
     };
     if (realPath !== undefined) tree.realPath = realPath;
     if (portableNameFromRoot !== undefined) tree.portableNameFromRoot = portableNameFromRoot;
@@ -1484,16 +1530,14 @@ async function discoverTreesUnsafe(
       );
       if (collected.files.length === 0) {
         // An ignored empty/unknown-only tree must not leave a real-directory
-        // claim behind: the tree is never added to `trees`, so a later alias
-        // resolving to a claimed real directory would be treated as a stale
-        // claim (owner gone) and never traversed. Drop this tree's own nested
-        // claims.
+        // claim behind: a later alias must be able to inspect the real tree
+        // independently and receive its own deterministic warning.
         for (const [claimedReal, claim] of nestedTreeClaims) {
           if (claim.ownerRootPath === path) nestedTreeClaims.delete(claimedReal);
         }
         // A root directory that is empty after dot-prefixed entries are
         // excluded is not an unknown entry (v0.4.1): stay silent.
-        if (!collected.rootEmpty) {
+        if (!collected.rootEmpty && collected.sawRegularFile) {
           warnings.push(`Ignored unknown local root directory: ${path}`);
         }
         continue;
@@ -1505,6 +1549,7 @@ async function discoverTreesUnsafe(
         files: collected.files,
         directories: collected.directories,
         ignoredSymlinks: collected.ignoredSymlinks,
+        fileLess: collected.files.length === 0 && !collected.sawRegularFile,
       };
       trees.push(tree);
       // Register the collected symlink tree by its real directory so later
@@ -1625,7 +1670,7 @@ async function discoverTreesUnsafe(
       if (collected.files.length === 0) {
         // A root directory that is empty after dot-prefixed entries are
         // excluded is not an unknown entry (v0.4.1): stay silent.
-        if (!collected.rootEmpty) {
+        if (!collected.rootEmpty && collected.sawRegularFile) {
           warnings.push(`Ignored unknown local root directory: ${path}`);
         }
         continue;
@@ -1636,6 +1681,7 @@ async function discoverTreesUnsafe(
         files: collected.files,
         directories: collected.directories,
         ignoredSymlinks: collected.ignoredSymlinks,
+        fileLess: collected.files.length === 0 && !collected.sawRegularFile,
       };
       if (realPath !== undefined) tree.realPath = realPath;
       trees.push(tree);
@@ -1712,6 +1758,7 @@ async function discoverTrees(
   forbiddenSymlinkTarget: string | undefined = undefined,
   state: SessionScopeState | undefined = undefined,
   topLevelIgnoredSymlinks: string[] | undefined = undefined,
+  directoryBaselines: Readonly<Record<string, DirectoryBaseline>> | undefined = undefined,
 ): Promise<CandidateTree[]> {
   try {
     return await discoverTreesUnsafe(
@@ -1724,6 +1771,7 @@ async function discoverTrees(
       forbiddenSymlinkTarget,
       state,
       topLevelIgnoredSymlinks,
+      directoryBaselines,
     );
   } catch (error) {
     if (error instanceof ScanFailure || error instanceof RootUnavailableError) throw error;
@@ -1881,6 +1929,10 @@ async function collectFlatFiles(
       throw new Error(`Cannot read flat session directory ${logicalDirectory}: ${String(error)}`);
     }
     const directoryHasEntries = entries.length > 0;
+    // Flat subdirectories (empty ones included) are content too: record every
+    // walked directory so a sync-empty flat directory can be created or
+    // deleted on the other side when its portable mapping is resolvable.
+    directories.add(logicalDirectory);
     for (const entry of entries) {
       const logicalPath = join(logicalDirectory, entry);
       const physicalPath = join(physicalDirectory, entry);
@@ -2382,6 +2434,7 @@ async function scanFlatLocalUnsafe(
       sessionHeaderCwdDecodable: transformed.sessionHeaderCwdDecodable,
       parentSessionReferences: transformed.parentSessionReferences ?? [],
       genericPathReferences: transformed.genericPathReferences ?? [],
+      diagnostics: fileScopedDiagnostics(candidate.absolutePath, transformed.diagnostics),
     });
   }
   return {
@@ -2571,6 +2624,7 @@ async function scanNestedSessions(
   missionsRoot: string | undefined = undefined,
   forbiddenSymlinkTarget: string | undefined = undefined,
   genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
+  directoryBaselines: Readonly<Record<string, DirectoryBaseline>> | undefined = undefined,
 ): Promise<ScanResult> {
   // A source root symlink that resolves into the physical targetDir tree
   // (including a target child CREATED during root validation, which the
@@ -2676,6 +2730,7 @@ async function scanNestedSessions(
       forbiddenSymlinkTarget,
       state,
       topLevelIgnoredSymlinks,
+      directoryBaselines,
     );
   } catch (error) {
     // `discoverTreesUnsafe` classified the sessions SOURCE ROOT itself as
@@ -2987,7 +3042,7 @@ async function scanNestedSessions(
         );
         continue;
       }
-      if (mapping !== undefined) {
+      if (mapping !== undefined && candidate.files.length > 0) {
         const existing = mappingForNativeName(localMappings, mapping.localName);
         if (
           existing !== undefined &&
@@ -3006,6 +3061,10 @@ async function scanNestedSessions(
         }
         localMappings.set(mapping.localName, mapping);
       }
+      // A file-less recognized session root keeps its persisted mapping for
+      // its own tree identity only: it proves no live file, so the mapping is
+      // never re-added to the scope directories after retirement decided the
+      // tree has no live use.
     }
 
     const cwd = side === "target" ? candidate.cwdFromRoot : mapping?.cwd;
@@ -3047,6 +3106,7 @@ async function scanNestedSessions(
       cwd,
       files: [],
       directories: candidate.directories,
+      fileLess: candidate.fileLess,
     });
   }
 
@@ -3417,6 +3477,7 @@ async function scanNestedSessions(
         sessionHeaderCwdDecodable: transformed.sessionHeaderCwdDecodable,
         parentSessionReferences: transformed.parentSessionReferences ?? [],
         genericPathReferences: transformed.genericPathReferences ?? [],
+        diagnostics: fileScopedDiagnostics(candidateFile.absolutePath, transformed.diagnostics),
       };
       localTreeFiles.push(scanned);
       files.set(key, scanned);
@@ -3579,13 +3640,20 @@ export interface ScanOptions {
    * it is never parentSession semantic, liveness, or retirement evidence.
    */
   genericExtraMappings?: ReadonlyMap<string, LocalDirectoryMapping>;
+  /**
+   * Persisted directory baselines (`state.directories`). A recognized local Pi
+   * session root that holds no synchronized file is mapped through these when
+   * its scope mapping was already retired, so an empty session tree stays
+   * observable instead of being dropped and re-created on the other side.
+   */
+  directoryBaselines?: Readonly<Record<string, DirectoryBaseline>>;
 }
 
 export async function scanSessions(
   rootPath: string,
   side: ScanSide,
   state: SessionScopeState,
-  stateFileName = ".pi-session-sync-state.json",
+  stateFileName = "pi-session-sync-state.json",
   layout: SessionLayout = "nested",
   localSessionsRootOrNamingOptions: string | Partial<PortableNameOptions> = rootPath,
   namingOptions: Partial<PortableNameOptions> | undefined = undefined,
@@ -3630,6 +3698,7 @@ export async function scanSessions(
       options.missionsRoot,
       options.forbiddenSymlinkTarget,
       options.genericExtraMappings,
+      options.directoryBaselines,
     );
   } catch (error) {
     if (error instanceof ScanFailure) throw error;

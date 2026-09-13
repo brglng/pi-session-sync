@@ -1,8 +1,12 @@
 /// <reference types="node" />
 
-import { isForeignStatePortableName, type PortableNameOptions } from "./portable-name.ts";
+import {
+  isForeignStatePortableName,
+  isStructurallyStrictPortableName,
+  type PortableNameOptions,
+} from "./portable-name.ts";
 import { isCrossPlatformSafePathSegment, SESSIONS_LOGICAL_KEY_PREFIX } from "./session-paths.ts";
-import type { StateEntry, StateScope, SyncState } from "./state.ts";
+import type { DirectoryBaseline, StateEntry, StateScope, SyncState } from "./state.ts";
 
 /**
  * Per-scope mapping records whose portable values belong to another machine's
@@ -28,10 +32,16 @@ export interface ForeignScopeMappings {
 export interface ForeignStateParts {
   entries: Record<string, StateEntry>;
   scopes: Record<string, ForeignScopeMappings>;
+  /**
+   * Directory baselines whose sessions portable label belongs to another
+   * machine's naming configuration. Missions directory keys carry no mutable
+   * label and therefore never need opaque preservation.
+   */
+  directories: Record<string, DirectoryBaseline>;
 }
 
 export function emptyForeignStateParts(): ForeignStateParts {
-  return { entries: safeRecord(), scopes: safeRecord() };
+  return { entries: safeRecord(), scopes: safeRecord(), directories: safeRecord() };
 }
 
 function safeRecord<T>(): Record<string, T> {
@@ -47,19 +57,40 @@ function isForeignSessionsEntryKey(key: string, namingOptions: PortableNameOptio
 }
 
 /**
+ * True for a directory baseline key whose portable label belongs to another
+ * machine's naming configuration, including the nested session tree ROOT key
+ * `sessions/<portable label>` whose remainder is the whole label.
+ */
+function isForeignSessionsDirectoryKey(key: string, namingOptions: PortableNameOptions): boolean {
+  if (!key.startsWith(SESSIONS_LOGICAL_KEY_PREFIX)) return false;
+  const rest = key.slice(SESSIONS_LOGICAL_KEY_PREFIX.length);
+  const slash = rest.indexOf("/");
+  if (slash >= 0) return isForeignSessionsEntryKey(key, namingOptions);
+  return rest.length > 0 && isForeignStatePortableName(rest, namingOptions);
+}
+
+/**
  * Validate the configuration-independent part of a foreign sessions logical
- * key: the mandatory `sessions/<portableName>/<relativePath>` shape and a
- * non-empty, cross-platform-safe relative path. The portable name belongs to
- * another machine's naming configuration and cannot be decoded here, but an
- * unsafe suffix (`x/../escape.jsonl`, a Windows device name, a trailing dot,
- * ...) is malformed state: it must hard-fail instead of being hidden by opaque
- * preservation. `parseLogicalKey` would reject such a suffix for a current
- * name, so the foreign fast path must apply the same structural rule.
+ * key: the mandatory `sessions/<portableName>/<relativePath>` shape with a
+ * non-empty, cross-platform-safe relative path, or the nested session tree
+ * ROOT shape `sessions/<portableName>` whose whole remainder is the label. The
+ * portable name belongs to another machine's naming configuration and cannot
+ * be decoded here, but an unsafe suffix (`x/../escape.jsonl`, a Windows device
+ * name, a trailing dot, ...) is malformed state: it must hard-fail instead of
+ * being hidden by opaque preservation. `parseLogicalKey` would reject such a
+ * suffix for a current name, so the foreign fast path must apply the same
+ * structural rule.
  */
 function requireSafeForeignSessionsLogicalKey(key: string): void {
   const rest = key.slice(SESSIONS_LOGICAL_KEY_PREFIX.length);
   const slash = rest.indexOf("/");
-  const relativePath = slash >= 0 ? rest.slice(slash + 1) : "";
+  if (slash < 0) {
+    if (!isStructurallyStrictPortableName(rest)) {
+      throw new Error(`Invalid foreign logical state key: ${key}`);
+    }
+    return;
+  }
+  const relativePath = rest.slice(slash + 1);
   if (
     slash <= 0 ||
     relativePath.length === 0 ||
@@ -208,6 +239,17 @@ export function extractForeignState(
   for (const [scopeKey, scope] of Object.entries(state.scopes)) {
     recordForeignScopeMappings(scope, scopeKey, parts, namingOptions);
   }
+  for (const key of Object.keys(state.directories ?? {})) {
+    if (!isForeignSessionsDirectoryKey(key, namingOptions)) continue;
+    requireSafeForeignSessionsLogicalKey(key);
+    const baseline = state.directories?.[key];
+    if (baseline === undefined) continue;
+    parts.directories[key] = baseline;
+    delete state.directories?.[key];
+  }
+  if (state.directories !== undefined && Object.keys(state.directories).length === 0) {
+    delete state.directories;
+  }
   return parts;
 }
 
@@ -232,6 +274,19 @@ export function mergeForeignState(state: SyncState, parts: ForeignStateParts): v
       enumerable: true,
       configurable: true,
     });
+  }
+  const directoryKeys = Object.keys(parts.directories);
+  if (directoryKeys.length > 0) {
+    state.directories ??= safeRecord<DirectoryBaseline>();
+    for (const key of directoryKeys) {
+      if (Object.hasOwn(state.directories, key)) continue;
+      Object.defineProperty(state.directories, key, {
+        value: parts.directories[key],
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
   }
   for (const [scopeKey, foreign] of Object.entries(parts.scopes)) {
     const scope = state.scopes[scopeKey];

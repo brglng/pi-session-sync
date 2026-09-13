@@ -22,8 +22,10 @@ import {
   isSyncUri,
   type LocalDirectoryMapping,
   nativeNameIdentity,
+  nativePathIdentity,
 } from "./session-paths.ts";
 import {
+  type DirectoryBaseline,
   emptyScope,
   emptyState,
   type LoadStateResult,
@@ -48,6 +50,22 @@ import {
   resolveInitialEntry,
   resolveTombstoneEntry,
 } from "./sync-decision-core.ts";
+import {
+  collectMissionDirectoryObservations,
+  collectSessionDirectoryObservations,
+  type DirectoryPlanAction,
+  executeDirectoryCreate,
+  executeDirectoryDelete,
+  filterDirectoryActions,
+  type ManagedDirectoryObservation,
+  managedEmptyDirectoryPaths,
+  planDirectoryActions,
+} from "./sync-directories.ts";
+import {
+  FILE_LEVEL_DIAGNOSTIC_KEY,
+  RealtimeSyncReporter,
+  STAGING_EVENT_KEY,
+} from "./sync-events.ts";
 import {
   flatLogicalKey,
   flatMappingHasLiveFile,
@@ -156,7 +174,9 @@ import {
   normalizeStateScopePortableNames,
 } from "./sync-state-normalize.ts";
 import {
+  type CopyAction,
   type DecisionContext,
+  type DeleteAction,
   type FileDecision,
   FORBIDDEN_TARGET_SYMLINK_PREFIX,
   STATE_FILE_NAME,
@@ -164,7 +184,11 @@ import {
   type SyncOptions,
   type SyncSummary,
 } from "./sync-types.ts";
-import { createGenericPathResolver, type ParentPathResolver } from "./transform.ts";
+import {
+  createGenericPathResolver,
+  type ParentPathResolver,
+  TransformFileError,
+} from "./transform.ts";
 import { isValidatedSyncRoots, type ValidatedSyncRoots } from "./validated-roots.ts";
 
 /**
@@ -591,6 +615,7 @@ async function syncSessionsInternal(
   options: SyncOptions,
   trustedRoots: ValidatedSyncRoots | undefined,
 ): Promise<SyncSummary> {
+  const reporter = new RealtimeSyncReporter(options.onEvent);
   if (options.now !== undefined && !Number.isFinite(options.now)) {
     throw new SyncFailure("Sync timestamp must be a finite number", []);
   }
@@ -839,6 +864,7 @@ async function syncSessionsInternal(
         lookupExclusions: staleFlatExactMappings,
         ...(missionsRoot === undefined ? {} : { missionsRoot }),
         forbiddenSymlinkTarget: ctx.physicalTargetDir,
+        ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
         ...(initialGenericExtraMappings.size === 0
           ? {}
           : { genericExtraMappings: initialGenericExtraMappings }),
@@ -871,6 +897,7 @@ async function syncSessionsInternal(
           lookupExclusions: staleFlatExactMappings,
           ...(missionsRoot === undefined ? {} : { missionsRoot }),
           forbiddenSymlinkTarget: ctx.physicalTargetDir,
+          ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
           ...(initialGenericExtraMappings.size === 0
             ? {}
             : { genericExtraMappings: initialGenericExtraMappings }),
@@ -910,6 +937,7 @@ async function syncSessionsInternal(
           lookupExclusions: staleFlatExactMappings,
           ...(missionsRoot === undefined ? {} : { missionsRoot }),
           forbiddenSymlinkTarget: ctx.physicalTargetDir,
+          ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
           ...(initialGenericExtraMappings.size === 0
             ? {}
             : { genericExtraMappings: initialGenericExtraMappings }),
@@ -1297,6 +1325,7 @@ async function syncSessionsInternal(
               localName,
               portableName,
               initialLocalScan,
+              targetScan,
               ctx.namingOptions,
             ))
         ) {
@@ -1749,6 +1778,7 @@ async function syncSessionsInternal(
             lookupExclusions: staleFlatExactMappings,
             ...(missionsRoot === undefined ? {} : { missionsRoot }),
             forbiddenSymlinkTarget: ctx.physicalTargetDir,
+            ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
             ...(rescanGenericExtraMappings.size === 0
               ? {}
               : { genericExtraMappings: rescanGenericExtraMappings }),
@@ -2018,6 +2048,7 @@ async function syncSessionsInternal(
     // persisted.
     const sessionsRootUnavailable =
       initialSessionsRootUnavailable || (localScan.rootPresent === false && !localScan.blockedRoot);
+    const sessionsTreeFrozen = sessionsRootUnavailable;
     const targetParentMappingsForState =
       ctx.layout === "flat"
         ? liveTargetParentMappings(targetScan, localScan, state, hadState, ctx, warnings)
@@ -2030,7 +2061,7 @@ async function syncSessionsInternal(
       ctx.layout === "nested"
         ? liveTargetTreeMappings(stateScope, targetScan, localScan, state, hadState, ctx, warnings)
         : new Map<string, string>();
-    if (ctx.layout === "nested" && !sessionsRootUnavailable) {
+    if (ctx.layout === "nested" && !sessionsTreeFrozen) {
       // Child symlink metadata is absent from targetScan.files. Associate it
       // with any proven label adoption before state keys or directory mappings
       // are migrated, so preflight can make that replacement group atomic.
@@ -2062,7 +2093,7 @@ async function syncSessionsInternal(
     // A frozen sessions tree preserves the persisted scope mappings verbatim;
     // no retirement, superseded filter, or local-derived addition may rewrite
     // them from a missing/unreadable local root.
-    const directories: Record<string, string> = sessionsRootUnavailable
+    const directories: Record<string, string> = sessionsTreeFrozen
       ? { ...stateScope.directories }
       : Object.fromEntries(
           Object.entries(stateScope.directories).filter(
@@ -2071,7 +2102,7 @@ async function syncSessionsInternal(
               setHasNativeName(preservedNestedMappings, localName),
           ),
         );
-    const flatFiles: Record<string, string> = sessionsRootUnavailable
+    const flatFiles: Record<string, string> = sessionsTreeFrozen
       ? { ...stateScope.flatFiles }
       : Object.fromEntries(
           Object.entries(stateScope.flatFiles).filter(
@@ -2089,7 +2120,7 @@ async function syncSessionsInternal(
               ),
           ),
         );
-    for (const mapping of sessionsRootUnavailable ? [] : localScan.localMappings.values()) {
+    for (const mapping of sessionsTreeFrozen ? [] : localScan.localMappings.values()) {
       const existing = recordValueForNativeName(directories, mapping.localName);
       if (
         existing !== undefined &&
@@ -2102,7 +2133,7 @@ async function syncSessionsInternal(
       }
       setRecordValueForNativeName(directories, mapping.localName, mapping.portableName);
     }
-    for (const [localName, portableName] of sessionsRootUnavailable
+    for (const [localName, portableName] of sessionsTreeFrozen
       ? []
       : targetParentDirectoryMappingsForState) {
       const existing = recordValueForNativeName(directories, localName);
@@ -2118,9 +2149,7 @@ async function syncSessionsInternal(
       }
       setRecordValueForNativeName(directories, localName, portableName);
     }
-    for (const [localName, portableName] of sessionsRootUnavailable
-      ? []
-      : targetTreeMappingsForState) {
+    for (const [localName, portableName] of sessionsTreeFrozen ? [] : targetTreeMappingsForState) {
       const parentMapping = mappingForNativeName(targetParentDirectoryMappingsForState, localName);
       if (
         parentMapping !== undefined &&
@@ -2146,10 +2175,10 @@ async function syncSessionsInternal(
         setRecordValueForNativeName(directories, localName, portableName);
       }
     }
-    for (const [relativePath, mapping] of sessionsRootUnavailable ? [] : localScan.flatMappings) {
+    for (const [relativePath, mapping] of sessionsTreeFrozen ? [] : localScan.flatMappings) {
       setRecordValueForNativeName(flatFiles, relativePath, mapping.portableName);
     }
-    if (ctx.layout === "flat" && !sessionsRootUnavailable) {
+    if (ctx.layout === "flat" && !sessionsTreeFrozen) {
       for (const [relativePath, portableName] of Object.entries(flatFiles)) {
         if (
           shouldRetireFlatMapping(
@@ -2273,7 +2302,7 @@ async function syncSessionsInternal(
       // A frozen sessions tree produces NO decisions: each prior state entry
       // is preserved verbatim (including tombstones), and sessions files that
       // appear only on the target stay untouched on disk and out of state.
-      if (sessionsRootUnavailable) {
+      if (sessionsTreeFrozen) {
         for (const key of Object.keys(state.entries)) {
           if (key.startsWith("missions/")) continue;
           const previousEntry = stateEntryForKey(state, key, ctx.namingOptions);
@@ -2290,12 +2319,20 @@ async function syncSessionsInternal(
             continue;
           }
           const targetPath = targetPathForKey(ctx, key);
+          const local = localScan.files.get(key);
           // Local source roots follow symlinks (root and internal), so a local
           // logical path through a symlink is not a decision-time block: the
           // scan already followed it and the per-action preflight checks below
           // still block local WRITES through symlinks. Only the target side
-          // stays strict here.
-          if (await pathHasSymlink(ctx.sessionsTargetRoot, targetPath)) {
+          // stays strict here. A target path that is (or passes through) a
+          // symlink holds unreadable target content; when no live local file
+          // could be transferred there the key is skipped whole and its
+          // previous entry preserved. When a live local file exists, the
+          // decision is kept so preflight blocks the transfer and the
+          // completeness ledger sees a planned transfer that was explicitly
+          // blocked (with a located realtime diagnostic) instead of a silently
+          // absent one.
+          if (local === undefined && (await pathHasSymlink(ctx.sessionsTargetRoot, targetPath))) {
             warnings.push(`Skipped logical path through symlink: ${key}`);
             if (ctx.layout === "nested") {
               // A migration-only replacement group must treat a decision-time
@@ -2313,7 +2350,6 @@ async function syncSessionsInternal(
             else nextEntries[key] = previousEntry;
             continue;
           }
-          const local = localScan.files.get(key);
           const physicalTarget = targetScan.files.get(key);
           const target =
             ctx.layout === "nested" &&
@@ -2505,10 +2541,9 @@ async function syncSessionsInternal(
         }
       }
       // Mapping maintenance (retirement/cleanup/replacement adoption) is
-      // sessisessions-tree activity: a frozen session tree must not retire,
-      // add, or otherwise mutate persisted mappings based on a missing local
-      // root.
-      if (!sessionsRootUnavailable) {
+      // sessions-tree activity: a frozen sessions tree must not retire, add, or
+      // otherwise mutate persisted mappings based on a missing local root.
+      if (!sessionsTreeFrozen) {
         if (ctx.layout === "flat") {
           for (const [relativePath, portableName] of Object.entries(flatFiles)) {
             const parentPortableName = mappingForNativeName(
@@ -2668,6 +2703,9 @@ async function syncSessionsInternal(
           if (!warnings.includes(warning)) warnings.push(warning);
         }
       };
+      let missionLocalDirectoryObservations = new Map<string, ManagedDirectoryObservation>();
+      let missionTargetDirectoryObservations = new Map<string, ManagedDirectoryObservation>();
+      let missionsTreeFrozenForDirectories = false;
       if (ctx.missionsRoot !== undefined && ctx.missionsTargetRoot !== undefined) {
         const missionSessionMappings = new Map<string, string>();
         // Names contributed only by the persisted-scope fallback below. They
@@ -2967,7 +3005,8 @@ async function syncSessionsInternal(
         // condition: decisions still run so preflight's missing-side guard
         // blocks the target mutations and the surviving target evidence stays
         // persisted.
-        if (!missionLocalScan.rootPresent && !missionLocalScan.blockedRoot) {
+        const missionsTreeFrozen = !missionLocalScan.rootPresent && !missionLocalScan.blockedRoot;
+        if (missionsTreeFrozen) {
           for (const key of missionStateKeys) {
             const previousEntry = stateEntryForKey(state, key, ctx.namingOptions);
             if (previousEntry !== undefined) nextEntries[key] = previousEntry;
@@ -3003,6 +3042,19 @@ async function syncSessionsInternal(
         }
         missionScannedFiles.local = missionLocalScan.files.size;
         missionScannedFiles.target = missionTargetScan.files.size;
+        missionsTreeFrozenForDirectories = missionsTreeFrozen;
+        if (!missionsTreeFrozen) {
+          missionLocalDirectoryObservations = await collectMissionDirectoryObservations(
+            missionLocalScan,
+            ctx.missionsRoot as string,
+            "local",
+          );
+          missionTargetDirectoryObservations = await collectMissionDirectoryObservations(
+            missionTargetScan,
+            ctx.missionsTargetRoot as string,
+            "target",
+          );
+        }
         const missionPreflight = await preflightMissions(
           missionDecisions,
           ctx,
@@ -3143,7 +3195,6 @@ async function syncSessionsInternal(
         // retired together with the frozen tree. Tombstoned target entries are
         // the exception: their content does not survive, so they must never
         // seed a mapping while the tree is frozen.
-        const missionsTreeFrozen = !missionLocalScan.rootPresent && !missionLocalScan.blockedRoot;
         const missionFrozenDecisionMap = new Map<string, FileDecision>();
         if (missionsTreeFrozen) {
           for (const file of missionTargetScan.files.values()) {
@@ -3188,13 +3239,13 @@ async function syncSessionsInternal(
           addPersistedMissionEvidence(missionPersistedMappings, entry, ctx, warnings);
         }
         // A frozen sessions tree (missing/unreadable local root) must not have
-        // its persisted scope mappings rewritten by missions content: the
-        // derived mappings are still used transiently for the missions
-        // operations of this round, but persisting them requires a local
-        // sessions rescan that could have proven or retired them. Keep the
-        // scope mapping fields verbatim and let the mappings persist once the
-        // sessions root is available again.
-        if (!sessionsRootUnavailable) {
+        // its persisted scope mappings rewritten
+        // by missions content: the derived mappings are still used transiently
+        // for the missions operations of this round, but persisting them
+        // requires the sessions scope to be fully available. Keep the scope
+        // mapping fields verbatim and let the mappings persist once the
+        // sessions scope is available again.
+        if (!sessionsTreeFrozen) {
           if (ctx.layout === "nested") {
             for (const [localName, portableName] of missionPersistedMappings) {
               const existing = recordValueForNativeName(directories, localName);
@@ -3370,8 +3421,9 @@ async function syncSessionsInternal(
         trackedIgnoredTargetKeys.add(key);
       }
       const nextEvidenceByKey = new Map<string, Map<string, string>>();
-      if (sessionsRootUnavailable) {
-        // Missing local sessions root freezes generic evidence verbatim.
+      if (sessionsTreeFrozen) {
+        // Missing local sessions root
+        // freezes generic evidence verbatim.
         for (const [key, record] of Object.entries(stateScope.genericEvidence ?? {})) {
           nextEvidenceByKey.set(key, new Map(Object.entries(record)));
         }
@@ -3461,7 +3513,7 @@ async function syncSessionsInternal(
       // preserve them as fallback fuel so they are not silently dropped. New
       // writes always persist provenance, so this never resurrects a deleted
       // file's mapping.
-      if (!sessionsRootUnavailable) {
+      if (!sessionsTreeFrozen) {
         const persistedUnion =
           ctx.layout === "nested" ? stateScope.genericDirectories : stateScope.genericFlatFiles;
         if (persistedUnion !== undefined) {
@@ -3476,14 +3528,14 @@ async function syncSessionsInternal(
           }
         }
       }
-      const nextGenericDirectories: Record<string, string> | undefined = sessionsRootUnavailable
+      const nextGenericDirectories: Record<string, string> | undefined = sessionsTreeFrozen
         ? stateScope.genericDirectories === undefined
           ? undefined
           : { ...stateScope.genericDirectories }
         : ctx.layout === "nested" && genericSessionMappings.size > 0
           ? Object.fromEntries(genericSessionMappings)
           : undefined;
-      const nextGenericFlatFiles: Record<string, string> | undefined = sessionsRootUnavailable
+      const nextGenericFlatFiles: Record<string, string> | undefined = sessionsTreeFrozen
         ? stateScope.genericFlatFiles === undefined
           ? undefined
           : { ...stateScope.genericFlatFiles }
@@ -3624,7 +3676,158 @@ async function syncSessionsInternal(
           });
         }
       }
-      const nextState: SyncState = { version: 1, scopes: nextScopes, entries: nextEntries };
+      // ===== Empty-directory sync (v0.4.2) =====
+      // A non-hidden directory with no visible entry is synced content too: a
+      // directory present on one side is created on the other, and a one-sided
+      // directory that was synchronized before is a deletion that propagates
+      // through its tombstone. Roots, hidden entries, symlinks, the active
+      // session directory, and the physical targetDir stay protected.
+      const directoryActions: DirectoryPlanAction[] = [];
+      const managedDirectoryPaths = new Set<string>();
+      const directoryNext: Record<string, DirectoryBaseline> = Object.create(null) as Record<
+        string,
+        DirectoryBaseline
+      >;
+      {
+        const previousDirectories = state.directories ?? {};
+        const previousSessionDirectories: Record<string, DirectoryBaseline> = Object.create(
+          null,
+        ) as Record<string, DirectoryBaseline>;
+        const previousMissionDirectories: Record<string, DirectoryBaseline> = Object.create(
+          null,
+        ) as Record<string, DirectoryBaseline>;
+        for (const [key, baseline] of Object.entries(previousDirectories)) {
+          if (key.startsWith("missions/")) previousMissionDirectories[key] = baseline;
+          else previousSessionDirectories[key] = baseline;
+        }
+        const pendingActions: DirectoryPlanAction[] = [];
+        const pendingNext: Record<string, DirectoryBaseline> = Object.create(null) as Record<
+          string,
+          DirectoryBaseline
+        >;
+        // Session directory observations stay available for the create
+        // actions below: a created session tree ROOT protects the empty
+        // session directory it was derived from in the same run.
+        let localSessionDirectoryObservations = new Map<string, ManagedDirectoryObservation>();
+        let targetSessionDirectoryObservations = new Map<string, ManagedDirectoryObservation>();
+        if (!sessionsTreeFrozen) {
+          // Retained (live/adopted) portable label per Pi local session
+          // directory, used to reconcile a file-less target/local tree that
+          // decodes to the same Pi directory under a stale alternate label
+          // instead of treating it as an independent root (which would create
+          // a duplicate target root). Live adopted target labels win, then the
+          // local scan's own (post-adoption) labels, then persisted state.
+          const retainedNestedLabels = new Map<string, string>();
+          if (ctx.layout === "nested") {
+            const recordRetainedNestedLabel = (localName: string, portableName: string): void => {
+              const identity = nativeNameIdentity(localName);
+              if (!retainedNestedLabels.has(identity)) {
+                retainedNestedLabels.set(identity, portableName);
+              }
+            };
+            for (const [localName, portableName] of liveTargetTreeMappingsForDecisions) {
+              recordRetainedNestedLabel(localName, portableName);
+            }
+            for (const tree of localScan.trees) {
+              recordRetainedNestedLabel(defaultSessionDirName(tree.cwd), tree.portableName);
+            }
+            for (const [localName, portableName] of Object.entries(stateScope.directories)) {
+              recordRetainedNestedLabel(localName, portableName);
+            }
+          }
+          const localObservations = await collectSessionDirectoryObservations(
+            localScan,
+            ctx.sessionsRoot,
+            ctx,
+            previousSessionDirectories,
+            warnings,
+            retainedNestedLabels,
+          );
+          const targetObservations = await collectSessionDirectoryObservations(
+            targetScan,
+            ctx.sessionsTargetRoot,
+            ctx,
+            previousSessionDirectories,
+            warnings,
+            retainedNestedLabels,
+          );
+          localSessionDirectoryObservations = localObservations;
+          targetSessionDirectoryObservations = targetObservations;
+          for (const path of managedEmptyDirectoryPaths(localObservations, targetObservations)) {
+            managedDirectoryPaths.add(path);
+          }
+          const sessionPlan = planDirectoryActions(
+            localObservations,
+            targetObservations,
+            previousSessionDirectories,
+            ctx,
+            ctx.now,
+          );
+          pendingActions.push(...sessionPlan.actions);
+          for (const [key, baseline] of Object.entries(sessionPlan.next)) {
+            pendingNext[key] = baseline;
+          }
+        } else {
+          for (const [key, baseline] of Object.entries(previousSessionDirectories)) {
+            pendingNext[key] = baseline;
+          }
+        }
+        if (ctx.missionsRoot !== undefined && ctx.missionsTargetRoot !== undefined) {
+          if (missionsTreeFrozenForDirectories) {
+            for (const [key, baseline] of Object.entries(previousMissionDirectories)) {
+              pendingNext[key] = baseline;
+            }
+          } else {
+            for (const observation of [
+              ...missionLocalDirectoryObservations.values(),
+              ...missionTargetDirectoryObservations.values(),
+            ]) {
+              if (observation.empty) managedDirectoryPaths.add(observation.path);
+            }
+            const missionPlan = planDirectoryActions(
+              missionLocalDirectoryObservations,
+              missionTargetDirectoryObservations,
+              previousMissionDirectories,
+              ctx,
+              ctx.now,
+            );
+            pendingActions.push(...missionPlan.actions);
+            for (const [key, baseline] of Object.entries(missionPlan.next)) {
+              pendingNext[key] = baseline;
+            }
+          }
+        }
+        const allowedActions = await filterDirectoryActions(
+          { actions: pendingActions, next: pendingNext },
+          ctx,
+          warnings,
+          warnings,
+        );
+        for (const action of allowedActions) {
+          directoryActions.push(action);
+          if (action.kind !== "create") continue;
+          managedDirectoryPaths.add(action.path);
+          // Creating a session tree ROOT on the missing side also makes the
+          // present side's empty session directory synchronized content: the
+          // cleanup of the same run must not remove the directory whose
+          // counterpart it just created.
+          const counterpart = (
+            action.side === "local"
+              ? targetSessionDirectoryObservations
+              : localSessionDirectoryObservations
+          ).get(action.key);
+          if (counterpart?.treeRoot === true) managedDirectoryPaths.add(counterpart.path);
+        }
+        for (const [key, baseline] of Object.entries(pendingNext)) {
+          directoryNext[key] = baseline;
+        }
+      }
+      const nextState: SyncState = {
+        version: 1,
+        scopes: nextScopes,
+        entries: nextEntries,
+        ...(Object.keys(directoryNext).length === 0 ? {} : { directories: directoryNext }),
+      };
       normalizeStateEntryKeys(nextState, ctx.namingOptions);
       // Re-validate the GENERATED next state before anything is staged: the
       // decision/ephemeral pass must never be able to commit a malformed
@@ -3671,36 +3874,208 @@ async function syncSessionsInternal(
       let copied = 0;
       let deleted = 0;
       const commitAll = [...commitDecisions, ...missionDecisions];
+      // Realtime reporting (v0.4.2): every staged file write, every committed
+      // copy, every executed deletion, and every diagnostic is published while
+      // the sync runs instead of only in the final summary.
       try {
+        // The completeness ledger: every action this run planned for the two
+        // destination trees, with the logical key each action belongs to. It
+        // makes a silent partial completion impossible — an unblocked planned
+        // copy that no staging write produced aborts the run BEFORE the first
+        // commit, and a planned copy/delete that was neither executed nor
+        // explicitly blocked stops the run instead of being reported as a
+        // completed sync.
+        const plannedCopies = new Set<CopyAction>();
+        const plannedDeletes = new Set<DeleteAction>();
+        const copyKeyByAction = new Map<CopyAction, string>();
+        const deleteKeyByAction = new Map<DeleteAction, string>();
+        const executedCopies = new Set<CopyAction>();
+        const executedDeletes = new Set<DeleteAction>();
+        for (const decision of commitAll) {
+          for (const action of decision.copies) {
+            plannedCopies.add(action);
+            copyKeyByAction.set(action, decision.key);
+          }
+          for (const action of decision.deletes) {
+            plannedDeletes.add(action);
+            deleteKeyByAction.set(action, decision.key);
+          }
+        }
+        const copyBlocked = (action: CopyAction): boolean =>
+          blockedCopies.has(action) || missionBlockedCopies.has(action);
+        const deleteBlocked = (action: DeleteAction): boolean =>
+          blockedDeletes.has(action) || missionBlockedDeletes.has(action);
         let copyIndex = 0;
         for (const decision of commitAll) {
           for (const action of decision.copies) {
-            if (blockedCopies.has(action) || missionBlockedCopies.has(action)) continue;
+            // The transformed file's own diagnostics are published when its
+            // staging write is processed; a blocked copy still reports them
+            // because its content stays on disk and its warnings still count.
+            for (const diagnostic of action.source.diagnostics ?? []) {
+              reporter.report(action.source.absolutePath, diagnostic);
+            }
+            if (copyBlocked(action)) {
+              // A preflight-blocked transfer is still a planned file: it is
+              // reported immediately and located instead of being left to the
+              // end-of-run diagnostic pass, so a partly blocked run can never
+              // look like a full sync while it runs.
+              reporter.report(action.destinationPath, {
+                level: "warning",
+                message: `Skipped ${action.destinationSide} file: blocked by a preflight safety check`,
+                line: 1,
+                key: decision.key,
+              });
+              continue;
+            }
             if (action.stagedPath !== undefined) continue;
+            // Staging-start progress is published immediately before the write
+            // begins, so a large or slow staging write is visible while it runs
+            // (v0.4.2).
+            reporter.info(
+              `Staging ${action.destinationSide} file`,
+              action.destinationPath,
+              STAGING_EVENT_KEY,
+            );
             await stageCopy(action, stageRoot, copyIndex++);
+            reporter.info(
+              `Staged ${action.destinationSide} file`,
+              action.destinationPath,
+              decision.key,
+            );
           }
         }
+        // Every planned transfer must have produced its staged bytes before the
+        // first destination write. A planned copy that no staging write covers
+        // would be committed as nothing while the run still reported success,
+        // so it stops the run here — with the temp directory cleaned up and no
+        // file or state byte written.
+        for (const action of plannedCopies) {
+          if (copyBlocked(action) || action.stagedPath !== undefined) continue;
+          const key = copyKeyByAction.get(action) ?? FILE_LEVEL_DIAGNOSTIC_KEY;
+          reporter.report(action.destinationPath, {
+            level: "error",
+            message: "Planned file was not staged and would be skipped by this sync",
+            line: 1,
+            key,
+          });
+          throw new SyncFailure(
+            `Planned file was not staged: ${action.destinationPath} (${key})`,
+            warnings,
+          );
+        }
         const stagedStatePath = join(stageRoot, "state.json");
+        reporter.info("Staging state file", stagedStatePath, STAGING_EVENT_KEY);
         await writeFile(stagedStatePath, serializeState(nextState), {
           encoding: "utf8",
           mode: 0o600,
         });
+        reporter.info("Staged state file", stagedStatePath, STATE_FILE_NAME);
+        // Directory creation runs before the file commits so a created empty
+        // directory is present even when no file copy would create it. Each
+        // mutation is a real filesystem change: count it and publish it.
+        for (const action of directoryActions) {
+          if (action.kind !== "create") continue;
+          if (await executeDirectoryCreate(action)) {
+            copied += 1;
+            reporter.info(`Created ${action.side} directory`, action.path, action.key);
+          } else {
+            warnings.push(`Failed to create directory: ${action.path}`);
+          }
+        }
         for (const decision of commitAll) {
           for (const action of decision.copies) {
-            if (blockedCopies.has(action) || missionBlockedCopies.has(action)) continue;
+            if (copyBlocked(action)) continue;
             if (action.stagedPath === undefined) continue;
             await commitCopy(action);
             copied += 1;
+            executedCopies.add(action);
+            const destination = action.resolvedPath ?? action.destinationPath;
+            reporter.info(`Copied ${action.destinationSide} file`, destination, decision.key);
           }
           for (const action of decision.deletes) {
-            if (blockedDeletes.has(action) || missionBlockedDeletes.has(action)) continue;
+            if (deleteBlocked(action)) {
+              // A blocked deletion is planned work the run does not perform:
+              // report it immediately and located like a blocked copy instead
+              // of leaving the on-disk content unexplained.
+              reporter.report(action.resolvedPath ?? action.path, {
+                level: "warning",
+                message: `Skipped ${action.side} deletion: blocked by a preflight safety check`,
+                line: 1,
+                key: decision.key,
+              });
+              continue;
+            }
+            const path = action.resolvedPath ?? action.path;
             await commitDelete(action);
             deleted += 1;
+            executedDeletes.add(action);
+            // Deletions are real file operations and are reported like copies:
+            // a run that mostly deleted content must never look like a run that
+            // copied a few files and then stopped silently.
+            reporter.info(`Deleted ${action.side} file`, path, decision.key);
+          }
+        }
+        // Every planned action is now either executed or explicitly blocked. A
+        // planned action in neither state would leave the destination tree in
+        // an unexplained partial state, so it stops the run with a located
+        // error instead of being summarized as a completed sync.
+        const unprocessedCopies = [...plannedCopies].filter(
+          (action) => !copyBlocked(action) && !executedCopies.has(action),
+        );
+        const unprocessedDeletes = [...plannedDeletes].filter(
+          (action) => !deleteBlocked(action) && !executedDeletes.has(action),
+        );
+        const unprocessedCopy = unprocessedCopies[0];
+        const unprocessedDelete = unprocessedDeletes[0];
+        if (unprocessedCopy !== undefined || unprocessedDelete !== undefined) {
+          const file =
+            unprocessedCopy?.destinationPath ??
+            unprocessedDelete?.resolvedPath ??
+            unprocessedDelete?.path ??
+            FILE_LEVEL_DIAGNOSTIC_KEY;
+          let key = FILE_LEVEL_DIAGNOSTIC_KEY;
+          if (unprocessedCopy !== undefined) {
+            key = copyKeyByAction.get(unprocessedCopy) ?? FILE_LEVEL_DIAGNOSTIC_KEY;
+          } else if (unprocessedDelete !== undefined) {
+            key = deleteKeyByAction.get(unprocessedDelete) ?? FILE_LEVEL_DIAGNOSTIC_KEY;
+          }
+          reporter.report(file, {
+            level: "error",
+            message: "Planned file was neither processed nor blocked; the sync is incomplete",
+            line: 1,
+            key,
+          });
+          throw new SyncFailure(
+            `Planned file was neither processed nor blocked: ${file} (${key})`,
+            warnings,
+          );
+        }
+        // Directory deletion runs after the file commits so a directory the
+        // run emptied is removed too, and before the state write so the
+        // committed baseline describes the directories that actually remain.
+        for (const action of directoryActions) {
+          if (action.kind !== "delete") continue;
+          if (await executeDirectoryDelete(action)) {
+            deleted += 1;
+            reporter.info(`Deleted ${action.side} directory`, action.path, action.key);
+          } else {
+            warnings.push(`Skipped non-empty directory deletion: ${action.path}`);
           }
         }
         if (!preserveOldStateManifest) {
           await rm(statePath, { force: true });
           await moveStagedFile(stagedStatePath, statePath);
+          reporter.info("Copied state file", statePath, STATE_FILE_NAME);
+        }
+        // Diagnostics that belong to no staged file (unknown entries, ignored
+        // symlinks, root-availability notices, deleted or unchanged files) are
+        // published here, still during the run and before the summary is
+        // returned, so no diagnostic is ever summary-only (v0.4.2).
+        for (const message of warnings) {
+          reporter.reportMessage(
+            message.startsWith(FORBIDDEN_TARGET_SYMLINK_PREFIX) ? "error" : "warning",
+            message,
+          );
         }
 
         const cleanupNeeded =
@@ -3720,14 +4095,15 @@ async function syncSessionsInternal(
           // Empty-directory cleanup is per tree: a missions-only cleanup (or a
           // partial one) must never touch the sessions tree, and a frozen
           // sessions tree (missing/unreadable local root) produces no sessions
-          // decisions and no sessions cleanup at all. The missions tree keeps
-          // cleaning up regardless of the sessions tree's state.
+          // decisions and no sessions cleanup at
+          // all. The missions tree keeps cleaning up regardless of the sessions
+          // tree's state.
           const directoriesToClean = new Set<string>();
-          if (!sessionsRootUnavailable) {
+          if (!sessionsTreeFrozen) {
             for (const directory of localScan.knownDirectories) directoriesToClean.add(directory);
             for (const directory of targetScan.knownDirectories) directoriesToClean.add(directory);
           }
-          for (const decision of sessionsRootUnavailable ? [] : decisions) {
+          for (const decision of sessionsTreeFrozen ? [] : decisions) {
             for (const action of decision.deletes) {
               if (blockedDeletes.has(action)) continue;
               addCleanupPath(
@@ -3794,6 +4170,20 @@ async function syncSessionsInternal(
                   "flat",
                   directoriesToClean,
                 );
+              }
+            }
+          }
+          // Directories managed by empty-directory sync are content, not
+          // cleanup fuel: a synced empty directory must survive an unrelated
+          // deletion in the same tree. Drop them from the cleanup set so
+          // `removeEmptyDirectories` never removes them.
+          if (managedDirectoryPaths.size > 0) {
+            const managedIdentities = new Set(
+              [...managedDirectoryPaths].map((path) => nativePathIdentity(path)),
+            );
+            for (const directory of [...directoriesToClean]) {
+              if (managedIdentities.has(nativePathIdentity(directory))) {
+                directoriesToClean.delete(directory);
               }
             }
           }
@@ -3896,6 +4286,18 @@ async function syncSessionsInternal(
         ...(error instanceof ScanFailure ? error.warnings : []),
       ]),
     ];
+    for (const warning of warnings) reporter.reportMessage("warning", warning);
+    if (error instanceof TransformFileError) {
+      reporter.report(error.file, {
+        level: "error",
+        message: error.detail,
+        line: error.line,
+        key: error.key,
+        ...(error.value === undefined ? {} : { value: error.value }),
+      });
+    } else {
+      reporter.reportMessage("error", errorMessage(error));
+    }
     throw new SyncFailure(errorMessage(error), warnings);
   }
 }

@@ -5,7 +5,12 @@ import { isAbsolute, posix, resolve, win32 } from "node:path";
 
 export const HOME_LABEL = "HOME";
 export const ROOT_LABEL = "ROOT";
-export const RESERVED_STATE_FILE_NAME = ".pi-session-sync-state.json";
+/**
+ * Extension-managed state manifest name. It is non-hidden so it is easy to
+ * find next to the managed trees, but it is never synchronized as ordinary
+ * sessions/missions content.
+ */
+export const RESERVED_STATE_FILE_NAME = "pi-session-sync-state.json";
 
 export interface PortableNameOptions {
   homeLabel: string;

@@ -18,6 +18,7 @@ import {
 } from "yaml";
 import type { SessionLayout } from "./config.ts";
 import {
+  decodePortableSessionDirName,
   normalizePortableNameOptions,
   type PortableNameOptions,
   strictPortableNameIdentity,
@@ -30,6 +31,7 @@ import {
   syncUriToCwd,
   syncUriToPortableName,
 } from "./session-paths.ts";
+import { FILE_LEVEL_DIAGNOSTIC_KEY, type TransformDiagnostic } from "./sync-events.ts";
 import {
   canonicalRootUri,
   type InspectedSyncUri,
@@ -38,6 +40,9 @@ import {
   rootUriToLocalPath,
   SESSIONS_FILE_URI_PREFIX,
 } from "./sync-paths.ts";
+
+export type { SyncEvent, SyncEventSink, TransformDiagnostic } from "./sync-events.ts";
+export { FILE_LEVEL_DIAGNOSTIC_KEY };
 
 export type TransformMode =
   | "to-target"
@@ -132,6 +137,12 @@ export interface TransformedFile {
    */
   warnings?: string[];
   /**
+   * Located diagnostics mirroring `warnings` (v0.4.2): one entry per warning
+   * with the file, 1-based line, field key, and bounded value. Emitted in
+   * realtime while the file is staged into its destination tree.
+   */
+  diagnostics?: TransformDiagnostic[];
+  /**
    * Set by the bounded-memory streamed JSONL path (any JSONL above
    * `LARGE_JSONL_STREAM_THRESHOLD_BYTES`, or with an unknown size):
    * `outputText` and `canonicalText` stay empty and the transformed bytes are
@@ -192,10 +203,15 @@ function createTransformedFile(
   sessionHeaderValid = false,
   warnings: string[] = [],
   sessionHeaderCwdDecodable: boolean | undefined = undefined,
+  diagnostics: TransformDiagnostic[] = [],
 ): TransformedFile {
   const result: TransformedFile = { outputText, canonicalText, cwdValues };
   Object.defineProperty(result, "warnings", {
     value: warnings,
+    enumerable: false,
+  });
+  Object.defineProperty(result, "diagnostics", {
+    value: diagnostics,
     enumerable: false,
   });
   Object.defineProperty(result, "cwdPortableNames", {
@@ -261,40 +277,26 @@ function isSessionsFileUri(value: string): boolean {
 }
 
 /**
- * The fixed set of structured fields whose string values are synchronized
- * session/mission paths. Pi's session format documents `cwd` (session header)
- * and optional `parentSession`, `fullOutputPath` on bash execution messages,
- * and `readFiles`/`modifiedFiles` under compaction/branch `details`; the
- * missions contract adds the remaining project path fields.
+ * v0.4.2: path discovery is field-agnostic. `cwd` and `parentSession` keep
+ * their dedicated semantics (including `parentSession`'s session-file
+ * contract); every other field — at any nesting depth, in JSON, JSONL, and
+ * Markdown YAML frontmatter — is inspected recursively for portable path
+ * candidates. There is deliberately no allowlist of field names:
+ * `artifactPaths`, `sessionPath`, `ownerSessionId`, `projectRoot`, `path`, and
+ * any unknown field are ordinary candidates exactly like `fullOutputPath`.
  *
- * Only these fields (including nested structures and array elements) are
- * rewritten. Message text, thinking, tool call arguments, tool output, custom
- * `details`, Markdown bodies, and every unknown field are arbitrary free-form
- * content: a string there stays byte-identical and silent even when it looks
- * like an absolute path or starts with the sync scheme.
+ * Ordinary content is excluded by VALUE SHAPE, never by field name: a
+ * candidate must be the whole string value, must contain no whitespace or
+ * control character, and must be either a native absolute path (local source)
+ * or a `pi-session-sync://` URI (target source). Tool output, thinking,
+ * tool-call arguments, message text, and JSON text stored inside a string
+ * therefore never qualify as paths.
  */
-const SYNCED_PATH_FIELDS: ReadonlySet<string> = new Set([
-  "cwd",
-  "parentSession",
-  "fullOutputPath",
-  "missionPath",
-  "ownerSessionId",
-  "recordPath",
-  "sessionPath",
-  "artifactPaths",
-  "readFiles",
-  "modifiedFiles",
-]);
-
-function isSyncedPathField(key: string | undefined): key is string {
-  return key !== undefined && SYNCED_PATH_FIELDS.has(key);
-}
 
 /**
- * Maximum number of value characters echoed in a warning. Structurally invalid
- * `pi-session-sync:` values are preserved in the file byte-for-byte, but the
- * warning must not let arbitrarily long or hostile content flood logs, so only
- * a bounded prefix is quoted.
+ * Maximum number of value characters echoed in a diagnostic. Preserved values
+ * stay byte-identical in the file, but a diagnostic must never let arbitrarily
+ * long or hostile content flood the log, so only a bounded prefix is quoted.
  */
 const WARNING_VALUE_LIMIT = 120;
 
@@ -302,39 +304,104 @@ function boundedValuePreview(value: string): string {
   return value.length <= WARNING_VALUE_LIMIT ? value : `${value.slice(0, WARNING_VALUE_LIMIT)}…`;
 }
 
-/**
- * Shared lead for the bounded malformed-value warning. Callers that add file
- * context to transform warnings keep this notice self-contained: it already
- * carries the bounded offending value and must stay a bounded message instead
- * of accumulating an arbitrarily long absolute path (v0.4.1 requires a
- * preserved-value warning to report a bounded field value or file context,
- * never unbounded output).
- */
-export const MALFORMED_SYNC_URI_WARNING_PREFIX =
-  "Malformed pi-session-sync value preserved verbatim:";
-
-/**
- * Preserve one structurally invalid or unsupported `pi-session-sync:` value
- * verbatim and report it with the single bounded warning used in both sync
- * directions. Any string beginning with the sync scheme that is not a
- * rewritable URI is a preserved value, never a sync-fatal file error
- * (v0.4.2); genuine syntax/type errors still stop the sync.
- */
-function warnPreservedMalformedSyncUri(value: string, warnings: string[]): void {
-  warnings.push(`${MALFORMED_SYNC_URI_WARNING_PREFIX} ${boundedValuePreview(value)}`);
+/** Render one located diagnostic as a single bounded line. */
+export function formatTransformDiagnostic(
+  file: string,
+  line: number,
+  key: string,
+  message: string,
+  value: string | undefined,
+): string {
+  const fieldKey = key.length === 0 ? FILE_LEVEL_DIAGNOSTIC_KEY : key;
+  const suffix = value === undefined ? "" : ` value=${boundedValuePreview(value)}`;
+  return `${file}:${line}: ${fieldKey}: ${message}${suffix}`;
 }
 
 /**
- * Prefix one transform warning with the file path that produced it. The
- * malformed `pi-session-sync:` value notice is left unprefixed so it stays the
- * self-contained bounded message described on
- * `MALFORMED_SYNC_URI_WARNING_PREFIX`; every other transform warning keeps its
- * file context.
+ * A transform failure that carries the diagnostic location the v0.4.2
+ * realtime report requires (file, 1-based line, field key, bounded value).
+ * Callers RETHROW it instead of re-prefixing it like a structural error, so no
+ * location is lost or duplicated.
+ */
+export class TransformFileError extends Error {
+  readonly file: string;
+  readonly line: number;
+  readonly key: string;
+  readonly detail: string;
+  readonly value: string | undefined;
+
+  constructor(
+    file: string,
+    line: number,
+    key: string,
+    detail: string,
+    value: string | undefined = undefined,
+  ) {
+    super(formatTransformDiagnostic(file, line, key, detail, value));
+    this.name = "TransformFileError";
+    this.file = file;
+    this.line = line;
+    this.key = key;
+    this.detail = detail;
+    this.value = value;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Wrap a failure raised while transforming one file into a located
+ * `TransformFileError`: a structural error (JSON/YAML parse failure, wrong
+ * field type, empty document) is located at the file and line being processed
+ * with the file-level key, while an already-located transform error keeps its
+ * own field key, line, and value.
+ */
+export function fileScopedTransformError(
+  filePath: string,
+  line: number,
+  key: string,
+  error: unknown,
+): TransformFileError {
+  if (error instanceof TransformFileError) {
+    return new TransformFileError(
+      error.file.length === 0 ? filePath : error.file,
+      error.line > 0 ? error.line : line,
+      error.key.length === 0 ? key : error.key,
+      error.detail,
+      error.value,
+    );
+  }
+  return new TransformFileError(filePath, line, key, errorMessage(error));
+}
+
+/**
+ * Prefix one transform warning with the file path that produced it, keeping the
+ * aggregated `SyncSummary.warnings` context the scanner has always reported.
+ * The bounded malformed-candidate notice stays unprefixed so it remains the
+ * self-contained message described on `MALFORMED_SYNC_URI_WARNING_PREFIX`.
  */
 export function fileScopedTransformWarning(logicalPath: string, warning: string): string {
   return warning.startsWith(MALFORMED_SYNC_URI_WARNING_PREFIX)
     ? warning
     : `${logicalPath}: ${warning}`;
+}
+
+/**
+ * Located diagnostics for one transformed file, carrying the same file prefix
+ * the aggregated `SyncSummary.warnings` entries use. The orchestrator emits
+ * these as realtime events while it stages the file (v0.4.2).
+ */
+export function fileScopedDiagnostics(
+  logicalPath: string,
+  diagnostics: readonly TransformDiagnostic[] | undefined,
+): TransformDiagnostic[] {
+  if (diagnostics === undefined) return [];
+  return diagnostics.map((diagnostic) => ({
+    ...diagnostic,
+    message: fileScopedTransformWarning(logicalPath, diagnostic.message),
+  }));
 }
 
 interface VisitContext {
@@ -365,6 +432,87 @@ interface VisitContext {
    * target-source mode; canonical hash passes reuse a throwaway array.
    */
   warnings: string[];
+  /**
+   * Located diagnostics mirroring `warnings` (plus errors) for the v0.4.2
+   * realtime report; a throwaway array in canonical hash passes.
+   */
+  diagnostics: TransformDiagnostic[];
+  /** Physical path of the file being transformed (diagnostic context). */
+  file: string;
+  /** 1-based line of the value being visited (the JSONL record's line). */
+  line: number;
+  /** Dotted/indexed field path of the value being visited. */
+  keyPath: string;
+  /**
+   * Markdown YAML frontmatter source and its 1-based first line, used to
+   * locate a diagnostic at the exact line of the node it belongs to. Unset for
+   * the JSON and JSONL passes.
+   */
+  yamlSource?: { text: string; baseLine: number };
+}
+
+/**
+ * Record one warning: keep the aggregated message the sync summary always
+ * reported, and add the located diagnostic the realtime report requires.
+ */
+function pushWarning(context: VisitContext, message: string, value?: string): void {
+  context.warnings.push(message);
+  context.diagnostics.push({
+    level: "warning",
+    message,
+    line: context.line,
+    key: context.keyPath,
+    ...(value === undefined ? {} : { value }),
+  });
+}
+
+/**
+ * Build the located failure for a target-source value that begins with the
+ * exact `pi-session-sync://` candidate prefix but is not a legally decodable
+ * portable URI under the configured portable prefixes (v0.4.2). The error
+ * carries file, 1-based line, field key, and a bounded value and stops the
+ * whole sync.
+ */
+function illegalTargetPortableValue(context: VisitContext, detail: string, value: string): never {
+  throw new TransformFileError(
+    context.file,
+    context.line,
+    context.keyPath,
+    detail,
+    boundedValuePreview(value),
+  );
+}
+
+/**
+ * The exact sync-URI candidate prefix for target-source content (v0.4.2). Only
+ * a value beginning with this exact spelling is a portable candidate; a
+ * `pi-session-sync:` value without the `//` authority is an ordinary string
+ * that is preserved silently in both directions.
+ */
+function isSyncUriCandidate(value: string): boolean {
+  return /^pi-session-sync:\/\//i.test(value);
+}
+
+/**
+ * True when a string has the shape of a native absolute path value: it is an
+ * absolute path spelling (POSIX `/…`, Windows `X:\…`, or UNC `\\server\…`)
+ * without control characters. A multi-line tool output or message body that
+ * merely begins with `/` is therefore never a candidate, while a real path
+ * containing spaces or other printable characters still is (v0.4.2).
+ */
+function isNativePathCandidate(value: string): boolean {
+  return isAbsolutePath(value) && !/\p{Cc}/u.test(value);
+}
+
+/**
+ * True when a string has the shape of a sync URI candidate: the exact
+ * `pi-session-sync://` prefix and no whitespace or control character. A
+ * canonical sync URI never carries raw whitespace (every segment is
+ * percent-encoded), so tool output, message text, and other free-form content
+ * are never mistaken for a portable URI (v0.4.2).
+ */
+function isSyncUriPathCandidate(value: string): boolean {
+  return isSyncUriCandidate(value) && !/[\s\p{Cc}]/u.test(value);
 }
 
 function tryDecodeCwdValue(
@@ -436,147 +584,125 @@ function tryEncodeLocalRootUri(
  */
 function warnPreservedParentSession(value: string, context: VisitContext): void {
   if (context.mode === "to-target" || context.mode === "inspect-local") {
-    context.warnings.push(`Invalid local parentSession preserved verbatim: ${value}`);
+    pushWarning(
+      context,
+      `Invalid local parentSession preserved verbatim: ${boundedValuePreview(value)}`,
+      value,
+    );
   } else if (context.mode === "to-local" || context.mode === "inspect-target") {
-    context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
+    pushWarning(
+      context,
+      `Invalid target parentSession preserved verbatim: ${boundedValuePreview(value)}`,
+      value,
+    );
   }
 }
 
 /**
- * Rewrite one generic (non-cwd) string value according to the generic path
- * rule. From local source (to-target / inspect-local) a syntactically valid,
- * current-format sync URI is validated and kept; an in-root absolute path that
- * the resolver cannot map, an absolute path outside both synced roots (which
- * the resolver returns unchanged), and a malformed or non-current
- * `pi-session-sync:` value are preserved verbatim with a bounded warning
- * (v0.4.1/v0.4.2 leniency) instead of failing the sync. From target source a
- * malformed sync URI or an unmappable absolute path never fails the sync
- * either: the value is preserved verbatim with a warning so the file can still
- * be copied back. Ordinary relative values always stay byte-identical and
- * silent; a relative `parentSession` is a path candidate whose bytes are
- * preserved with the existing invalid-parentSession warning. A `parentSession`
- * value is sessions-only (never missions); on target source any nonportable
- * absolute/URI spelling is preserved with a warning.
+ * Lead of the bounded warning used when a `cwd` or `parentSession` value
+ * begins with the exact `pi-session-sync://` candidate prefix but is not a
+ * legally decodable portable URI. The scanner leaves this message unprefixed
+ * so it stays the self-contained bounded notice it has always been.
  */
-function rewriteGenericPathValue(value: string, context: VisitContext, key?: string): string {
-  const { mode, resolver, parentSessionReferences, genericPathReferences } = context;
-  const isParentSession = key === "parentSession";
-  // The name of the field that carries the reference: `parentSession` enters
-  // the parent-reference evidence stream; any other field enters generic path
-  // reference tracking only (never parent mapping/replay/validation evidence).
-  const targetReferences = isParentSession ? parentSessionReferences : genericPathReferences;
+export const MALFORMED_SYNC_URI_WARNING_PREFIX =
+  "Malformed pi-session-sync value preserved verbatim:";
+
+/**
+ * Preserve one malformed candidate-shaped `pi-session-sync://` value in the
+ * `cwd` or `parentSession` field verbatim and report the single bounded warning
+ * those two fields have always used. A `pi-session-sync:` value without the
+ * `//` authority is not a portable candidate at all (v0.4.2) and stays silent,
+ * so callers check the candidate prefix and value shape first.
+ */
+function warnPreservedMalformedCandidateUri(value: string, context: VisitContext): void {
+  pushWarning(context, `${MALFORMED_SYNC_URI_WARNING_PREFIX} ${boundedValuePreview(value)}`, value);
+}
+
+/**
+ * Rewrite one `parentSession` value. `parentSession` keeps its dedicated
+ * semantics (v0.4.2): it must reference a session FILE, so a sessions
+ * directory URI, a missions URI, or a value the resolver cannot map is
+ * preserved verbatim with the existing bounded warning instead of being
+ * written as a broken parent reference. A `pi-session-sync:` value without the
+ * `//` authority is not a portable candidate at all and is preserved silently.
+ */
+function rewriteParentSessionValue(value: string, context: VisitContext): string {
+  const { mode, resolver, parentSessionReferences } = context;
+  if (isSyncUri(value) && !isSyncUriPathCandidate(value)) {
+    // `pi-session-sync:` without the `//` authority, or a candidate-shaped
+    // spelling carrying whitespace, is not a portable candidate at all: it is
+    // preserved byte-for-byte and silently (v0.4.2).
+    return value;
+  }
   if (isSyncUri(value)) {
     let inspected: InspectedSyncUri;
     try {
       inspected = inspectSyncUri(value, context.namingConfig);
     } catch {
-      // v0.4.2: a malformed or structurally unsupported `pi-session-sync:`
-      // value is never a sync-fatal file error. Preserve the exact original
-      // bytes and report one bounded warning in both directions.
-      warnPreservedMalformedSyncUri(value, context.warnings);
+      warnPreservedMalformedCandidateUri(value, context);
       return value;
     }
     // A rootless `pi-session-sync://<portableName>` cwd URI is legal only in
-    // the `cwd` field: a generic (non-cwd) path value must carry a
-    // sessions/missions namespace. A semantically mismatched but well-formed
-    // sync-URI spelling is preserved verbatim with a bounded warning
-    // (v0.4.1) instead of failing the whole sync.
-    if (inspected.namespace === "cwd") {
-      warnPreservedMalformedSyncUri(value, context.warnings);
+    // the `cwd` field: a parentSession value must carry a sessions/missions
+    // namespace. A `pi-session-sync://sessions/<portableName>` URI names a
+    // session DIRECTORY, never a session file, and a missions URI is never a
+    // parent session reference. Either semantic mismatch is preserved verbatim
+    // with the existing bounded warning (v0.4.1) in every direction.
+    if (
+      inspected.namespace !== "sessions" ||
+      inspected.relativeEncoded === "" ||
+      inspected.nameClass !== "current"
+    ) {
+      warnPreservedMalformedCandidateUri(value, context);
       return value;
     }
-    // A `pi-session-sync://sessions/<portableName>` URI names a session
-    // DIRECTORY, never a session file, and a missions URI is never a parent
-    // session reference. Either semantic mismatch is preserved verbatim with
-    // a bounded warning in every direction (v0.4.1).
-    if (isParentSession) {
-      if (inspected.namespace === "missions") {
-        warnPreservedMalformedSyncUri(value, context.warnings);
-        return value;
-      }
-      if (inspected.relativeEncoded === "") {
-        warnPreservedMalformedSyncUri(value, context.warnings);
-        return value;
-      }
-    }
-    const sessionsNamespace = inspected.namespace === "sessions";
     if (mode === "inspect-local" || mode === "to-target") {
       // Local source: a syntactically valid, current-format URI is validated
       // and kept. A well-formed URI whose portable name cannot decode under
       // this configuration is not an error: it is preserved verbatim with a
       // warning (v0.4.1), so a value written by a target-side pass survives a
-      // local→target round trip. A legacy loose spelling is likewise
-      // preserved verbatim with a bounded warning (v0.4.2) instead of failing
-      // the whole sync.
-      if (sessionsNamespace && inspected.nameClass === "undecodable") {
-        context.warnings.push(
-          isParentSession
-            ? `Invalid local parentSession preserved verbatim: ${boundedValuePreview(value)}`
-            : `Invalid local path preserved verbatim: ${boundedValuePreview(value)}`,
-        );
-        return value;
-      }
+      // local→target round trip.
       try {
         resolver.canonicalSync(value);
       } catch {
-        // A legacy/non-current portable-name spelling is unsupported
-        // current-format URI content: preserve verbatim with a bounded warning
-        // (v0.4.2) instead of failing the whole sync.
-        warnPreservedMalformedSyncUri(value, context.warnings);
+        warnPreservedMalformedCandidateUri(value, context);
         return value;
       }
-      if (sessionsNamespace) targetReferences.push({ value, rewritten: value });
+      parentSessionReferences.push({ value, rewritten: value });
       return value;
     }
     // Target source: syntactically valid current-format URIs are rewritten;
     // anything the reader cannot decode under the current configuration is
     // preserved verbatim with a warning instead of failing the sync.
-    if (sessionsNamespace && inspected.nameClass !== "current") {
-      context.warnings.push(
-        `Invalid pi-session-sync URI preserved verbatim in target content: ${boundedValuePreview(value)}`,
-      );
-      return value;
-    }
     try {
       const rewritten = resolver.canonicalSync(value);
       if (mode === "to-local") {
         const local = resolver.syncToLocal(value);
-        if (sessionsNamespace) targetReferences.push({ value, rewritten: local });
+        parentSessionReferences.push({ value, rewritten: local });
         return local;
       }
-      if (sessionsNamespace) targetReferences.push({ value, rewritten });
+      parentSessionReferences.push({ value, rewritten });
       return rewritten;
     } catch {
-      if (!sessionsNamespace) {
-        // `inspectSyncUri` already accepted this missions URI, so it is
-        // syntactically valid current-format content; the failure is a
-        // decode/mapping failure (for example a missions URI without a
-        // configured missions root), not a malformed value. Preserve it
-        // verbatim with the existing invalid-target-URI warning instead of
-        // the malformed-value warning that is reserved for URIs the inspector
-        // itself rejects.
-        context.warnings.push(
-          `Invalid pi-session-sync URI preserved verbatim in target content: ${boundedValuePreview(value)}`,
-        );
-        return value;
-      }
-      warnPreservedMalformedSyncUri(value, context.warnings);
+      pushWarning(
+        context,
+        `Invalid pi-session-sync URI preserved verbatim in target content: ${boundedValuePreview(value)}`,
+        value,
+      );
       return value;
     }
   }
   if (!isAbsolutePath(value)) {
     // A literal relative `parentSession` is still a path candidate: it cannot
     // be encoded as a portable path, so its bytes are preserved with the
-    // existing invalid-parentSession warning (v0.4.1 leniency). Every other
-    // relative generic value is an ordinary identifier/relative path and stays
-    // silent.
-    if (isParentSession) warnPreservedParentSession(value, context);
+    // existing invalid-parentSession warning (v0.4.1 leniency).
+    warnPreservedParentSession(value, context);
     return value;
   }
   if (mode === "inspect-local" || mode === "inspect-target") {
-    // Inspect passes keep bytes but report in-root absolute references as
-    // mapping evidence for the scanner's directory inference.
-    targetReferences.push({ value, rewritten: value });
+    // Inspect passes keep bytes but report absolute references as mapping
+    // evidence for the scanner's directory inference.
+    parentSessionReferences.push({ value, rewritten: value });
     return value;
   }
   if (mode === "to-local") {
@@ -590,77 +716,268 @@ function rewriteGenericPathValue(value: string, context: VisitContext, key?: str
       const mappedValue = resolver.localToSync(value);
       if (mappedValue !== value) {
         if (isSessionsFileUri(mappedValue)) {
-          targetReferences.push({ value, rewritten: value, mappedUri: mappedValue });
-        } else if (isParentSession) {
+          parentSessionReferences.push({ value, rewritten: value, mappedUri: mappedValue });
+        } else {
           // A missions-root absolute path in parentSession is not a session
           // reference; target-source leniency preserves it with a warning.
-          context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
+          pushWarning(
+            context,
+            `Invalid target parentSession preserved verbatim: ${boundedValuePreview(value)}`,
+            value,
+          );
           return value;
         }
-        context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
-      } else if (!isSyncUri(value) && isAbsolutePath(value)) {
-        context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+        pushWarning(
+          context,
+          `Invalid target path preserved verbatim: ${boundedValuePreview(value)}`,
+          value,
+        );
+      } else {
+        pushWarning(
+          context,
+          `Invalid target path preserved verbatim: ${boundedValuePreview(value)}`,
+          value,
+        );
       }
     } catch {
-      context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
+      pushWarning(
+        context,
+        `Invalid target path preserved verbatim: ${boundedValuePreview(value)}`,
+        value,
+      );
     }
     return value;
   }
   if (mode === "canonical-target") {
-    if (isParentSession) {
-      // Markdown parentSession output bytes are preserved, so canonical
-      // hashing must normalize the legal local-absolute and sync-URI spellings
-      // to one portable representation. Unmappable values hash raw.
-      try {
-        const mappedUri = resolver.localToSync(value);
-        if (mappedUri === value) return value;
-        const rewritten = resolver.canonicalSync(mappedUri);
-        if (isSessionsFileUri(mappedUri)) {
-          targetReferences.push({ value, rewritten, mappedUri });
-        }
-        return rewritten;
-      } catch {
-        return value;
+    // Markdown parentSession output bytes are preserved, so canonical hashing
+    // must normalize the legal local-absolute and sync-URI spellings to one
+    // portable representation. Unmappable values hash raw.
+    try {
+      const mappedUri = resolver.localToSync(value);
+      if (mappedUri === value) return value;
+      const rewritten = resolver.canonicalSync(mappedUri);
+      if (isSessionsFileUri(mappedUri)) {
+        parentSessionReferences.push({ value, rewritten, mappedUri });
       }
+      return rewritten;
+    } catch {
+      return value;
     }
-    // Non-parentSession absolute paths in canonical hashing keep their raw
-    // spelling: an in-root absolute value in target content is a machine-local
-    // nonportable representation and must hash exactly as written.
-    return value;
   }
   // Local source (v0.4.1 leniency): a value that cannot be encoded as a
-  // portable path is preserved verbatim with a warning instead of stopping
-  // the whole sync. In-root absolute paths without a live mapping is the only
-  // generic case the resolver cannot encode; an out-of-root absolute value is
-  // not an error and stays byte-identical (stage-2 rule), so it keeps its
-  // silent treatment.
+  // portable session file path is preserved verbatim with a warning instead of
+  // stopping the whole sync.
   const encoded = tryEncodeLocalRootUri(resolver, value);
-  // The resolver returns an out-of-root absolute value unchanged: such a value
-  // is not a portable path, so it is preserved with the same warning instead
-  // of being treated as a successful rewrite.
-  if (!encoded.mapped || encoded.rewritten === value) {
-    context.warnings.push(
-      isParentSession
-        ? `Invalid local parentSession preserved verbatim: ${value}`
-        : `Invalid local path preserved verbatim: ${value}`,
+  if (!encoded.mapped || encoded.rewritten === value || !isSessionsFileUri(encoded.rewritten)) {
+    pushWarning(
+      context,
+      `Invalid local parentSession preserved verbatim: ${boundedValuePreview(value)}`,
+      value,
     );
     return value;
   }
-  if (isParentSession) {
-    // A parentSession value must reference a session file: a mapped value
-    // outside the sessions namespace (missions) is not a session reference,
-    // so it is preserved verbatim with a warning rather than rewritten.
-    if (!isSessionsFileUri(encoded.rewritten)) {
-      context.warnings.push(`Invalid local parentSession preserved verbatim: ${value}`);
+  parentSessionReferences.push({
+    value,
+    rewritten: encoded.rewritten,
+    mappedUri: encoded.rewritten,
+  });
+  return encoded.rewritten;
+}
+
+/**
+ * Rewrite one recursively discovered string value in any field other than
+ * `cwd` and `parentSession` (v0.4.2).
+ *
+ * local → target: a value that does not look like a native path is preserved
+ * silently; a path-looking value inside a synced file tree is encoded as a
+ * namespaced sessions/missions file URI, and one that is outside both trees
+ * but under a configured portable prefix (HOME, ROOT, or an extra prefix) is
+ * encoded as a rootless portable-name URI. Anything else — a foreign
+ * Windows-shaped spelling on POSIX, an unmappable in-root path, and every
+ * malformed or stale sync URI in local content — is preserved silently and
+ * never produces a diagnostic.
+ *
+ * target → local: only an exact `pi-session-sync://` value that also has
+ * candidate shape is a portable candidate; every other value — including a
+ * `pi-session-sync:` value without the `//` authority and any string carrying
+ * whitespace or control characters — is byte-preserved and silent. A candidate
+ * that is not a syntactically valid, current-format, decodable URI under the
+ * configured portable prefixes is a located file error that stops the sync, so
+ * target content can never silently write an undecodable path into a local
+ * file.
+ *
+ * Both directions carry three portable spellings: the namespaced sessions and
+ * missions file URIs of the synced file trees, and the rootless
+ * `pi-session-sync://<portableName>` URI of an absolute path that lies outside
+ * both trees but under a configured portable prefix (HOME, ROOT, or an extra
+ * prefix). The rootless form is the generic-field counterpart of the `cwd`
+ * spelling and decodes back to the same local path.
+ */
+function rewriteRecursivePathValue(value: string, context: VisitContext): string {
+  const { mode, resolver, genericPathReferences, namingConfig, namingOptions } = context;
+  if (mode === "canonical-target") {
+    // Canonical hashing never fails: a value that cannot be normalized hashes
+    // exactly as the output pass left it. A rootless portable-name URI names a
+    // local path exactly like a namespaced file URI, so it is canonicalized
+    // the same way instead of being hashed raw.
+    if (!isSyncUriCandidate(value)) return value;
+    try {
+      return resolver.canonicalSync(value);
+    } catch {
       return value;
     }
-    targetReferences.push({ value, rewritten: encoded.rewritten, mappedUri: encoded.rewritten });
-    return encoded.rewritten;
   }
-  if (isSessionsFileUri(encoded.rewritten)) {
-    targetReferences.push({ value, rewritten: encoded.rewritten, mappedUri: encoded.rewritten });
+  if (mode === "to-target" || mode === "inspect-local") {
+    if (isSyncUri(value)) {
+      // Local content that already carries a portable spelling is never
+      // re-encoded. A syntactically valid sessions URI stays visible as
+      // generic mapping evidence for the scanner's directory inference; every
+      // other spelling is ordinary text here and stays silent.
+      if (!isSyncUriPathCandidate(value)) return value;
+      try {
+        if (inspectSyncUri(value, namingConfig).namespace === "sessions") {
+          genericPathReferences.push({ value, rewritten: value });
+        }
+      } catch {
+        // Malformed local content is never a sync-fatal error (v0.4.2).
+      }
+      return value;
+    }
+    if (!isNativePathCandidate(value)) return value;
+    if (mode === "inspect-local") {
+      // Evidence-only pass: bytes never change; the absolute value is reported
+      // as mapping evidence for the scanner's directory inference.
+      genericPathReferences.push({ value, rewritten: value });
+      return value;
+    }
+    let rewritten: string;
+    try {
+      rewritten = resolver.localToSync(value);
+    } catch {
+      // An in-root path without a live mapping is preserved silently.
+      return value;
+    }
+    if (rewritten !== value) {
+      if (isSessionsFileUri(rewritten)) {
+        genericPathReferences.push({ value, rewritten, mappedUri: rewritten });
+      }
+      return rewritten;
+    }
+    // The value lies outside both synced file trees. When a configured
+    // portable prefix (HOME, ROOT, or an extra prefix) can encode it, the
+    // generic field carries the rootless portable-name URI, exactly like an
+    // out-of-tree `cwd` (v0.4.2). A value no configured prefix can encode (for
+    // example a foreign Windows-shaped spelling on POSIX) is preserved
+    // verbatim and silently.
+    try {
+      const rootless = cwdToSyncUri(value, namingOptions);
+      const name = rootless.slice(SYNC_URI_PREFIX.length);
+      // Write the canonical portable-name identity, exactly like the canonical
+      // hash pass does: on native Windows the remainder case is folded so the
+      // spelling this machine writes is also the one its own target→local pass
+      // accepts as current-format.
+      const identity = strictPortableNameIdentity(name, namingOptions) ?? name;
+      // Only a spelling this configuration decodes again is written. The
+      // filesystem root (`/`, or a Windows drive root) encodes to the bare
+      // ROOT label, which names no absolute path and would make the next
+      // target→local pass refuse the file, so that value stays verbatim.
+      if (decodePortableSessionDirName(identity, namingOptions) === null) return value;
+      return `${SYNC_URI_PREFIX}${identity}`;
+    } catch {
+      return value;
+    }
   }
-  return encoded.rewritten;
+  // Target source (to-local / inspect-target).
+  if (!isSyncUri(value)) {
+    if (!isNativePathCandidate(value)) return value;
+    if (mode === "inspect-target") {
+      // Evidence-only pass: bytes never change; the absolute value is reported
+      // as mapping evidence for the scanner's directory inference.
+      genericPathReferences.push({ value, rewritten: value });
+      return value;
+    }
+    // A machine-local absolute spelling is not portable: the bytes are
+    // preserved silently, while an in-prefix one is still recorded as mapping
+    // evidence so target directory inference keeps working.
+    try {
+      const mappedUri = resolver.localToSync(value);
+      if (mappedUri !== value && isSessionsFileUri(mappedUri)) {
+        genericPathReferences.push({ value, rewritten: value, mappedUri });
+      }
+    } catch {
+      // An unmappable absolute value on target source is preserved silently.
+    }
+    return value;
+  }
+  if (!isSyncUriCandidate(value)) {
+    // Values without the exact portable URI prefix are ordinary content and
+    // remain silent. Once the exact prefix is present, even malformed or
+    // whitespace-containing values are candidates and must fail rather than
+    // being copied into a local file.
+    return value;
+  }
+  let inspected: InspectedSyncUri;
+  try {
+    inspected = inspectSyncUri(value, namingConfig);
+  } catch (error) {
+    illegalTargetPortableValue(
+      context,
+      `invalid pi-session-sync URI in target content: ${errorMessage(error)}`,
+      value,
+    );
+  }
+  if (inspected.namespace === "cwd") {
+    // A rootless portable-name URI is the generic-field spelling of an
+    // absolute path under a configured portable prefix (v0.4.2): decode it
+    // back to its local path. A name no current configuration owns is an
+    // unsupported candidate and fails with its location instead, exactly like
+    // the sessions namespace.
+    if (inspected.nameClass !== "current") {
+      illegalTargetPortableValue(
+        context,
+        `portable name is not a current-format name of a configured portable prefix (${inspected.nameClass})`,
+        value,
+      );
+    }
+    try {
+      const rewritten = resolver.canonicalSync(value);
+      if (mode === "to-local") return resolver.syncToLocal(value);
+      return rewritten;
+    } catch (error) {
+      illegalTargetPortableValue(
+        context,
+        `pi-session-sync value cannot be decoded on this machine: ${errorMessage(error)}`,
+        value,
+      );
+    }
+  }
+  if (inspected.namespace === "sessions" && inspected.nameClass !== "current") {
+    illegalTargetPortableValue(
+      context,
+      `portable name is not a current-format name of a configured portable prefix (${inspected.nameClass})`,
+      value,
+    );
+  }
+  try {
+    const rewritten = resolver.canonicalSync(value);
+    if (mode === "to-local") {
+      const local = resolver.syncToLocal(value);
+      if (inspected.namespace === "sessions") {
+        genericPathReferences.push({ value, rewritten: local });
+      }
+      return local;
+    }
+    if (inspected.namespace === "sessions") {
+      genericPathReferences.push({ value, rewritten });
+    }
+    return rewritten;
+  } catch (error) {
+    illegalTargetPortableValue(
+      context,
+      `pi-session-sync value cannot be decoded on this machine: ${errorMessage(error)}`,
+      value,
+    );
+  }
 }
 
 function visitValue(value: StructuredValue, context: VisitContext, key?: string): StructuredValue {
@@ -676,53 +993,42 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
   }
   if (typeof value === "string") {
     if (key === "cwd") {
-      // A `pi-session-sync:` value in `cwd` follows the same syntax contract
+      // A `pi-session-sync://` value in `cwd` follows the same syntax contract
       // as every other field, but only the rootless `cwd` form is legal here.
-      // A malformed or semantically mismatched URI is preserved verbatim with
-      // a bounded warning instead of failing the sync.
+      // A malformed or semantically mismatched candidate is preserved verbatim
+      // with a bounded warning instead of failing the sync; a
+      // `pi-session-sync:` value without the `//` authority (or one carrying
+      // whitespace) is ordinary content and stays silent (v0.4.2).
+      if (isSyncUri(value) && !isSyncUriPathCandidate(value)) {
+        return value;
+      }
       if (isSyncUri(value)) {
         let inspected: InspectedSyncUri;
         try {
           inspected = inspectSyncUri(value, context.namingConfig);
         } catch {
-          // v0.4.2: a malformed `pi-session-sync:` cwd value is preserved
-          // verbatim with one bounded warning instead of failing the sync.
-          warnPreservedMalformedSyncUri(value, context.warnings);
+          if (mode === "to-target" || mode === "inspect-local") return value;
+          warnPreservedMalformedCandidateUri(value, context);
           return value;
         }
         if (mode === "to-target" || mode === "inspect-local") {
-          // Only the rootless `pi-session-sync://<portableName>` cwd form is
-          // legal in the `cwd` field. A sessions/missions-namespaced URI names
-          // a file, never a working directory, so the mismatched spelling is
-          // preserved verbatim with a bounded warning (v0.4.1).
-          if (inspected.namespace !== "cwd") {
-            warnPreservedMalformedSyncUri(value, context.warnings);
-            return value;
-          }
-          // Legacy loose portable-name spellings are non-current URI content:
-          // preserve verbatim with a bounded warning (v0.4.2) instead of
-          // rejecting the sync, matching target source.
-          if (inspected.nameClass === "legacy") {
-            warnPreservedMalformedSyncUri(value, context.warnings);
-            return value;
-          }
-          // A rootless cwd URI is a portable path, never an encodable local
-          // cwd path: a current name and a well-formed name this configuration
-          // cannot decode are both preserved verbatim with a warning (v0.4.1
-          // leniency).
-          context.warnings.push(
-            `Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`,
-          );
+          // A local source may already contain a portable-looking value. If it
+          // is not a currently configured cwd spelling, preserve it silently:
+          // local→target only diagnoses structural/type failures, not values
+          // that are outside the configured portable prefixes.
+          if (inspected.namespace !== "cwd" || inspected.nameClass !== "current") return value;
           return value;
         }
         if (mode === "to-local" || mode === "inspect-target") {
           if (inspected.namespace !== "cwd") {
-            warnPreservedMalformedSyncUri(value, context.warnings);
+            warnPreservedMalformedCandidateUri(value, context);
             return value;
           }
           if (inspected.nameClass !== "current") {
-            context.warnings.push(
+            pushWarning(
+              context,
               `Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`,
+              value,
             );
             return value;
           }
@@ -732,12 +1038,7 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
         // A literal relative (or empty) cwd is not interpreted as the current
         // process directory: it is preserved verbatim and silently (v0.4.1).
         if (isRelativeCwdValue(value)) return value;
-        if (!isEncodableLocalPath(value)) {
-          context.warnings.push(
-            `Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`,
-          );
-          return value;
-        }
+        if (!isEncodableLocalPath(value)) return value;
         // Missions rewrite cwd through per-file semantic-label evidence when
         // available (preserves a ROOT label whose decoded path is under the
         // current HOME); sessions keep the single configured portable name.
@@ -760,9 +1061,6 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
           try {
             uri = cwdToSyncUri(value, namingOptions);
           } catch {
-            context.warnings.push(
-              `Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`,
-            );
             return value;
           }
         }
@@ -772,12 +1070,7 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
       }
       if (mode === "inspect-local") {
         if (isRelativeCwdValue(value)) return value;
-        if (!isEncodableLocalPath(value)) {
-          context.warnings.push(
-            `Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`,
-          );
-          return value;
-        }
+        if (!isEncodableLocalPath(value)) return value;
         const cwd = normalizeCwd(value);
         cwdValues.push(cwd);
         return value;
@@ -788,8 +1081,10 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
         if (isRelativeCwdValue(value)) return value;
         const decoded = tryDecodeCwdValue(value, namingOptions);
         if (decoded === undefined) {
-          context.warnings.push(
+          pushWarning(
+            context,
             `Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`,
+            value,
           );
           return value;
         }
@@ -809,23 +1104,27 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
       // identity so equivalent labels hash identically on every platform.
       return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name}`;
     }
-    if (!isSyncedPathField(key)) {
-      // Every other field name is arbitrary session content (message text,
-      // thinking, tool call arguments, tool output, custom details, or an
-      // unknown field). Its strings stay byte-identical and silent even when
-      // they look like absolute paths or carry the sync scheme.
-      return value;
+    if (key === "parentSession") {
+      return rewriteParentSessionValue(value, context);
     }
-    return rewriteGenericPathValue(value, context, key);
+    // Every other field — named or unknown, at any nesting depth — is a
+    // recursive portable-path candidate (v0.4.2).
+    return rewriteRecursivePathValue(value, context);
   }
   if (Array.isArray(value)) {
-    // An array under a synced path field carries that field name down to its
-    // elements (`readFiles: [...]`, `artifactPaths: [...]`); an array under any
-    // other field is arbitrary content whose elements keep their own keys.
-    const elementKey = isSyncedPathField(key) ? key : undefined;
+    // Array elements inherit no field name: `parentSession` and `cwd` reject
+    // non-string values above, and every other element is an ordinary
+    // recursive candidate whose own key is its index.
     let changed = false;
-    const result = value.map((item) => {
-      const next = visitValue(item, context, elementKey);
+    const result = value.map((item, index) => {
+      const savedKeyPath = context.keyPath;
+      context.keyPath = `${savedKeyPath}[${index}]`;
+      let next: StructuredValue;
+      try {
+        next = visitValue(item, context, undefined);
+      } finally {
+        context.keyPath = savedKeyPath;
+      }
       if (next !== item) changed = true;
       return next;
     });
@@ -839,7 +1138,14 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
       [key: string]: StructuredValue;
     };
     for (const [entryKey, entryValue] of Object.entries(value)) {
-      const next = visitValue(entryValue, context, entryKey);
+      const savedKeyPath = context.keyPath;
+      context.keyPath = savedKeyPath.length === 0 ? entryKey : `${savedKeyPath}.${entryKey}`;
+      let next: StructuredValue;
+      try {
+        next = visitValue(entryValue, context, entryKey);
+      } finally {
+        context.keyPath = savedKeyPath;
+      }
       if (next !== entryValue) changed = true;
       result[entryKey] = next;
     }
@@ -907,6 +1213,7 @@ interface JsonlTransformState {
   parentSessionReferences: ParentSessionReference[];
   genericPathReferences: ParentSessionReference[];
   warnings: string[];
+  diagnostics: TransformDiagnostic[];
   firstRecordSeen: boolean;
   sessionCwdPresent: boolean;
   sessionHeaderValid: boolean;
@@ -940,6 +1247,7 @@ function createJsonlTransformState(
     parentSessionReferences: [],
     genericPathReferences: [],
     warnings: [],
+    diagnostics: [],
     firstRecordSeen: false,
     sessionCwdPresent: false,
     sessionHeaderValid: false,
@@ -962,7 +1270,12 @@ function transformJsonlRecord(
   try {
     parsed = JSON.parse(line) as unknown;
   } catch (error) {
-    throw new Error(`${filePath}:${recordIndex + 1}: invalid JSON: ${String(error)}`);
+    throw fileScopedTransformError(
+      filePath,
+      recordIndex + 1,
+      FILE_LEVEL_DIAGNOSTIC_KEY,
+      `invalid JSON: ${String(error)}`,
+    );
   }
 
   try {
@@ -1000,6 +1313,10 @@ function transformJsonlRecord(
         portableName: undefined,
         cwdEvidence: undefined,
         warnings: state.warnings,
+        diagnostics: state.diagnostics,
+        file: filePath,
+        line: recordIndex + 1,
+        keyPath: "",
       });
       const canonicalValues: string[] = [];
       const canonicalPortableNames: string[] = [];
@@ -1015,12 +1332,16 @@ function transformJsonlRecord(
         portableName: undefined,
         cwdEvidence: undefined,
         warnings: canonicalWarnings,
+        diagnostics: [],
+        file: filePath,
+        line: recordIndex + 1,
+        keyPath: "",
       });
-      // Identity equality with the parsed record means no allowlisted field
-      // was rewritten: reuse the original line byte-for-byte (warnings, if
-      // any, were already collected) instead of JSON.stringify-ing the
-      // possibly huge record. Canonical text falls back to the same original
-      // line whenever its own pass is also structurally unchanged.
+      // Identity equality with the parsed record means no path value was
+      // rewritten: reuse the original line byte-for-byte (diagnostics, if any,
+      // were already collected) instead of JSON.stringify-ing the possibly
+      // huge record. Canonical text falls back to the same original line
+      // whenever its own pass is also structurally unchanged.
       const outputLine = local === structured ? line : JSON.stringify(local);
       const canonicalNeedsSerialization =
         canonicalValue !== structured ||
@@ -1052,6 +1373,10 @@ function transformJsonlRecord(
       portableName: state.portableName,
       cwdEvidence: state.cwdEvidence,
       warnings: state.warnings,
+      diagnostics: state.diagnostics,
+      file: filePath,
+      line: recordIndex + 1,
+      keyPath: "",
     });
     const canonicalValue =
       mode === "to-target"
@@ -1067,6 +1392,10 @@ function transformJsonlRecord(
             portableName: undefined,
             cwdEvidence: undefined,
             warnings: canonicalWarnings,
+            diagnostics: [],
+            file: filePath,
+            line: recordIndex + 1,
+            keyPath: "",
           })
         : transformed;
     // See the to-local branch: unchanged records keep their original line
@@ -1087,7 +1416,7 @@ function transformJsonlRecord(
       canonicalChanged: canonicalNeedsSerialization,
     };
   } catch (error) {
-    throw new Error(`${filePath}:${recordIndex + 1}: ${String(error)}`);
+    throw fileScopedTransformError(filePath, recordIndex + 1, FILE_LEVEL_DIAGNOSTIC_KEY, error);
   }
 }
 
@@ -1103,111 +1432,48 @@ const EMPTY_RECORD_BYTES = Buffer.alloc(0);
 const MAX_STREAMED_RECORD_BYTES = LARGE_STRUCTURED_FILE_LIMIT_BYTES;
 
 /**
- * One allowlisted field name in its JSON property-key spelling (`"name"`),
- * together with the byte that follows the opening quote so that a quote found
- * in a record only compares against the names that can still match it.
- */
-interface SyncedPathFieldKeyToken {
-  token: Buffer;
-  firstByte: number;
-}
-
-const SYNCED_PATH_FIELD_KEY_TOKENS: readonly SyncedPathFieldKeyToken[] = [
-  ...SYNCED_PATH_FIELDS,
-].map((field) => {
-  const token = Buffer.from(`"${field}"`, "utf8");
-  // NoUncheckedIndexedAccess: every token starts with `"`, so byte 1 exists.
-  return { token, firstByte: token[1] ?? 0 };
-});
-
-/** Allowlisted field-key tokens grouped by their first name byte. */
-const SYNCED_PATH_FIELD_KEYS_BY_FIRST_BYTE: ReadonlyMap<
-  number,
-  readonly SyncedPathFieldKeyToken[]
-> = (() => {
-  const grouped = new Map<number, SyncedPathFieldKeyToken[]>();
-  for (const entry of SYNCED_PATH_FIELD_KEY_TOKENS) {
-    const bucket = grouped.get(entry.firstByte);
-    if (bucket === undefined) grouped.set(entry.firstByte, [entry]);
-    else bucket.push(entry);
-  }
-  return grouped;
-})();
-
-/**
- * Whether the quote at `quoteIndex` is escaped by a preceding backslash run. An
- * escaped quote can only occur inside a JSON string (a value, or JSON text
- * stored inside one), so the bytes after it can never open a property key.
- */
-function isEscapedJsonlQuote(record: Buffer, quoteIndex: number): boolean {
-  let backslashes = 0;
-  for (let cursor = quoteIndex - 1; cursor >= 0 && record[cursor] === 0x5c; cursor -= 1) {
-    backslashes += 1;
-  }
-  return backslashes % 2 === 1;
-}
-
-/**
- * Index just past a `"name"` token for one allowlisted field when the record
- * carries that exact token at `quoteIndex`, otherwise undefined. A longer or
- * differently spelled key (`"cwdPath"`, `"sessionCwd"`) is a different token
- * and never matches.
- */
-function matchSyncedPathFieldKey(record: Buffer, quoteIndex: number): number | undefined {
-  const candidates = SYNCED_PATH_FIELD_KEYS_BY_FIRST_BYTE.get(record[quoteIndex + 1] ?? 0);
-  if (candidates === undefined) return undefined;
-  for (const { token } of candidates) {
-    const end = quoteIndex + token.length;
-    if (end > record.length) continue;
-    if (record.compare(token, 0, token.length, quoteIndex, end) === 0) return end;
-  }
-  return undefined;
-}
-
-/** Index of the first byte at or after `start` that is not JSON whitespace. */
-function skipJsonlWhitespace(record: Buffer, start: number): number {
-  let cursor = start;
-  while (cursor < record.length) {
-    const byte = record[cursor];
-    if (byte === undefined || !isAsciiJsonlWhitespace(byte)) return cursor;
-    cursor += 1;
-  }
-  return cursor;
-}
-
-/**
- * Whether a raw JSONL record carries at least one allowlisted field as a JSON
- * object property KEY. The streamed path uses this to decide whether a record
- * must be parsed and rewritten at all. Free-form content that merely mentions a
- * field name — a tool output that prints `"cwd"`, an array of field-name
- * strings, source code quoted inside a string — must never force a decode,
- * because decoding and re-serializing a multi-gigabyte tool-output record is
- * exactly the heap abort this path exists to prevent.
+ * Whether a raw JSONL record can possibly carry a portable path candidate and
+ * must therefore be parsed. Field names no longer decide this (v0.4.2): every
+ * string value in the record is inspected, so the only safe skip is a record
+ * that cannot contain a candidate at all.
  *
- * The scan is structural, allocation-free, and bounded by one pass over the
- * record's bytes:
- * - a quote escaped by an odd backslash run is inside a string value, so the
- *   bytes after it cannot open a key;
- * - an unescaped `"name"` token is a property key only when optional JSON
- *   whitespace and `:` follow it (in valid JSON a `:` only ever follows a key,
- *   so a string value that spells the name is not mistaken for one);
- * - a name only matches as a whole token.
- * Pi and this extension always emit these keys literally (`JSON.stringify`
- * never escapes ASCII letters), so an allowlisted key in a record is never
- * missed; a false positive only costs one parse of that record.
+ * A candidate is always either a native absolute path or a sync URI, and both
+ * always contain one of `/` (POSIX `/…`), `\` (Windows `X:\…` or UNC
+ * `\\server\…`), or `:` (`X:` drive prefix, `pi-session-sync:`). JSON text
+ * escapes no ASCII letter and no `/`, `\`, or `:`, so a record carrying none
+ * of those three bytes cannot contain a candidate and is copied verbatim
+ * without ever being decoded. This keeps the bounded-memory path cheap for
+ * huge payloads of ordinary text while every path-shaped value is still
+ * rewritten.
  */
-export function recordHasSyncedPathField(record: Buffer): boolean {
-  const length = record.length;
-  let quoteIndex = record.indexOf(0x22);
-  while (quoteIndex !== -1) {
-    if (!isEscapedJsonlQuote(record, quoteIndex)) {
-      const tokenEnd = matchSyncedPathFieldKey(record, quoteIndex);
-      if (tokenEnd !== undefined) {
-        const separator = skipJsonlWhitespace(record, tokenEnd);
-        if (separator < length && record[separator] === 0x3a) return true;
-      }
+export function recordMayContainPathCandidate(record: Buffer): boolean {
+  // Inspect only JSON string contents. Looking for `:` in the raw record would
+  // classify every object because JSON uses `:` between each key and value.
+  // This byte-level pass keeps large records with ordinary text on the
+  // zero-copy path while ensuring every string that can be a path candidate is
+  // parsed by the recursive transformer.
+  let inString = false;
+  let escaped = false;
+  for (const byte of record) {
+    if (!inString) {
+      if (byte === 0x22) inString = true;
+      continue;
     }
-    quoteIndex = record.indexOf(0x22, quoteIndex + 1);
+    if (escaped) {
+      // Escaped slash/backslash/colon still represent candidate characters.
+      if (byte === 0x2f || byte === 0x5c || byte === 0x3a) return true;
+      escaped = false;
+      continue;
+    }
+    if (byte === 0x5c) {
+      escaped = true;
+      continue;
+    }
+    if (byte === 0x22) {
+      inString = false;
+      continue;
+    }
+    if (byte === 0x2f || byte === 0x5c || byte === 0x3a) return true;
   }
   return false;
 }
@@ -1309,13 +1575,13 @@ async function detectJsonlLineEnding(filePath: string): Promise<"\n" | "\r\n"> {
 }
 
 /**
- * Rewrite a large JSONL file record by record. Records without a synchronized
- * path field are copied from their raw bytes (and hashed) without decoding;
- * only records that may carry a rewritten field are decoded and parsed.
- * Nothing ever holds more than the current record plus the canonical hash.
- * `emit` receives each output record's bytes plus whether a line terminator
- * followed it; the caller owns the output terminator choice, so the canonical
- * hash pass never needs to probe the file's line ending.
+ * Rewrite a large JSONL file record by record. A record that cannot contain a
+ * path candidate at all is copied from its raw bytes (and hashed) without
+ * decoding; every other record is decoded and parsed so its path-shaped values
+ * are rewritten. Nothing ever holds more than the current record plus the
+ * canonical hash. `emit` receives each output record's bytes plus whether a
+ * line terminator followed it; the caller owns the output terminator choice, so
+ * the canonical hash pass never needs to probe the file's line ending.
  */
 async function streamJsonl(
   filePath: string,
@@ -1327,17 +1593,20 @@ async function streamJsonl(
   await forEachJsonlRecord(filePath, async (record, hasTerminator) => {
     if (isBlankJsonlRecord(record)) {
       if (hasTerminator || record.length !== 0) {
-        throw new Error(
-          `${filePath}:${recordIndex + 1}: whitespace-only JSONL lines are not allowed`,
+        throw fileScopedTransformError(
+          filePath,
+          recordIndex + 1,
+          FILE_LEVEL_DIAGNOSTIC_KEY,
+          "whitespace-only JSONL lines are not allowed",
         );
       }
       return;
     }
     const currentIndex = recordIndex;
     recordIndex += 1;
-    if (!recordHasSyncedPathField(record)) {
+    if (!recordMayContainPathCandidate(record)) {
       if (!state.firstRecordSeen) {
-        // A first record without any allowlisted field cannot be a Pi session
+        // A first record without any path-shaped value cannot be a Pi session
         // header: `isValidSessionHeader` requires a string `cwd`, and a header
         // without one is not a session header either.
         state.firstRecordSeen = true;
@@ -1350,8 +1619,11 @@ async function streamJsonl(
       return;
     }
     if (record.length > MAX_STREAMED_RECORD_BYTES) {
-      throw new Error(
-        `${filePath}:${currentIndex + 1}: JSONL record exceeds the ${MAX_STREAMED_RECORD_BYTES} byte streaming transform limit`,
+      throw fileScopedTransformError(
+        filePath,
+        currentIndex + 1,
+        FILE_LEVEL_DIAGNOSTIC_KEY,
+        `JSONL record exceeds the ${MAX_STREAMED_RECORD_BYTES} byte streaming transform limit`,
       );
     }
     const transformed = transformJsonlRecord(record.toString("utf8"), currentIndex, state);
@@ -1401,6 +1673,7 @@ async function transformJsonlStreaming(
     state.sessionHeaderValid,
     state.warnings,
     state.sessionHeaderCwdDecodable,
+    state.diagnostics,
   );
   const streamedContent: StreamedJsonlContent = {
     canonicalHash,
@@ -1472,7 +1745,12 @@ function transformJsonl(
     if (line.trim() === "") {
       // Only the trailing empty slice produced by a final newline may be blank.
       if (hasTerminator || line !== "") {
-        throw new Error(`${filePath}:${index + 1}: whitespace-only JSONL lines are not allowed`);
+        throw fileScopedTransformError(
+          filePath,
+          index + 1,
+          FILE_LEVEL_DIAGNOSTIC_KEY,
+          "whitespace-only JSONL lines are not allowed",
+        );
       }
     } else {
       const transformed = transformJsonlRecord(line, index, state);
@@ -1523,6 +1801,7 @@ function transformJsonl(
     state.sessionHeaderValid,
     state.warnings,
     state.sessionHeaderCwdDecodable,
+    state.diagnostics,
   );
 }
 
@@ -1534,13 +1813,23 @@ function transformJson(
   options: TransformOptions,
 ): TransformedFile {
   if (text.trim() === "") {
-    throw new Error(`${filePath}: empty JSON document is not allowed`);
+    throw fileScopedTransformError(
+      filePath,
+      1,
+      FILE_LEVEL_DIAGNOSTIC_KEY,
+      "empty JSON document is not allowed",
+    );
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
   } catch (error) {
-    throw new Error(`${filePath}: invalid JSON: ${String(error)}`);
+    throw fileScopedTransformError(
+      filePath,
+      1,
+      FILE_LEVEL_DIAGNOSTIC_KEY,
+      `invalid JSON: ${String(error)}`,
+    );
   }
   const namingOptions = namingOptionsForTransform(options);
   const namingConfig = normalizePortableNameOptions(namingOptions);
@@ -1549,6 +1838,7 @@ function transformJson(
   const cwdValues: string[] = [];
   const cwdPortableNames: string[] = [];
   const warnings: string[] = [];
+  const diagnostics: TransformDiagnostic[] = [];
   const canonicalWarnings: string[] = [];
   const structured = parsed as StructuredValue;
   const output = visitValue(structured, {
@@ -1563,6 +1853,10 @@ function transformJson(
     portableName: options.portableName,
     cwdEvidence: options.cwdEvidence,
     warnings,
+    diagnostics,
+    file: filePath,
+    line: 1,
+    keyPath: "",
   });
   // Canonical hash passes run over the same value the output pass produced:
   // from local source the transformed (sync-URI) spelling is canonicalized,
@@ -1580,11 +1874,15 @@ function transformJson(
     portableName: undefined,
     cwdEvidence: undefined,
     warnings: canonicalWarnings,
+    diagnostics: [],
+    file: filePath,
+    line: 1,
+    keyPath: "",
   });
   const render = (value: StructuredValue): string => `${JSON.stringify(value, null, 2)}\n`;
   // A structurally unchanged document keeps its original bytes for output.
-  // Canonical text still serializes when an allowlisted path field was seen,
-  // preserving equivalent JSON formatting across local and target copies.
+  // Canonical text still serializes when a path value was rewritten, preserving
+  // equivalent JSON formatting across local and target copies.
   const canonicalNeedsSerialization =
     canonical !== structured ||
     cwdValues.length > 0 ||
@@ -1601,6 +1899,8 @@ function transformJson(
     false,
     false,
     warnings,
+    undefined,
+    diagnostics,
   );
 }
 
@@ -1644,61 +1944,50 @@ function parseFrontmatter(text: string): FrontmatterMatch | null {
 
 function rewriteYamlCwdValue(
   value: string,
-  mode: TransformMode,
+  context: VisitContext,
   cwdValues: string[],
   cwdPortableNames: string[],
-  options: TransformOptions,
-  warnings: string[],
 ): string {
-  const namingOptions = namingOptionsForTransform(options);
+  const { mode, namingOptions } = context;
+  if (isSyncUri(value) && !isSyncUriPathCandidate(value)) {
+    // `pi-session-sync:` without the `//` authority, and any value whose shape
+    // is not a portable candidate, is ordinary content: preserved silently.
+    return value;
+  }
   if (isSyncUri(value)) {
-    // A `pi-session-sync:` value in `cwd` follows the same syntax contract as
+    // A `pi-session-sync://` value in `cwd` follows the same syntax contract as
     // every other field, but only the rootless `cwd` form is legal here.
     let inspected: InspectedSyncUri;
     try {
-      inspected = inspectSyncUri(value, normalizePortableNameOptions(namingOptions));
+      inspected = inspectSyncUri(value, context.namingConfig);
     } catch {
-      // v0.4.2: a malformed `pi-session-sync:` cwd value is preserved verbatim
-      // with one bounded warning instead of failing the sync.
-      warnPreservedMalformedSyncUri(value, warnings);
+      warnPreservedMalformedCandidateUri(value, context);
       return value;
     }
     if (mode === "to-target" || mode === "inspect-local") {
-      // Only the rootless `pi-session-sync://<portableName>` cwd form is legal
-      // in the `cwd` field; a sessions/missions-namespaced URI is a
-      // semantically mismatched spelling preserved verbatim with a bounded
-      // warning (v0.4.1). A legacy loose portable-name spelling is non-current
-      // URI content preserved verbatim with a bounded warning (v0.4.2); a
-      // current or valid-but-undecodable rootless cwd URI is preserved with a
-      // warning.
-      if (inspected.namespace !== "cwd") {
-        warnPreservedMalformedSyncUri(value, warnings);
-        return value;
-      }
-      if (inspected.nameClass === "legacy") {
-        warnPreservedMalformedSyncUri(value, warnings);
-        return value;
-      }
-      warnings.push(`Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`);
+      // A local source may already contain a portable-looking value. Values
+      // outside the currently configured cwd prefix are preserved silently.
+      if (inspected.namespace !== "cwd" || inspected.nameClass !== "current") return value;
       return value;
     }
     if (mode === "to-local" || mode === "inspect-target") {
       if (inspected.namespace !== "cwd") {
-        warnPreservedMalformedSyncUri(value, warnings);
+        warnPreservedMalformedCandidateUri(value, context);
         return value;
       }
       if (inspected.nameClass !== "current") {
-        warnings.push(`Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`);
+        pushWarning(
+          context,
+          `Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`,
+          value,
+        );
         return value;
       }
     }
   }
   if (mode === "to-target") {
     if (isRelativeCwdValue(value)) return value;
-    if (!isEncodableLocalPath(value)) {
-      warnings.push(`Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`);
-      return value;
-    }
+    if (!isEncodableLocalPath(value)) return value;
     // Missions rewrite cwd through per-file semantic-label evidence when
     // available (preserves a ROOT label whose decoded path is under the
     // current HOME); sessions keep the single configured portable name.
@@ -1710,10 +1999,9 @@ function rewriteYamlCwdValue(
       uri = cwdToSyncUri(
         value,
         namingOptions,
-        options.cwdEvidence?.[cwdEvidenceKey(value)] ?? options.portableName,
+        context.cwdEvidence?.[cwdEvidenceKey(value)] ?? context.portableName,
       );
     } catch {
-      warnings.push(`Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`);
       return value;
     }
     cwdValues.push(syncUriToCwd(uri, namingOptions));
@@ -1722,10 +2010,7 @@ function rewriteYamlCwdValue(
   }
   if (mode === "inspect-local") {
     if (isRelativeCwdValue(value)) return value;
-    if (!isEncodableLocalPath(value)) {
-      warnings.push(`Invalid local cwd value preserved verbatim: ${boundedValuePreview(value)}`);
-      return value;
-    }
+    if (!isEncodableLocalPath(value)) return value;
     const cwd = normalizeCwd(value);
     cwdValues.push(cwd);
     return value;
@@ -1734,7 +2019,11 @@ function rewriteYamlCwdValue(
     if (isRelativeCwdValue(value)) return value;
     const decoded = tryDecodeCwdValue(value, namingOptions);
     if (decoded === undefined) {
-      warnings.push(`Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`);
+      pushWarning(
+        context,
+        `Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`,
+        value,
+      );
       return value;
     }
     cwdValues.push(decoded.cwd);
@@ -1953,51 +2242,37 @@ function isolateSharedYamlCwdAliases(document: Document): void {
 function rewriteYamlCwdNode(
   node: unknown,
   document: Document,
-  mode: TransformMode,
+  context: VisitContext,
   cwdValues: string[],
   cwdPortableNames: string[],
-  options: TransformOptions,
-  warnings: string[],
   visited: Set<object>,
 ): void {
   const resolved = resolvedYamlScalar(node, document);
   if (resolved === undefined) throw new Error("cwd field must be a string");
   if (visited.has(resolved.node)) return;
   visited.add(resolved.node);
-  resolved.node.value = rewriteYamlCwdValue(
-    resolved.value,
-    mode,
-    cwdValues,
-    cwdPortableNames,
-    options,
-    warnings,
-  );
+  const savedLine = context.line;
+  context.line = yamlNodeLine(context, resolved.node);
+  try {
+    resolved.node.value = rewriteYamlCwdValue(resolved.value, context, cwdValues, cwdPortableNames);
+  } finally {
+    context.line = savedLine;
+  }
 }
 
 function rewriteYamlCwdNodes(
   node: unknown,
   document: Document,
-  mode: TransformMode,
+  context: VisitContext,
   cwdValues: string[],
   cwdPortableNames: string[],
-  options: TransformOptions,
-  warnings: string[],
   visited: Set<object>,
 ): void {
   if (node === null || node === undefined) return;
   if (isAlias(node)) {
     const resolved = node.resolve(document);
     if (resolved !== undefined) {
-      rewriteYamlCwdNodes(
-        resolved,
-        document,
-        mode,
-        cwdValues,
-        cwdPortableNames,
-        options,
-        warnings,
-        visited,
-      );
+      rewriteYamlCwdNodes(resolved, document, context, cwdValues, cwdPortableNames, visited);
     }
     return;
   }
@@ -2006,28 +2281,17 @@ function rewriteYamlCwdNodes(
     visited.add(node);
     for (const pair of node.items) {
       const key = yamlStringValue(pair.key, document);
-      if (key === "cwd") {
-        rewriteYamlCwdNode(
-          pair.value,
-          document,
-          mode,
-          cwdValues,
-          cwdPortableNames,
-          options,
-          warnings,
-          visited,
-        );
-      } else {
-        rewriteYamlCwdNodes(
-          pair.value,
-          document,
-          mode,
-          cwdValues,
-          cwdPortableNames,
-          options,
-          warnings,
-          visited,
-        );
+      const savedPath = context.keyPath;
+      context.keyPath =
+        savedPath.length === 0 || key === undefined ? savedPath : `${savedPath}.${key}`;
+      try {
+        if (key === "cwd") {
+          rewriteYamlCwdNode(pair.value, document, context, cwdValues, cwdPortableNames, visited);
+        } else {
+          rewriteYamlCwdNodes(pair.value, document, context, cwdValues, cwdPortableNames, visited);
+        }
+      } finally {
+        context.keyPath = savedPath;
       }
     }
     return;
@@ -2035,17 +2299,14 @@ function rewriteYamlCwdNodes(
   if (isSeq(node)) {
     if (visited.has(node)) return;
     visited.add(node);
-    for (const item of node.items) {
-      rewriteYamlCwdNodes(
-        item,
-        document,
-        mode,
-        cwdValues,
-        cwdPortableNames,
-        options,
-        warnings,
-        visited,
-      );
+    for (const [index, item] of node.items.entries()) {
+      const savedPath = context.keyPath;
+      context.keyPath = `${savedPath}[${index}]`;
+      try {
+        rewriteYamlCwdNodes(item, document, context, cwdValues, cwdPortableNames, visited);
+      } finally {
+        context.keyPath = savedPath;
+      }
     }
   }
 }
@@ -2101,8 +2362,17 @@ function rewriteYamlGenericNodes(
   context: VisitContext,
   visited: Set<object>,
 ): void {
-  const rewrite = (scalar: Scalar<unknown>, value: string, key?: string): void => {
-    scalar.value = rewriteGenericPathValue(value, context, key);
+  const rewrite = (scalar: Scalar<unknown>, key: string | undefined): void => {
+    const savedLine = context.line;
+    context.line = yamlNodeLine(context, scalar);
+    try {
+      scalar.value =
+        key === "parentSession"
+          ? rewriteParentSessionValue(scalar.value as string, context)
+          : rewriteRecursivePathValue(scalar.value as string, context);
+    } finally {
+      context.line = savedLine;
+    }
   };
   const visit = (current: unknown, key?: string): void => {
     if (current === null || current === undefined) return;
@@ -2115,12 +2385,10 @@ function rewriteYamlGenericNodes(
       return;
     }
     if (isScalar(current)) {
-      // Only a scalar whose nearest enclosing field name is a synced path
-      // field is rewritten; every other string is arbitrary free-form content
-      // and stays byte-identical and silent.
-      if (typeof current.value === "string" && isSyncedPathField(key)) {
-        rewrite(current, current.value, key);
-      }
+      // Every string scalar is a recursive portable-path candidate (v0.4.2);
+      // the candidate shape check inside the rewrite keeps ordinary free-form
+      // content byte-identical and silent.
+      if (typeof current.value === "string") rewrite(current, key);
       return;
     }
     if (isMap(current)) {
@@ -2128,20 +2396,52 @@ function rewriteYamlGenericNodes(
         const pairKey = yamlStringValue(pair.key, document);
         if (pairKey === "cwd") continue;
         if (pairKey === "parentSession" && context.mode !== "canonical-target") continue;
-        if (isNode(pair.value)) visit(pair.value, pairKey);
+        if (!isNode(pair.value)) continue;
+        const savedPath = context.keyPath;
+        context.keyPath =
+          savedPath.length === 0 || pairKey === undefined ? savedPath : `${savedPath}.${pairKey}`;
+        try {
+          visit(pair.value, pairKey);
+        } finally {
+          context.keyPath = savedPath;
+        }
       }
       return;
     }
     if (isSeq(current)) {
-      // Array elements inherit the enclosing field name so a synced path
-      // field's element strings are rewritten (array fields process their
-      // elements).
-      for (const item of current.items) {
-        if (isNode(item)) visit(item, key);
+      // Array elements inherit the enclosing field name so a path field's
+      // element strings are rewritten (array fields process their elements).
+      for (const [index, item] of current.items.entries()) {
+        if (!isNode(item)) continue;
+        const savedPath = context.keyPath;
+        context.keyPath = `${savedPath}[${index}]`;
+        try {
+          visit(item, key);
+        } finally {
+          context.keyPath = savedPath;
+        }
       }
     }
   };
   visit(node);
+}
+
+/**
+ * 1-based line of a YAML node inside the Markdown file. The frontmatter body
+ * starts on `baseLine`, so the node's character offset inside that body is
+ * counted from there. A node without a range (for example an alias the parser
+ * did not locate) falls back to the body's first line.
+ */
+function yamlNodeLine(context: VisitContext, node: Node): number {
+  const source = context.yamlSource;
+  if (source === undefined) return context.line;
+  const offset = (node as { range?: [number, number, number] | null }).range?.[0];
+  if (offset === undefined || offset === null) return source.baseLine;
+  let line = source.baseLine;
+  for (let index = 0; index < offset && index < source.text.length; index += 1) {
+    if (source.text.charCodeAt(index) === 0x0a) line += 1;
+  }
+  return line;
 }
 
 /**
@@ -2164,10 +2464,7 @@ function rewriteYamlGenericNodes(
 function collectYamlPathReferences(
   node: unknown,
   document: Document,
-  mode: TransformMode,
   context: VisitContext,
-  parentReferences: ParentSessionReference[],
-  genericReferences: ParentSessionReference[],
   visited = new Set<object>(),
 ): void {
   const visit = (current: unknown, key?: string): void => {
@@ -2181,163 +2478,53 @@ function collectYamlPathReferences(
     if (isScalar(current)) {
       if (typeof current.value !== "string") return;
       const value = current.value as string;
-      // Only a scalar whose nearest enclosing field name is a synced path
-      // field is a path candidate. Every other string is arbitrary free-form
-      // content: it is neither validated nor warned about, even when it starts
-      // with the sync scheme or looks like an absolute path.
-      if (!isSyncedPathField(key)) return;
-      const isParentSession = key === "parentSession";
-      const references = isParentSession ? parentReferences : genericReferences;
-      if (isSyncUri(value)) {
-        // v0.4.2: a malformed or structurally unsupported `pi-session-sync:`
-        // value is never a sync-fatal file error. Preserve the exact original
-        // bytes and report one bounded warning; only genuine syntax/type
-        // errors still stop the sync. A well-formed URI whose portable name
-        // cannot decode under the current configuration is likewise preserved.
-        let inspected: InspectedSyncUri;
-        try {
-          inspected = inspectSyncUri(value, context.namingConfig);
-        } catch {
-          warnPreservedMalformedSyncUri(value, context.warnings);
-          return;
-        }
-        if (inspected.namespace === "cwd") {
-          warnPreservedMalformedSyncUri(value, context.warnings);
-          return;
-        }
-        if (isParentSession) {
-          if (inspected.namespace === "missions") {
-            warnPreservedMalformedSyncUri(value, context.warnings);
-            return;
-          }
-          if (inspected.relativeEncoded === "") {
-            warnPreservedMalformedSyncUri(value, context.warnings);
-            return;
-          }
-        }
-        const sessionsNamespace = inspected.namespace === "sessions";
-        if (mode === "inspect-local" || mode === "to-target") {
-          if (sessionsNamespace && inspected.nameClass === "undecodable") {
-            context.warnings.push(
-              isParentSession
-                ? `Invalid local parentSession preserved verbatim: ${boundedValuePreview(value)}`
-                : `Invalid local path preserved verbatim: ${boundedValuePreview(value)}`,
-            );
-            return;
-          }
-          try {
-            context.resolver.canonicalSync(value);
-          } catch {
-            // Legacy/non-current portable-name spellings are unsupported
-            // current-format URI content: preserve verbatim with a bounded
-            // warning (v0.4.2) instead of failing the whole sync.
-            warnPreservedMalformedSyncUri(value, context.warnings);
-            return;
-          }
-          if (sessionsNamespace) references.push({ value, rewritten: value });
-          return;
-        }
-        if (sessionsNamespace && inspected.nameClass !== "current") {
-          context.warnings.push(
-            `Invalid pi-session-sync URI preserved verbatim in target content: ${boundedValuePreview(value)}`,
-          );
-          return;
-        }
-        try {
-          const rewritten = context.resolver.canonicalSync(value);
-          if (mode === "to-local") {
-            const local = context.resolver.syncToLocal(value);
-            if (sessionsNamespace) references.push({ value, rewritten: local });
-            return;
-          }
-          if (sessionsNamespace) references.push({ value, rewritten });
-        } catch {
-          warnPreservedMalformedSyncUri(value, context.warnings);
-        }
-        return;
+      // Every string scalar is a recursive portable-path candidate (v0.4.2).
+      // The shared rewrite functions run here in collection-only fashion —
+      // they validate, decode, and record mapping references while their
+      // return value is discarded, because the output pass writes the bytes.
+      const savedLine = context.line;
+      context.line = yamlNodeLine(context, current);
+      try {
+        if (key === "parentSession") rewriteParentSessionValue(value, context);
+        else rewriteRecursivePathValue(value, context);
+      } finally {
+        context.line = savedLine;
       }
-      if (isAbsolutePath(value) && mode === "to-target") {
-        // Local source (v0.4.1 leniency): an in-root value without a live
-        // mapping, and an absolute value outside both synced roots (which the
-        // resolver returns unchanged), is preserved verbatim with a warning
-        // instead of stopping the sync.
-        const encoded = tryEncodeLocalRootUri(context.resolver, value);
-        if (!encoded.mapped || encoded.rewritten === value) {
-          context.warnings.push(
-            isParentSession
-              ? `Invalid local parentSession preserved verbatim: ${value}`
-              : `Invalid local path preserved verbatim: ${value}`,
-          );
-          return;
-        }
-        if (isParentSession) {
-          // A parentSession value must reference a session file: a mapped
-          // value outside the sessions namespace (missions) is preserved
-          // verbatim with a warning rather than rewritten.
-          if (!isSessionsFileUri(encoded.rewritten)) {
-            context.warnings.push(`Invalid local parentSession preserved verbatim: ${value}`);
-            return;
-          }
-          references.push({ value, rewritten: encoded.rewritten, mappedUri: encoded.rewritten });
-          return;
-        }
-        if (isSessionsFileUri(encoded.rewritten)) {
-          references.push({ value, rewritten: encoded.rewritten, mappedUri: encoded.rewritten });
-        }
-        return;
-      }
-      if (isAbsolutePath(value) && mode === "to-local") {
-        try {
-          const mappedValue = context.resolver.localToSync(value);
-          if (mappedValue !== value) {
-            if (isSessionsFileUri(mappedValue)) {
-              references.push({ value, rewritten: value, mappedUri: mappedValue });
-            } else if (isParentSession) {
-              context.warnings.push(`Invalid target parentSession preserved verbatim: ${value}`);
-              return;
-            }
-            // Every target absolute spelling is machine-local (never
-            // portable): preserve verbatim with a warning even when it maps
-            // on this machine.
-            context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
-          } else {
-            // Out-of-root absolute spellings on target source are preserved
-            // verbatim (never portable): report a warning, not an error.
-            context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
-          }
-        } catch {
-          context.warnings.push(`Invalid target path preserved verbatim: ${value}`);
-        }
-        return;
-      }
-      if (isAbsolutePath(value)) {
-        references.push({ value, rewritten: value });
-        return;
-      }
-      // A literal relative `parentSession` is a path candidate: its bytes are
-      // preserved with the existing invalid-parentSession warning. Ordinary
-      // relative generic values stay silent (v0.4.1 leniency).
-      if (isParentSession) warnPreservedParentSession(value, context);
       return;
     }
     if (visited.has(current)) return;
     visited.add(current);
     if (isMap(current)) {
       for (const pair of current.items) {
-        // Mapping keys never participate in generic path rewriting or
-        // reference collection; only values do (P13). Key detection for
-        // `cwd` still runs through the key scalar itself.
+        // Mapping keys never participate in path rewriting or reference
+        // collection; only values do (P13). Key detection for `cwd` still runs
+        // through the key scalar itself.
         const pairKey = yamlStringValue(pair.key, document);
         if (pairKey === "cwd") continue;
-        if (isNode(pair.value)) visit(pair.value, pairKey);
+        if (!isNode(pair.value)) continue;
+        const savedPath = context.keyPath;
+        context.keyPath =
+          savedPath.length === 0 || pairKey === undefined ? savedPath : `${savedPath}.${pairKey}`;
+        try {
+          visit(pair.value, pairKey);
+        } finally {
+          context.keyPath = savedPath;
+        }
       }
       return;
     }
     if (isSeq(current)) {
-      // Array elements inherit the enclosing field name so a synced path
-      // field's elements are validated/collected as path values.
-      for (const item of current.items) {
-        if (isNode(item)) visit(item, key);
+      // Array elements inherit the enclosing field name so a path field's
+      // elements are validated/collected as path values.
+      for (const [index, item] of current.items.entries()) {
+        if (!isNode(item)) continue;
+        const savedPath = context.keyPath;
+        context.keyPath = `${savedPath}[${index}]`;
+        try {
+          visit(item, key);
+        } finally {
+          context.keyPath = savedPath;
+        }
       }
     }
   };
@@ -2399,7 +2586,12 @@ function transformMarkdown(
   const frontmatter = parseFrontmatter(text);
   if (frontmatter === null) {
     if (startsFrontmatter(text)) {
-      throw new Error(`${filePath}: invalid YAML frontmatter: missing closing ---`);
+      throw fileScopedTransformError(
+        filePath,
+        1,
+        FILE_LEVEL_DIAGNOSTIC_KEY,
+        "invalid YAML frontmatter: missing closing ---",
+      );
     }
     return createTransformedFile(text, text, [], []);
   }
@@ -2412,7 +2604,12 @@ function transformMarkdown(
     }
     rejectUnresolvedYamlAliases(document);
   } catch (error) {
-    throw new Error(`${filePath}: invalid YAML frontmatter: ${String(error)}`);
+    throw fileScopedTransformError(
+      filePath,
+      1,
+      FILE_LEVEL_DIAGNOSTIC_KEY,
+      `invalid YAML frontmatter: ${String(error)}`,
+    );
   }
 
   try {
@@ -2421,10 +2618,18 @@ function transformMarkdown(
     const parentSessionReferences: ParentSessionReference[] = [];
     const genericPathReferences: ParentSessionReference[] = [];
     const warnings: string[] = [];
-    // Reference collection runs once over the ORIGINAL document; the output
-    // rewrite pass reuses throwaway arrays so every generic value is collected
-    // exactly once. (Markdown has no JSON-style value aliasing; the cwd and
-    // parentSession isolation passes clone use-sites, never values.)
+    const diagnostics: TransformDiagnostic[] = [];
+    // YAML node ranges are relative to the frontmatter body, which starts on
+    // the line after the opening `---` delimiter.
+    const yamlSource = {
+      text: frontmatter.yaml,
+      baseLine: 1 + (frontmatter.open.match(/\n/g)?.length ?? 0),
+    };
+    // Reference collection runs once over the ORIGINAL document into the
+    // caller-visible evidence arrays; the output rewrite pass uses the base
+    // context's own arrays so every value is collected exactly once.
+    // (Markdown has no JSON-style value aliasing; the cwd and parentSession
+    // isolation passes clone use-sites, never values.)
     const baseContext: VisitContext = {
       mode,
       resolver,
@@ -2435,18 +2640,21 @@ function transformMarkdown(
       namingOptions,
       namingConfig,
       portableName: options.portableName,
-      cwdEvidence: undefined,
+      cwdEvidence: options.cwdEvidence,
       warnings,
+      diagnostics,
+      file: filePath,
+      line: yamlSource.baseLine,
+      keyPath: "",
+      yamlSource,
     };
-    assertYamlParentSessionString(document.contents, document);
-    collectYamlPathReferences(
-      document.contents,
-      document,
-      mode,
-      baseContext,
+    const collectContext: VisitContext = {
+      ...baseContext,
       parentSessionReferences,
       genericPathReferences,
-    );
+    };
+    assertYamlParentSessionString(document.contents, document);
+    collectYamlPathReferences(document.contents, document, collectContext);
     const outputDocument = document.clone();
     isolateSharedYamlCwdAliases(outputDocument);
     isolateSharedYamlParentSessionAliases(outputDocument);
@@ -2455,11 +2663,9 @@ function transformMarkdown(
     rewriteYamlCwdNodes(
       outputDocument.contents,
       outputDocument,
-      mode,
+      baseContext,
       outputCwdValues,
       outputCwdPortableNames,
-      options,
-      warnings,
       new Set<object>(),
     );
     rewriteYamlGenericNodes(
@@ -2472,16 +2678,6 @@ function transformMarkdown(
     if (mode === "to-local" || mode === "to-target") {
       isolateSharedYamlCwdAliases(canonicalDocument);
       isolateSharedYamlParentSessionAliases(canonicalDocument);
-      rewriteYamlCwdNodes(
-        canonicalDocument.contents,
-        canonicalDocument,
-        "canonical-target",
-        [],
-        [],
-        options,
-        [],
-        new Set<object>(),
-      );
       const canonicalContext: VisitContext = {
         mode: "canonical-target",
         resolver,
@@ -2494,7 +2690,20 @@ function transformMarkdown(
         portableName: undefined,
         cwdEvidence: undefined,
         warnings: [],
+        diagnostics: [],
+        file: filePath,
+        line: yamlSource.baseLine,
+        keyPath: "",
+        yamlSource,
       };
+      rewriteYamlCwdNodes(
+        canonicalDocument.contents,
+        canonicalDocument,
+        canonicalContext,
+        [],
+        [],
+        new Set<object>(),
+      );
       rewriteYamlGenericNodes(
         canonicalDocument.contents,
         canonicalDocument,
@@ -2542,8 +2751,11 @@ function transformMarkdown(
       false,
       false,
       warnings,
+      undefined,
+      diagnostics,
     );
   } catch (error) {
+    if (error instanceof TransformFileError) throw error;
     throw new Error(`${filePath}: ${String(error)}`);
   }
 }

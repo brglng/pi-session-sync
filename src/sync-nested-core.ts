@@ -77,16 +77,22 @@ export function historicalNestedMappingsForState(
   return mappings;
 }
 
+/**
+ * Whether the local scan needs a persisted nested directory mapping for one Pi
+ * local directory even though the mapping is retired. A physically present
+ * cwd-less file can only be classified through the mapping; file-less trees are
+ * not retained because their root has no synchronizable session content.
+ */
 export function localNestedMappingRequiredForScan(
   localName: string,
   portableName: string,
   localScan: ScanResult | undefined,
+  targetScan: ScanResult | undefined,
   namingOptions: PortableNameOptions,
 ): boolean {
-  const localMapping =
-    localScan === undefined ? undefined : mappingForNativeName(localScan.localMappings, localName);
+  if (localScan === undefined) return false;
+  const localMapping = mappingForNativeName(localScan.localMappings, localName);
   if (
-    localScan === undefined ||
     localMapping === undefined ||
     !nativeCompatiblePortableMappings(localMapping.portableName, portableName, namingOptions)
   ) {

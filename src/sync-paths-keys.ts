@@ -7,6 +7,7 @@ import {
   generatedLocalSessionDirName,
   isPathInside,
   isSyncUri,
+  sessionTreeRootKeyPortableName,
   syncParentUriToLocalPath,
 } from "./session-paths.ts";
 import {
@@ -19,6 +20,19 @@ import { parseLogicalKey } from "./sync-state-core.ts";
 import type { DecisionContext } from "./sync-types.ts";
 
 export function targetPathForKey(ctx: DecisionContext, key: string): string {
+  const treeRootPortableName = sessionTreeRootKeyPortableName(key);
+  if (treeRootPortableName !== undefined) {
+    // Session tree ROOT directory key: the session directory itself. Its
+    // physical target spelling follows the same rule as every other key of
+    // that tree (the accepted on-disk name for the strict identity).
+    const physicalName =
+      ctx.targetPhysicalPortableNames.get(treeRootPortableName) ?? treeRootPortableName;
+    const rootPath = resolve(ctx.sessionsTargetRoot, physicalName);
+    if (!isPathInside(ctx.sessionsTargetRoot, rootPath)) {
+      throw new Error(`Logical key escapes sessions target root: ${key}`);
+    }
+    return rootPath;
+  }
   const parsed = parseLogicalKey(key, ctx.namingOptions);
   if (parsed.root === "missions") {
     if (ctx.missionsTargetRoot === undefined) {
@@ -44,6 +58,15 @@ export function targetPathForKey(ctx: DecisionContext, key: string): string {
 }
 
 export function localPathForKey(ctx: DecisionContext, key: string): string {
+  const treeRootPortableName = sessionTreeRootKeyPortableName(key);
+  if (treeRootPortableName !== undefined) {
+    // Session tree ROOT directory key: the local session directory itself.
+    // Flat layouts never produce a root key (their session tree root is the
+    // configured sessions root, which stays protected).
+    const decoded = decodePortableSessionDirName(treeRootPortableName, ctx.namingOptions);
+    if (decoded === null) throw new Error(`Cannot decode logical key: ${key}`);
+    return join(ctx.sessionsRoot, generatedLocalSessionDirName(decoded.cwd));
+  }
   const parsed = parseLogicalKey(key, ctx.namingOptions);
   if (parsed.root === "missions") {
     if (ctx.missionsRoot === undefined) {

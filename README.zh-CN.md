@@ -57,7 +57,7 @@ pi install npm:@brglng/pi-session-sync
 - 可移植名称由标签和 URL 百分号编码组成；不依赖 `@brglng/pi-portable-sessions`。
 - 标签必须是非空、跨平台安全的 Unicode 路径/URI 段。
 - 标签不能包含 `/`、`\\`、`%`、`:`、`?`、`*`、`"`、`<`、`>`、`|`、NUL、控制字符、`.`、`..`，也不能以 `.` 或空格结尾。
-- 标签也不能是 `.pi-session-sync-state.json` 或不区分大小写的 Windows 设备名 `CON`、`PRN`、`AUX`、`NUL`、`COM1`–`COM9`、`LPT1`–`LPT9`，包括带扩展名的形式。
+- 标签也不能是 `pi-session-sync-state.json` 或不区分大小写的 Windows 设备名 `CON`、`PRN`、`AUX`、`NUL`、`COM1`–`COM9`、`LPT1`–`LPT9`，包括带扩展名的形式。
 - 前缀和标签可以重叠。前缀匹配遵循路径段边界，并选择最长匹配；长度相同但彼此不同的匹配属于配置错误。
 - 与内置 `HOME` 或 `ROOT` 相同的额外前缀会覆盖相应的内置映射。
 - 解码选择最长标签。一个标签对应多个前缀时，结果有歧义，操作失败。
@@ -135,7 +135,7 @@ target → local 复制时，非可移植值原样保留并提示 warning，不�
 - 现存文件的映射优先于仅父级证据，但同一个解码后的 `cwd` 若对应不同的语义标签会失败，包括现存映射与仅父级引用之间的冲突。
 - 由 mission 推导出的证据按「所有者」条目保存，而不只是保存在 scope 上。`cwdEvidence` 记录某个 mission 文件证明过的 cwd 标签，`missionSessionMappings` 记录它证明过的仅父级 session 目录映射；两者都按机器 scope key（`<layout>:<sessionsRoot>::<machineId>`）切片，因此一台机器的记录绝不会覆盖另一台机器的记录。只会读取记录的 layout 与当前 layout 一致的证据；其它 layout 的记录原样保留但绝不喂给 resolver，已被 tombstone 的所有者不贡献任何内容，因此退役的映射不会被复活。
 - 被冻结的 sessions 根目录会原样保留 scope 映射字段，并依赖上述所有者条目：下一轮 sessions 根目录可用时，会在扫描前先载入已持久化的 `missionSessionMappings`，使仍然存活的本机绝对路径拼写重新编码为原始可移植 URI。preflight 阻断某个 mission 拷贝或删除时，会用 blocked 集合重新计算所有者证据——被阻断的动作仍保留该侧磁盘内容，因此其证据仍然有效——仅有的传输被阻断的全新 mission 文件会持久化一个仅含源侧内容的条目，绝不把被阻断的传输记为已完成。被冻结的 sessions 根目录仍会用存活的 target 推导映射校验 mission 的仅父级证据，因此同一个 Pi 本机目录对应的不兼容语义标签会停止同步，即使不写入任何 scope 映射。
-- target 根目录下的 `.pi-session-sync-state.json` 是实际存在的 version-1 JSON 状态文件，按 effective `sessionsRoot` 和 layout 划分作用域。
+- target 根目录下的 `pi-session-sync-state.json` 是实际存在的 version-1 JSON 状态文件，按 effective `sessionsRoot` 和 layout 划分作用域。
 - 状态文件记录逻辑基线、规范化哈希和 mtime、目录映射、删除 tombstone、各机器快照，以及规范化命名配置。
 - 作用域根目录保持区分大小写；目标检查采用保守策略。稳定的机器 ID 位于 `~/.pi/agent/extensions/pi-session-sync/machine-id`。
 - 没有本地快照的机器会优先从目标端恢复数据；已知机器可以传播本地删除。

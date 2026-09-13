@@ -24,6 +24,20 @@ export const SESSIONS_LOGICAL_KEY_PREFIX = `${SESSIONS_ROOT_NAMESPACE}/`;
 export const MISSIONS_LOGICAL_KEY_PREFIX = `${MISSIONS_ROOT_NAMESPACE}/`;
 
 /**
+ * Portable label of a nested session tree ROOT directory key,
+ * `sessions/<portableLabel>` with no relative path, or undefined for every
+ * other key. The ordinary directory keys of a nested tree always carry a
+ * non-empty relative path; only the session directory itself — an empty one
+ * included — has none, so it needs its own key shape.
+ */
+export function sessionTreeRootKeyPortableName(key: string): string | undefined {
+  if (!key.startsWith(SESSIONS_LOGICAL_KEY_PREFIX)) return undefined;
+  const rest = key.slice(SESSIONS_LOGICAL_KEY_PREFIX.length);
+  if (rest.length === 0 || rest.includes("/")) return undefined;
+  return rest;
+}
+
+/**
  * Return Pi's default per-working-directory session directory name, rejecting
  * names a CWD would generate that are not cross-platform-safe. A CWD with the
  * Windows-invalid printable characters (?/*, etc.) would produce a nested local

@@ -4,8 +4,22 @@ import type { SessionLayout } from "./config.ts";
 import { type PortableNameOptions, RESERVED_STATE_FILE_NAME } from "./portable-name.ts";
 import type { ScannedFile } from "./scan.ts";
 import type { StateEntry } from "./state.ts";
+import type { SyncEventSink } from "./sync-events.ts";
 
 export const STATE_FILE_NAME = RESERVED_STATE_FILE_NAME;
+
+/**
+ * One informational event per staged file write and per committed copy, plus
+ * one warning/error event per diagnostic as soon as it is discovered for the
+ * file being staged, so a host can show live progress instead of waiting for
+ * the final summary.
+ */
+export type {
+  SyncDiagnosticLocation,
+  SyncEvent,
+  SyncEventLevel,
+  SyncEventSink,
+} from "./sync-events.ts";
 
 export interface SyncSummary {
   copied: number;
@@ -51,6 +65,14 @@ export interface SyncOptions {
   activeSessionFile?: string;
   activeSessionDir?: string;
   now?: number;
+  /**
+   * Realtime event sink (v0.4.2). Called for every staged file write, every
+   * committed copy, and every diagnostic as it is discovered, so a host can
+   * report progress while the sync runs instead of only at the end. The
+   * aggregated `SyncSummary.warnings`/`.errors` stay available for callers
+   * that pass no sink.
+   */
+  onEvent?: SyncEventSink;
 }
 
 export type { ValidatedSyncRoots } from "./validated-roots.ts";

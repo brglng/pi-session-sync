@@ -476,12 +476,23 @@ export async function preflightDecisions(
         throw new Error(`Logical destination path collision: ${missingPath}`);
       }
       if (missingStatus === "symlink") {
-        warnings.push(`Skipped logical path through symlink: ${decision.key}`);
-        restoreDecisionState(decision, nextEntries);
-        for (const action of decision.copies) blockedCopies.add(action);
-        for (const action of decision.deletes) blockedDeletes.add(action);
-        noteBlockedDestination(missingRoot, missingPath);
-        continue;
+        // A copy's destination IS the missing side, and the per-action
+        // destination check below inspects that exact same path with the same
+        // symlink mode. Letting the copy fall through yields a path-specific
+        // "Skipped sync through symlink" diagnostic and a located blocked-copy
+        // report instead of a key-only message. A deletion has no destination
+        // on the missing side, so its preemptive block stays here.
+        const copyIntoMissingSide = decision.copies.some(
+          (action) => action.destinationSide === missingSide,
+        );
+        if (!copyIntoMissingSide) {
+          warnings.push(`Skipped logical path through symlink: ${decision.key}`);
+          restoreDecisionState(decision, nextEntries);
+          for (const action of decision.copies) blockedCopies.add(action);
+          for (const action of decision.deletes) blockedDeletes.add(action);
+          noteBlockedDestination(missingRoot, missingPath);
+          continue;
+        }
       }
       if (
         missingStatus === "absent" &&

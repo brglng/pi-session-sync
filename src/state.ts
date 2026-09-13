@@ -2,6 +2,7 @@
 
 import { lstat, readFile } from "node:fs/promises";
 import type { SessionLayout } from "./config.ts";
+import { isStructurallyStrictPortableName } from "./portable-name.ts";
 import { isCrossPlatformSafePathSegment } from "./session-paths.ts";
 
 export interface SideSnapshot {
@@ -92,6 +93,24 @@ export interface SyncState {
   version: 1;
   scopes: Record<string, StateScope>;
   entries: Record<string, StateEntry>;
+  /**
+   * Directory baselines for non-hidden empty directories (v0.4.2): logical
+   * directory key → whether the directory is synchronized or carries a
+   * one-sided deletion tombstone. Empty/absent when no managed directory was
+   * ever observed, so a state file without the field stays valid and old
+   * state keeps loading.
+   */
+  directories?: Record<string, DirectoryBaseline>;
+}
+
+/**
+ * Baseline for one synchronized empty directory. Directories have no content
+ * hash, so a baseline is either "synchronized" (`tombstone: null`) or a
+ * pending one-sided deletion whose tombstone side names the tree the deletion
+ * came from.
+ */
+export interface DirectoryBaseline {
+  tombstone: Tombstone | null;
 }
 
 export function emptyScope(layout: SessionLayout, sessionsRoot: string): StateScope {
@@ -357,6 +376,50 @@ function parseGenericEvidence(
 }
 
 const STATE_TOP_LEVEL_FIELDS = ["version", "scopes", "entries"] as const;
+const STATE_TOP_LEVEL_ALLOWED_FIELDS = ["version", "scopes", "entries", "directories"] as const;
+const DIRECTORY_BASELINE_FIELDS = ["tombstone"] as const;
+
+/**
+ * True when `key` is a valid directory logical key: `missions/<safe relative
+ * path>`, `sessions/<portable label>/<safe relative path>`, or the nested
+ * session tree ROOT `sessions/<portable label>` with no relative path (the
+ * session directory itself, an empty one included). The portable label is only
+ * checked structurally here; a foreign label is extracted before
+ * current-machine validation.
+ */
+function isDirectoryLogicalKey(key: string): boolean {
+  if (key.startsWith("missions/")) {
+    const relativePath = key.slice("missions/".length);
+    return relativePath.length > 0 && relativePath.split("/").every(isCrossPlatformSafePathSegment);
+  }
+  if (!key.startsWith("sessions/")) return false;
+  const rest = key.slice("sessions/".length);
+  const slash = rest.indexOf("/");
+  if (slash < 0) return isStructurallyStrictPortableName(rest);
+  if (slash === 0 || slash === rest.length - 1) return false;
+  const label = rest.slice(0, slash);
+  if (label.length === 0 || label.includes("\\")) return false;
+  return rest
+    .slice(slash + 1)
+    .split("/")
+    .every((segment) => isCrossPlatformSafePathSegment(segment));
+}
+
+function parseDirectoryBaselines(value: unknown): Record<string, DirectoryBaseline> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new Error("Invalid directories in pi-session-sync state");
+  const result = safeRecord<DirectoryBaseline>();
+  for (const [key, raw] of Object.entries(value)) {
+    if (!isDirectoryLogicalKey(key)) {
+      throw new Error(`Invalid directory logical key in pi-session-sync state: ${key}`);
+    }
+    if (!isRecord(raw) || !hasExactOwnKeys(raw, DIRECTORY_BASELINE_FIELDS)) {
+      throw new Error(`Invalid directory baseline in pi-session-sync state: ${key}`);
+    }
+    setOwnRecordValue(result, key, { tombstone: parseTombstone(raw.tombstone) });
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
 const STATE_SCOPE_FIELDS = [
   "layout",
   "sessionsRoot",
@@ -470,7 +533,13 @@ function parseState(value: unknown): SyncState {
     if (key.length === 0) throw new Error("Invalid empty entry key in pi-session-sync state");
     setOwnRecordValue(entries, key, parseEntry(entry));
   }
-  return { version: 1, scopes, entries };
+  const directories = parseDirectoryBaselines(value.directories);
+  return {
+    version: 1,
+    scopes,
+    entries,
+    ...(directories === undefined ? {} : { directories }),
+  };
 }
 
 export type LoadStateResult =
@@ -651,7 +720,9 @@ export async function loadState(path: string): Promise<LoadStateResult> {
   // Unknown top-level fields are malformed current state: rewriting the file
   // would silently drop them. Reject before old recognition so a file that is
   // otherwise old-shaped plus an unknown field is not warn-and-ignored either.
-  if (!hasExactOwnKeys(parsed, STATE_TOP_LEVEL_FIELDS)) {
+  // The optional `directories` field is the current writer's directory
+  // baseline map; every other field must be the exact current shape.
+  if (!hasOwnKeysWithin(parsed, STATE_TOP_LEVEL_ALLOWED_FIELDS, STATE_TOP_LEVEL_FIELDS)) {
     throw new Error(`Invalid pi-session-sync state (unknown or missing top-level fields): ${path}`);
   }
   const recognizedOld = isRecognizedOldState(parsed);

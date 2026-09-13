@@ -26,7 +26,7 @@ import { errorMessage } from "./sync-snapshots.ts";
 import { parseLogicalKey, stateEntryForKey } from "./sync-state-core.ts";
 import type { DecisionContext, FileDecision } from "./sync-types.ts";
 import type { ParentPathResolver } from "./transform.ts";
-import { fileScopedTransformWarning, transformFile } from "./transform.ts";
+import { fileScopedDiagnostics, fileScopedTransformWarning, transformFile } from "./transform.ts";
 
 export interface MissionScan {
   files: Map<string, ScannedFile>;
@@ -388,6 +388,7 @@ export async function scanMissionsTree(
       sessionHeaderCwdDecodable: transformed.sessionHeaderCwdDecodable,
       parentSessionReferences: transformed.parentSessionReferences ?? [],
       genericPathReferences: transformed.genericPathReferences ?? [],
+      diagnostics: fileScopedDiagnostics(logicalPath, transformed.diagnostics),
     });
   };
 

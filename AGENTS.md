@@ -33,7 +33,7 @@
 - 配置格式兼容 `pi-portable-sessions`：`{ "targetDir": "...", "homeLabel": "HOME", "rootLabel": "ROOT", "extraPrefixes": { ... } }`
 - `targetDir` 必填，只接受绝对路径或 `~` 前缀路径；`homeLabel` 默认 `HOME`，`rootLabel` 默认 `ROOT`，`extraPrefixes` 默认 `{}`
 - `extraPrefixes` 的 key 为绝对路径前缀，value 为非空 label；label 与 prefix 允许相互重叠
-- label 为单个跨平台安全路径/URI 段：允许 Unicode，但拒绝 `/`、`\\`、`%`、`:`、`?`、`*`、`"`、`<`、`>`、`|`、NUL、控制字符、末尾的 `.` 或空格、Windows 保留设备名（大小写不敏感的 `CON`、`PRN`、`AUX`、`NUL`、`COM1`-`COM9`、`LPT1`-`LPT9` 及其扩展名）以及 `.`、`..`、保留的 `.pi-session-sync-state.json`
+- label 为单个跨平台安全路径/URI 段：允许 Unicode，但拒绝 `/`、`\\`、`%`、`:`、`?`、`*`、`"`、`<`、`>`、`|`、NUL、控制字符、末尾的 `.` 或空格、Windows 保留设备名（大小写不敏感的 `CON`、`PRN`、`AUX`、`NUL`、`COM1`-`COM9`、`LPT1`-`LPT9` 及其扩展名）以及 `.`、`..`、保留的 `pi-session-sync-state.json`
 - 本机源目录不配置，固定为当前 Pi 实际使用的唯一 sessions 根目录；以当前 Pi `SessionManager` 暴露的实际 sessionDir 为准，覆盖 CLI `--session-dir`、`PI_CODING_AGENT_SESSION_DIR`、当前 cwd 下合并后的 global/project settings `sessionDir`、默认 `<agentDir>/sessions`；配置只提供一个 `targetDir` 目标同步目录，不支持多组映射
 - 当前 Pi session 为 in-memory/`--no-session` 且没有实际 sessionDir 时，命令必须拒绝同步，不得回退到持久 sessions 根目录
 - 当有效 `sessionDir` 是显式 custom 目录（包括 CLI `--session-dir`）时，根部的 `.jsonl`/`.md` 是会话文件，按各文件 cwd 分组到 targetDir/<portableName>/；默认 `<agentDir>/sessions` 布局仍只扫描 `--...--` 会话子目录并忽略根部文件
@@ -57,7 +57,7 @@
 - `.jsonl` 按行解析 JSON，递归改写所有名为 `cwd` 的字符串字段；除允许的文件末尾换行外，空白行均视为错误；`.md` 只解析文件开头 `---` 到 `---` 的标准 YAML frontmatter，递归改写其中所有名为 `cwd` 的字符串字段，正文不改；无 frontmatter 视为无 cwd
 - Markdown frontmatter 使用 YAML AST 修改，保留非 cwd 字段的标准 tagged scalar 与其它内容；其中出现的 `parentSession` 也必须执行与 JSONL 相同的类型、URI、范围和 Windows-shaped 路径校验；Markdown 输出不改写合法 `parentSession`，但规范 hash 仍须将其中合法的本机绝对路径与同步 URI 归一为同一 portable 表示
 - YAML scalar anchor 同时被 cwd 与非 cwd 字段引用时，以保护非 cwd 值为优先；克隆每个 cwd use-site 后改写，保留非 cwd anchor/alias 原值，cwd alias 关系允许必要拆开
-- 应考虑会话被删除的情况，同步时要删除已被删除的会话，且防止已被删除的会话重新出现；使用保存在目标目录根部的 `.pi-session-sync-state.json` 隐藏 JSON 状态清单识别删除，状态清单随目标目录跨机器保存
+- 应考虑会话被删除的情况，同步时要删除已被删除的会话，且防止已被删除的会话重新出现；使用保存在目标目录根部的 `pi-session-sync-state.json` JSON 状态清单识别删除，状态清单随目标目录跨机器保存
 - 首次没有状态清单时，不把单边现有文件判为删除，按 mtime 处理双方现有文件后建立共同基线
 - 同步扫描发现一侧缺失时，以发现时的 `now` 记录 tombstone；之后同名文件只有 mtime 严格晚于 tombstone 且内容 hash 相对本机/共同基线确有变化才视为新文件并恢复，否则继续删除；单纯 touch 不恢复；tombstone 过期判断优先于 equal-mtime 冲突判断
 - 两端同名文件内容冲突时，按 mtime 较新的一端覆盖较旧的一端
@@ -133,7 +133,7 @@
 - local → target 的 `parentSession` 必须指向父会话文件：sessions 目录 URI（`pi-session-sync://sessions/<portableName>`，无相对路径部分）是文件错误；被引用目标在本机存在但不是普通文件时也是文件错误。被引用文件不存在时，只要 URI 语法、范围和 segment 规则通过仍然有效。JSONL、JSON 与 Markdown frontmatter 一致执行。
 - 任意结构化文件中的字符串只要以 `pi-session-sync:` 开始但不是合法 URI，就视为文件错误并停止同步；合法 URI 必须使用 `sessions` 或 `missions` 根命名空间并通过路径范围、segment、percent 编码和 traversal 校验。旧的不带根名文件 URI 不兼容。
 - JSON 数值不再要求无损保留；本次变更不考虑任何数值变化，JSON、JSONL、YAML 均可沿用普通解析和序列化造成的数值变化。
-- 两棵目标子树共用 `targetDir/.pi-session-sync-state.json`；逻辑文件 key 必须包含 `sessions`/`missions` 根命名空间，以统一处理冲突、删除、tombstone、mtime 和规范 hash。状态文件本身不作为普通 `.json` 文件同步。
+- 两棵目标子树共用 `targetDir/pi-session-sync-state.json`；逻辑文件 key 必须包含 `sessions`/`missions` 根命名空间，以统一处理冲突、删除、tombstone、mtime 和规范 hash。状态文件本身不作为普通 `.json` 文件同步。
 - targetDir 顶层旧 portable session 目录、旧布局文件和不适用的旧状态内容不参与新映射，不删除，只忽略并提示 warning；不提供自动迁移。
 - 状态清单的 `entries` 或 `scopes` 容器畸形（含非对象类型），或任一 scope 值畸形（非对象）时，无论文件其余内容是否为旧格式，均视为当前格式的畸形状态并硬错误停止同步；只有整体拓扑完全无歧义为旧格式时才以 warning 忽略。识别为旧状态后同步以空状态继续，旧状态清单必须在磁盘上原样保留：不迁移、不删除、不静默替换、不用新状态覆盖。
 - 本次需求覆盖 JSON、JSONL、Markdown frontmatter 中所有涉及 sessions/missions 文件路径的字段；实现和测试不得只覆盖示例字段名。
@@ -145,7 +145,7 @@
 
 - 对 `cwd` 以及所有会被修改的路径字段，不要求原值是绝对路径。只有能够编码为 portable 路径时才改写；无法编码为 portable 路径的值原样保留，并提示 warning，不因该值停止整次同步。目标目录中的值无法以 portable 路径解码时同样原样保留，并提示 warning，不报错、不停止同步。
 - 上述宽松规则同时适用于 local → target 与 target → local；`cwd`、`parentSession` 及通用 sessions/missions 路径字段均适用。字段类型、结构化文件语法和无法安全解析的 URI 仍按既有规则处理；不属于可改写路径的普通相对值保持原样且不因无法映射报错。
-- 以 `.` 开头的目录或文件在本机源树和目标树中均不参与同步：不读取、不写入、不删除、不创建，不报告 warning、error 或其它信息。根部状态文件 `.pi-session-sync-state.json` 仍按状态清单规则处理。
+- 以 `.` 开头的目录或文件在本机源树和目标树中均不参与同步：不读取、不写入、不删除、不创建，不报告 warning、error 或其它信息。根部状态文件 `pi-session-sync-state.json` 仍按状态清单规则处理。
 - 空目录不视为未知条目，不报告 error 或 warning；同步需要创建的空目标目录正常创建。隐藏目录或文件被过滤后变为空目录时，也按空目录处理。
 
 ### 运行时完全不依赖 Git
@@ -175,22 +175,37 @@
 ### 跨机器配置与 state
 
 - 不同机器同步时，不检查也不比较配置中的 `homeLabel`、`rootLabel`、`extraPrefixes` 的 key/value、prefix、label 或其它命名配置是否一致；配置不同本身不是配置错误，不得因此拒绝同步、阻止恢复或要求迁移 target 目录。
-- `.pi-session-sync-state.json` 只保存同步所需的文件基线、mtime、hash、tombstone、机器快照及其它同步状态，不保存 `homeLabel`、`rootLabel`、`extraPrefixes` 或任何命名配置快照。
+- `pi-session-sync-state.json` 只保存同步所需的文件基线、mtime、hash、tombstone、机器快照及其它同步状态，不保存 `homeLabel`、`rootLabel`、`extraPrefixes` 或任何命名配置快照。
 - 读取和写入 state 时不得用命名配置快照做一致性校验，也不得因为跨机器缺少或不同的配置快照而拒绝同步；已有规则中要求「命名配置写入 state scope」或比较不同机器命名配置的内容，以本节为准并不再执行。
 
 ### 最新 warning 与历史数据处理
 
-- 本机 sessions 或 missions 源树中的空目录，以及隐藏条目过滤后为空的目录，直接忽略，不产生 `Ignored unknown session directory` 或其它 warning；非空但不包含受支持同步文件的未知目录仍按源树扫描规则处理。
+- session 根目录内没有可同步文件时，session 根目录本身不参与同步；但已识别、包含可同步文件的 session 树中的非隐藏空子目录仍属于同步内容，一侧新建时在另一侧创建，一侧删除时在另一侧删除。未知根目录以及隐藏条目过滤后为空的未知目录继续按既有规则静默忽略。
 - `cwd` 值为相对路径（包括 `.`）或空字符串时，直接保留原始字段并继续同步，不产生 warning，不将其解析为当前进程目录。结构化文件解析错误和非字符串字段类型错误仍按既有规则处理。
 - 任意字段中不符合字段语义的 `pi-session-sync:` 字符串，包括 generic 字段误含 rootless cwd URI、`cwd` 字段误含 namespaced file URI，以及其它 malformed 或无法解码 URI，均原样保留并产生有界 warning，不得抛出 `Non-cwd pi-session-sync value must be a sessions/missions file URI` 或其它 URI 语义错误。字段类型错误与 JSON/YAML 语法错误不适用本条。
 - 产品源代码、测试代码和运行时路径中不得保留任何 Git 相关实现、检查、测试夹具或错误文案；不得调用 Git 或检查 `.git`。项目文档中的历史说明和 package 元数据不属于运行时实现，但不得把历史 Git 错误写入同步 warning。
 - 本机 sessionsRoot 或 missionsRoot 中无法识别的 session directory，包括包含未知子目录、未知文件或旧 Pi session 层级的非空目录，也直接忽略，不产生 `Ignored unknown session directory`；受支持文件以外的普通文件仍按各自的普通未知文件规则处理。
 - 文件包含多个不同的 `cwd` 值时，不得因为 `Multiple cwd values in session file` 停止同步。应保留无法编码或无法归属的原始 `cwd`，对该冲突产生有界 warning，并继续处理文件中其它可转换字段；不得猜测一个 cwd 覆盖其它 cwd。
 
-### 结构化 session 字段固定范围
+### 结构化 session 字段处理（已由 v0.4.2 supersede）
 
-- 不再递归改写所有 JSON/YAML 字符串，也不把工具调用参数、工具输出、思考文本、消息正文、任意 `details` 或其它自由格式文本当作路径字段。
-- 当前扩展只对下列固定字段执行路径同步：`cwd`、`parentSession`、`fullOutputPath`、`missionPath`、`ownerSessionId`、`recordPath`、`sessionPath`、`artifactPaths`、`readFiles`、`modifiedFiles`。
-- 上述字段可以出现在 JSONL、JSON 或 Markdown YAML frontmatter 的嵌套结构中；数组字段只处理其元素。除固定字段外，即使字符串看起来像绝对路径或以 `pi-session-sync:` 开头，也必须保持原样且不得为其产生路径转换 warning。
-- `cwd` 与 `parentSession` 继续执行各自的类型、URI、范围和 hash 规则；其它固定字段按通用 sessions/missions 文件路径规则处理。字段值为普通文本、工具输出或测试代码片段时，不得因为其中包含 `pi-session-sync:`、绝对路径或 Git 历史文案而产生 warning。
-- `cwd` 与所在 session directory 不一致时，只产生 bounded warning，不得停止同步；如果该 cwd 能够编码或解码，仍按其自身路径继续转换，不得因为目录归属不一致而强制保留原值。只有无法安全编码或解码时才原样保留并 warning。
+本节关于固定字段筛选的历史规则已被 v0.4.2 覆盖；当前实现不得保留字段 allowlist 或固定字段分支，必须按 v0.4.2 递归检查所有字段。字段的路径候选判断、编码、解码、保留和诊断规则均以 v0.4.2 为准。
+
+## v0.4.2：实时诊断与递归路径字段
+
+以下规则覆盖此前关于固定路径字段及汇总输出的冲突要求：
+
+- 同步过程中，每写入一个 staging 文件、每拷贝一个文件到 `targetDir`，都必须立即输出一条信息；不能等同步汇总后才输出。
+- warning 和 error 必须在发现并处理对应 staging 文件时立即输出，而不是只在汇总中输出；每条诊断必须包含具体文件、1-based 行号、字段 key 和有界的 value（结构化语法错误也必须提供文件、行号及字段上下文，无法定位字段时使用文件级 key）。
+- mission 和 session 文件中的路径字段不再使用写死的字段 allowlist；必须移除原有固定字段筛选逻辑，递归检查 JSON、JSONL 以及 Markdown YAML frontmatter 中的所有字段。
+- local → target：对字段字符串先判断是否像路径；不像路径的值原样保留且不产生 warning/error；像路径时仅在其位于配置已配置的 portable prefix 内才编码，否则原样保留且不产生 warning/error。
+- target → local：只有以 `pi-session-sync://` 开头的字段值才作为 portable 路径候选；其它值（包括仅以 `pi-session-sync:` 开头但缺少 `//` 的值）原样保留且不产生 warning/error；带该前缀但不属于配置已配置 portable prefix、或不能合法解码的值，必须报告带完整定位信息的 error 并停止整个同步。
+- `cwd` 与 `parentSession` 的既有字段语义、URI 结构和安全校验继续适用；递归通用字段不得把普通文本、工具输出或 JSON 文本内部内容误当作路径。合法可转换路径在 target 中编码为 portable URI，target → local 时解码回本机路径；不属于 sessions/missions 文件树的、但位于已配置 portable prefix 下的绝对路径也必须使用通用 portable-name URI 编码和解码。
+- `/session-sync` 命令必须执行完整同步流程；宿主只输出同步过程中的实时 info、warning 和 error，不再在命令结束时输出汇总通知。warning 和 error 必须全部保留并显示；info 在同一个屏幕 widget 中只保留最后 5 行滚动显示，并排列在 warning/error 行之前。提供 `setWidget` 的 TUI 中只在该 widget 显示同步日志，不重复产生额外的 notify 区域；没有 widget 的 print/RPC 宿主继续使用 notify。同步返回值仍可保留汇总数据供 API 调用方使用。
+- staging 文件开始写入前必须立即输出 staging-start info；每个 staging 文件写入成功、每个文件提交到 targetDir，以及 state 文件对应阶段仍须分别实时输出信息。
+
+- 删除 `pi-session-sync-state.json` 后，下一次同步必须按无状态首次同步重新发现两棵源树中的全部受支持文件；不得由已删除 state 的历史 tombstone 或映射抑制本次文件复制。安全校验和当前扫描规则仍然适用。
+- 不额外冻结缺失或空的 target sessions/missions 子目录；双向同步继续按既有逐文件删除、tombstone 和首次同步语义处理。
+- sessions 与 missions 中的非隐藏空目录也属于同步内容：一侧创建的空目录必须在另一侧创建；一侧删除的已同步目录必须在另一侧删除。根目录、隐藏目录、符号链接和安全校验规则继续适用。
+- state manifest 使用非隐藏文件名 `pi-session-sync-state.json`，该文件只由扩展自身管理，不作为普通 session/mission 文件同步。
+- `/session-sync` 的实时输出中，warning 和 error 必须全部保留并显示；info 在同一个屏幕 widget 中滚动显示且始终只保留最后 5 行，并排列在 warning/error 行之前；不得恢复最终汇总输出。

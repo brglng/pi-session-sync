@@ -60,6 +60,7 @@
     "@earendil-works/pi-coding-agent": ">=0.84.0"
   },
   "dependencies": {
+    "@earendil-works/pi-tui": "0.84.4",
     "yaml": "^2.8.1"
   },
   "devDependencies": {
