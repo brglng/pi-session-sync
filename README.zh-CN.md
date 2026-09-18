@@ -12,6 +12,15 @@ pi install npm:@brglng/pi-session-sync
 
 需要 `@earendil-works/pi-coding-agent >=0.84.0`。
 
+如果在 `settings.json` 中直接导入本地目录，Pi 不会自动为该目录安装 npm 依赖。首次使用前，请在扩展目录执行一次：
+
+```bash
+cd /path/to/pi-session-sync
+npm install --omit=dev
+```
+
+也可以使用 `pi install /path/to/pi-session-sync` 将本地目录作为 Pi package 安装，或使用上面的 npm 安装方式。`yaml` 是 Markdown frontmatter 所需的运行时依赖。
+
 ## 配置
 
 创建全局配置文件：

@@ -12,6 +12,15 @@ pi install npm:@brglng/pi-session-sync
 
 Requires `@earendil-works/pi-coding-agent >=0.84.0`.
 
+If you load this checkout directly as a directory from `settings.json`, Pi does not install that directory’s npm dependencies automatically. Install the runtime dependencies once in the extension directory:
+
+```bash
+cd /path/to/pi-session-sync
+npm install --omit=dev
+```
+
+Alternatively, install the local directory as a Pi package with `pi install /path/to/pi-session-sync`, or use the npm installation above. The `yaml` package is a runtime dependency required for Markdown frontmatter.
+
 ## Configure
 
 Create the global configuration file:
