@@ -1630,7 +1630,7 @@ describe("source symlink following", () => {
     }
   });
 
-  it("still warns for unknown entries inside targetDir/sessions and targetDir/missions", async () => {
+  it("keeps unknown target session directories silent and preserved", async () => {
     const fixture = await makeFixture();
     const unknownSessionTree = join(fixture.targetDir, "sessions", "not-a-portable-name");
     const unknownSessionFile = join(unknownSessionTree, "session.jsonl");
@@ -1649,12 +1649,14 @@ describe("source symlink following", () => {
         machineId: "child-root-warning-machine",
         now: 51_200,
       });
-      // Unknown root entries inside the managed child roots still warn.
+      // An unknown direct target sessions entry is unmanaged foreign content:
+      // target → local must neither report nor delete it.
       expect(
         summary.warnings.some((warning) =>
           warning.includes(`Ignored unknown target session directory: ${unknownSessionTree}`),
         ),
-      ).toBe(true);
+      ).toBe(false);
+      expect(await readFile(unknownSessionFile, "utf8")).toBe("{}\n");
       expect(
         summary.warnings.some((warning) =>
           warning.includes(`Ignored unknown missions file: ${unknownMissionFile}`),

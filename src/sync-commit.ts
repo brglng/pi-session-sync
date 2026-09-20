@@ -24,13 +24,19 @@ export async function stageCopy(
 ): Promise<void> {
   const stagedPath = join(stageRoot, "copies", String(index));
   await mkdir(dirname(stagedPath), { recursive: true });
+  const deferred = action.source.deferredOutput;
   const streamed = action.source.streamedContent;
-  if (streamed === undefined) {
-    await writeFile(stagedPath, action.source.outputText, { encoding: "utf8", mode: 0o600 });
-  } else {
+  if (deferred !== undefined) {
+    // Ordinary materialized files keep only their canonical scan result until
+    // a planned copy reaches staging. Render their output now, before any
+    // destination or state write has started.
+    await deferred.writeTo(stagedPath);
+  } else if (streamed !== undefined) {
     // A streamed JSONL source was never materialized: re-emit its rewritten
     // bytes from the streamed transform instead of holding a whole-file string.
     await streamed.writeTo(stagedPath);
+  } else {
+    await writeFile(stagedPath, action.source.outputText, { encoding: "utf8", mode: 0o600 });
   }
   await utimes(stagedPath, action.source.mtimeMs / 1000, action.source.mtimeMs / 1000);
   action.stagedPath = stagedPath;

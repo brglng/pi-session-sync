@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { type FileHandle, open, readFile, stat } from "node:fs/promises";
+import { type FileHandle, open, readFile, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import {
   type Alias,
@@ -69,6 +69,16 @@ export interface TransformOptions extends Partial<PortableNameOptions> {
    * using `portableName`; missions pass this evidence map instead.
    */
   cwdEvidence?: Readonly<Record<string, string>>;
+  /**
+   * Defer whole-file output rendering (v0.5.2). A materialized (non-streamed)
+   * result then returns an empty `outputText`: `transformFile` attaches a
+   * `deferredOutput` handle that re-renders the bytes from the source on
+   * demand, while `transformFileText` only skips rendering (its callers use
+   * canonical text or metadata). The scans request this so a file that is
+   * never copied retains no output string; streamed JSONL is unaffected
+   * because it already defers its bytes.
+   */
+  deferOutput?: boolean;
 }
 
 /**
@@ -108,7 +118,18 @@ export interface ParentSessionReference {
 }
 
 export interface TransformedFile {
+  /**
+   * Whole-file transformed output text. Empty when the output is deferred:
+   * `streamedContent` (streamed JSONL, re-emitted on demand) or
+   * `deferredOutput` (ordinary materialized output rendered on demand).
+   * `transformFileText` with `deferOutput` also leaves it empty; that entry
+   * attaches no handle because its callers use canonical text or metadata.
+   */
   outputText: string;
+  /**
+   * Whole-file canonical-target text used for content comparison. Empty for
+   * streamed JSONL, whose `streamedContent.canonicalHash` is authoritative.
+   */
   canonicalText: string;
   cwdValues: string[];
   cwdPortableNames?: string[];
@@ -152,6 +173,14 @@ export interface TransformedFile {
    * session files is what makes `/session-sync` run out of memory.
    */
   streamedContent?: StreamedJsonlContent;
+  /**
+   * Set by `transformFile` when `deferOutput` requested a materialized
+   * (non-streamed) transform: `outputText` stays empty and this handle renders
+   * the whole-file output bytes on demand (staging, nested replacement replay,
+   * or an output-sensitive comparison). Never set together with
+   * `streamedContent`.
+   */
+  deferredOutput?: DeferredFileOutput;
 }
 
 /**
@@ -163,6 +192,23 @@ export interface TransformedFile {
  */
 export interface StreamedJsonlContent {
   canonicalHash: string;
+  writeTo(destinationPath: string): Promise<void>;
+}
+
+/**
+ * Deferred whole-file output for a materialized (non-streamed) transform.
+ *
+ * A scan must parse every file, verify it, and compute the canonical hash, but
+ * the rewritten output bytes are only needed when the file is actually copied.
+ * This handle captures the source path, transform mode, and the frozen
+ * resolver/options of the scan; `text()` and `writeTo()` re-read the source and
+ * re-run the same transform on demand, so a file that is never copied never
+ * renders (or retains) an output string at all.
+ */
+export interface DeferredFileOutput {
+  /** Whole-file output text, rendered on demand. */
+  text(): Promise<string>;
+  /** Write the output bytes to one staging destination. */
   writeTo(destinationPath: string): Promise<void>;
 }
 
@@ -1284,6 +1330,7 @@ interface JsonlTransformState {
 }
 
 interface JsonlRecordTransform {
+  /** Empty when output rendering is deferred: only the canonical line is produced. */
   outputLine: string;
   canonicalLine: string;
   outputChanged: boolean;
@@ -1327,6 +1374,7 @@ function transformJsonlRecord(
   line: string,
   recordIndex: number,
   state: JsonlTransformState,
+  renderOutput = true,
 ): JsonlRecordTransform {
   const { mode, resolver, namingOptions, namingConfig, filePath } = state;
   let parsed: unknown;
@@ -1407,8 +1455,10 @@ function transformJsonlRecord(
       // rewritten: reuse the original line byte-for-byte (diagnostics, if any,
       // were already collected) instead of JSON.stringify-ing the possibly
       // huge record. Canonical text falls back to the same original line
-      // whenever its own pass is also structurally unchanged.
-      const outputLine = local === structured ? line : JSON.stringify(local);
+      // whenever its own pass is also structurally unchanged. Deferred output
+      // rendering skips the output serialization entirely: only the canonical
+      // line is produced.
+      const outputLine = renderOutput ? (local === structured ? line : JSON.stringify(local)) : "";
       const canonicalNeedsSerialization =
         canonicalValue !== structured ||
         localValues.length > 0 ||
@@ -1468,7 +1518,12 @@ function transformJsonlRecord(
         : transformed;
     // See the to-local branch: unchanged records keep their original line
     // for both output and canonical text, avoiding a full reserialization.
-    const outputLine = transformed === structured ? line : JSON.stringify(transformed);
+    // Deferred output rendering skips the output serialization entirely.
+    const outputLine = renderOutput
+      ? transformed === structured
+        ? line
+        : JSON.stringify(transformed)
+      : "";
     const canonicalNeedsSerialization =
       canonicalValue !== structured ||
       transformedValues.length > 0 ||
@@ -1650,11 +1705,15 @@ async function detectJsonlLineEnding(filePath: string): Promise<"\n" | "\r\n"> {
  * canonical hash. `emit` receives each output record's bytes plus whether a
  * line terminator followed it; the caller owns the output terminator choice, so
  * the canonical hash pass never needs to probe the file's line ending.
+ * `renderOutput` mirrors the materialized transform's output deferral: the
+ * initial hash-only pass skips output serialization entirely, while the
+ * staging pass renders the bytes it emits.
  */
 async function streamJsonl(
   filePath: string,
   state: JsonlTransformState,
   emit: ((record: Buffer, hasTerminator: boolean) => Promise<void>) | undefined,
+  renderOutput: boolean,
 ): Promise<string> {
   const canonicalHash = createHash("sha256");
   let recordIndex = 0;
@@ -1694,7 +1753,12 @@ async function streamJsonl(
         `JSONL record exceeds the ${MAX_STREAMED_RECORD_BYTES} byte streaming transform limit`,
       );
     }
-    const transformed = transformJsonlRecord(record.toString("utf8"), currentIndex, state);
+    const transformed = transformJsonlRecord(
+      record.toString("utf8"),
+      currentIndex,
+      state,
+      renderOutput,
+    );
     canonicalHash.update(transformed.canonicalLine, "utf8");
     if (hasTerminator) canonicalHash.update(JSONL_LF_BYTES);
     if (emit !== undefined) {
@@ -1728,8 +1792,11 @@ async function transformJsonlStreaming(
 ): Promise<TransformedFile> {
   const state = createJsonlTransformState(mode, resolver, filePath, options);
   // The canonical hash never depends on the output line ending, so the scan
-  // pass stays a single read; only `writeTo` probes the CRLF choice.
-  const canonicalHash = await streamJsonl(filePath, state, undefined);
+  // pass stays a single read; only `writeTo` probes the CRLF choice. The scan
+  // pass is hash-only: it never renders output lines, so a large JSONL file
+  // that is never copied retains no whole-file output string and does no
+  // output serialization work (v0.5.2).
+  const canonicalHash = await streamJsonl(filePath, state, undefined, false);
   const result = createTransformedFile(
     "",
     "",
@@ -1754,12 +1821,17 @@ async function transformJsonlStreaming(
       const outputTerminator = detectedLineEnding === "\r\n" ? JSONL_CRLF_BYTES : JSONL_LF_BYTES;
       const destination = await open(destinationPath, "w", 0o600);
       try {
-        await streamJsonl(filePath, writeState, async (record, hasTerminator) => {
-          await writeJsonlChunk(destination, record, destinationPath);
-          if (hasTerminator) {
-            await writeJsonlChunk(destination, outputTerminator, destinationPath);
-          }
-        });
+        await streamJsonl(
+          filePath,
+          writeState,
+          async (record, hasTerminator) => {
+            await writeJsonlChunk(destination, record, destinationPath);
+            if (hasTerminator) {
+              await writeJsonlChunk(destination, outputTerminator, destinationPath);
+            }
+          },
+          true,
+        );
       } finally {
         await destination.close();
       }
@@ -1778,6 +1850,7 @@ function transformJsonl(
   resolver: ParentPathResolver,
   filePath: string,
   options: TransformOptions,
+  renderOutput = true,
 ): TransformedFile {
   if (text === "") {
     return createTransformedFile("", "", [], []);
@@ -1821,7 +1894,7 @@ function transformJsonl(
         );
       }
     } else {
-      const transformed = transformJsonlRecord(line, index, state);
+      const transformed = transformJsonlRecord(line, index, state, renderOutput);
       outputLine = transformed.outputLine;
       canonicalLine = transformed.canonicalLine;
       outputChanged = transformed.outputChanged;
@@ -1831,14 +1904,17 @@ function transformJsonl(
     // The join uses one fixed separator, so a line whose own terminator differs
     // from that choice forces a rebuild even when its content is byte-identical.
     // Until the first such unit the builder stays inactive, which lets the whole
-    // file return its original string when nothing changes.
+    // file return its original string when nothing changes. Deferred output
+    // rendering skips the output builder (and the per-record output
+    // serialization) entirely.
     if (
+      renderOutput &&
       !output.started &&
       (outputChanged || (hasTerminator && originalTerminator !== lineEnding))
     ) {
       output.start(text.slice(0, lineStart));
     }
-    if (output.started) {
+    if (renderOutput && output.started) {
       output.push(outputLine);
       output.push(hasTerminator ? lineEnding : "");
     }
@@ -1859,7 +1935,7 @@ function transformJsonl(
   }
 
   return createTransformedFile(
-    output.started ? output.build() : text,
+    renderOutput ? (output.started ? output.build() : text) : "",
     canonical.started ? canonical.build() : text,
     state.cwdValues,
     state.cwdPortableNames,
@@ -1879,6 +1955,7 @@ function transformJson(
   resolver: ParentPathResolver,
   filePath: string,
   options: TransformOptions,
+  renderOutput = true,
 ): TransformedFile {
   if (text.trim() === "") {
     throw fileScopedTransformError(
@@ -1958,7 +2035,7 @@ function transformJson(
     parentSessionReferences.length > 0 ||
     genericPathReferences.length > 0;
   return createTransformedFile(
-    output === structured ? text : render(output),
+    renderOutput ? (output === structured ? text : render(output)) : "",
     canonicalNeedsSerialization ? render(canonical) : text,
     cwdValues,
     cwdPortableNames,
@@ -2650,6 +2727,7 @@ function transformMarkdown(
   filePath: string,
   resolver: ParentPathResolver,
   options: TransformOptions,
+  renderOutput = true,
 ): TransformedFile {
   const frontmatter = parseFrontmatter(text);
   if (frontmatter === null) {
@@ -2661,7 +2739,7 @@ function transformMarkdown(
         "invalid YAML frontmatter: missing closing ---",
       );
     }
-    return createTransformedFile(text, text, [], []);
+    return createTransformedFile(renderOutput ? text : "", text, [], []);
   }
 
   let document: Document;
@@ -2810,7 +2888,7 @@ function transformMarkdown(
       return `${frontmatter.open}${stripped}${normalizedTrailingWhitespace}${frontmatter.close}${frontmatter.after}`;
     };
     return createTransformedFile(
-      render(outputDocument),
+      renderOutput ? render(outputDocument) : "",
       render(canonicalDocument),
       outputCwdValues,
       outputCwdPortableNames,
@@ -2868,6 +2946,41 @@ async function readBoundedStructuredText(filePath: string, limit: number): Promi
   }
 }
 
+function deferMaterializedOutput(
+  transformed: TransformedFile,
+  filePath: string,
+  mode: TransformMode,
+  resolver: ParentPathResolver,
+  options: TransformOptions,
+): TransformedFile {
+  if (!options.deferOutput || transformed.streamedContent !== undefined) return transformed;
+  const materializedOptions: TransformOptions = { ...options, deferOutput: false };
+  const materialize = (): Promise<TransformedFile> =>
+    transformFile(filePath, mode, resolver, materializedOptions);
+  const deferredOutput: DeferredFileOutput = {
+    text: async (): Promise<string> => {
+      const output = await materialize();
+      if (output.streamedContent !== undefined) {
+        throw new Error(`Deferred output became streamed while materializing: ${filePath}`);
+      }
+      return output.outputText;
+    },
+    writeTo: async (destinationPath: string): Promise<void> => {
+      const output = await materialize();
+      if (output.streamedContent !== undefined) {
+        await output.streamedContent.writeTo(destinationPath);
+      } else {
+        await writeFile(destinationPath, output.outputText, { encoding: "utf8", mode: 0o600 });
+      }
+    },
+  };
+  Object.defineProperty(transformed, "deferredOutput", {
+    value: deferredOutput,
+    enumerable: false,
+  });
+  return transformed;
+}
+
 /**
  * Transform a session file. JSONL files above
  * `LARGE_JSONL_STREAM_THRESHOLD_BYTES`, or whose size cannot be determined,
@@ -2883,6 +2996,7 @@ export async function transformFile(
   options: TransformOptions = {},
 ): Promise<TransformedFile> {
   const lowercasePath = filePath.toLowerCase();
+  const renderOutput = !options.deferOutput;
   if (lowercasePath.endsWith(".jsonl")) {
     const size = await fileSizeBytes(filePath);
     // An unknown size (failed `stat`) streams too: falling back to
@@ -2892,7 +3006,13 @@ export async function transformFile(
       return await transformJsonlStreaming(filePath, mode, resolver, options);
     }
     const text = await readFile(filePath, "utf8");
-    return transformJsonl(text, mode, resolver, filePath, options);
+    return deferMaterializedOutput(
+      transformJsonl(text, mode, resolver, filePath, options, renderOutput),
+      filePath,
+      mode,
+      resolver,
+      options,
+    );
   }
   const structured = lowercasePath.endsWith(".json") || lowercasePath.endsWith(".md");
   const structuredSize = structured ? await fileSizeBytes(filePath) : undefined;
@@ -2909,10 +3029,22 @@ export async function transformFile(
       ? await readBoundedStructuredText(filePath, LARGE_STRUCTURED_FILE_LIMIT_BYTES)
       : await readFile(filePath, "utf8");
   if (lowercasePath.endsWith(".json")) {
-    return transformJson(text, mode, resolver, filePath, options);
+    return deferMaterializedOutput(
+      transformJson(text, mode, resolver, filePath, options, renderOutput),
+      filePath,
+      mode,
+      resolver,
+      options,
+    );
   }
   if (lowercasePath.endsWith(".md")) {
-    return transformMarkdown(text, mode, filePath, resolver, options);
+    return deferMaterializedOutput(
+      transformMarkdown(text, mode, filePath, resolver, options, renderOutput),
+      filePath,
+      mode,
+      resolver,
+      options,
+    );
   }
   throw new Error(`Unsupported session file extension: ${filePath}`);
 }
@@ -2924,14 +3056,19 @@ export function transformFileText(
   resolver: ParentPathResolver,
   options: TransformOptions = {},
 ): TransformedFile {
+  // `deferOutput` is honored for in-memory transforms exactly like the
+  // file-based path: canonical text, metadata, and diagnostics are always
+  // produced, while the output bytes stay unrendered and `outputText` stays
+  // empty. Callers that need output keep the default `renderOutput = true`.
+  const renderOutput = !options.deferOutput;
   if (filePath.toLowerCase().endsWith(".jsonl")) {
-    return transformJsonl(text, mode, resolver, filePath, options);
+    return transformJsonl(text, mode, resolver, filePath, options, renderOutput);
   }
   if (filePath.toLowerCase().endsWith(".json")) {
-    return transformJson(text, mode, resolver, filePath, options);
+    return transformJson(text, mode, resolver, filePath, options, renderOutput);
   }
   if (filePath.toLowerCase().endsWith(".md")) {
-    return transformMarkdown(text, mode, filePath, resolver, options);
+    return transformMarkdown(text, mode, filePath, resolver, options, renderOutput);
   }
   throw new Error(`Unsupported session file extension: ${filePath}`);
 }

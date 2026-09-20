@@ -236,3 +236,12 @@
 
 - worker transcript 的 `text`、`argsPayload`、`usage`、`toolName`、`toolCallId`、`runId`、`recordType`、`source`、`agent`、`role`、`model`、`stopReason`、`timestamp`、`sourceEventType`、`thinkingSignature`、`isError` 和 `outputTruncated` 等内容或元数据字段不得参与递归路径改写或 canonical hash 路径归一化。
 - 真实路径形如 `<HOME>/.pi/agent/sessions/--<encoded-dir>--/<relative>` 时，local → target 必须使用 `sessions` 命名空间 URI；target → local 必须根据 portable session name 生成当前机器的 Pi `--...--` session 目录名，而不能只转换前面的 HOME/ROOT prefix。
+
+## v0.5.2
+
+### 实时扫描日志与 staging 延迟物化
+
+- `/session-sync` 必须在递归扫描目录、解析文件、执行 canonical／路径转换以及 staging 写入期间持续输出 info 日志；所有 info 均通过既有 `onEvent`／同步日志 widget 输出，与 staged、copied 日志位于同一 widget，并始终只保留最新 5 条。不得额外创建 widget、重复 notify 或恢复最终汇总通知。
+- 在完成归属、路径安全、cwd／parentSession／通用路径证据、canonical hash、tombstone、冲突、preflight 和同步决策所必需的扫描后，普通 `.json`、`.jsonl`、`.md` 文件的目标输出序列化与保留可延后到该文件实际写入 staging 时执行。未被复制的文件不得为此保留完整 output 文本。
+- 延迟物化仍必须在任何本机、target 或 state 正式写入前完成。large JSONL 的流式 staging、mtime 保留、全量 staging 后再提交、诊断及 nested label replacement 的输出语义不得改变；任何必须在决策前比较或重放的输出按需提前物化，不得以 canonical hash 替代输出字节比较。
+- target → local 扫描时，`targetDir/sessions` 直接子目录中无法解码为当前 portable session name 的普通目录属于未受管 target 内容；必须静默忽略，不进入扫描、state、目录观察或 cleanup，永远不得删除或提示。

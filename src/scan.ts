@@ -33,11 +33,13 @@ import {
   syncParentUriToPortableName,
 } from "./session-paths.ts";
 import type { DirectoryBaseline, SessionScopeState } from "./state.ts";
+import type { ScanProgressReporter } from "./sync-events.ts";
 import { forbiddenSourceRootRealPath } from "./sync-fs-checks.ts";
 import { canonicalRootUri } from "./sync-paths.ts";
 import { type ParsedLogicalKey, parseLogicalKey } from "./sync-state-core.ts";
 import {
   createParentPathResolver,
+  type DeferredFileOutput,
   fileScopedDiagnostics,
   fileScopedTransformWarning,
   type ParentPathResolver,
@@ -204,16 +206,20 @@ export interface ScannedFile {
   mtimeMs: number;
   hash: string;
   /**
-   * Whole-file transformed text. Empty when `streamedContent` is set: the
-   * file was above the streaming threshold (or its size was unknown) and the
-   * rewritten bytes are re-emitted from `streamedContent` at staging time
-   * instead of being held as one JS string for every scanned file.
+   * Whole-file transformed output text. Empty when the output bytes are
+   * deferred: either `streamedContent` is set (file above the streaming
+   * threshold or size unknown, bytes re-emitted from `streamedContent` at
+   * staging time) or `deferredOutput` is set (ordinary materialized output
+   * rendered on demand at staging time). Never held as one JS string for
+   * every scanned file.
    */
   outputText: string;
   /**
    * Whole-file canonical-target text used for content comparison. Empty when
    * `streamedContent` is set; `hash` (the canonical hash) is authoritative
-   * for streamed and materialized files alike.
+   * for streamed and materialized files alike. Deferred ordinary output still
+   * materializes this text during the scan, because content comparison and
+   * conflict decisions run before any staging write.
    */
   canonicalText: string;
   /**
@@ -222,6 +228,14 @@ export interface ScannedFile {
    * staging time (`canonicalHash` is the canonical-target hash).
    */
   streamedContent?: StreamedJsonlContent;
+  /**
+   * Materialized source output deferred until staging: `outputText` stays
+   * empty and the rewritten bytes are rendered on demand (staging, nested
+   * replacement replay, or an output-sensitive comparison). The scan still
+   * stores canonical content, mappings, references, and diagnostics needed
+   * before a copy can be planned. Never set together with `streamedContent`.
+   */
+  deferredOutput?: DeferredFileOutput;
   cwdValues: string[];
   sessionCwdPresent?: boolean;
   sessionHeaderValid?: boolean;
@@ -235,6 +249,16 @@ export interface ScannedFile {
    * file is staged into its destination tree (v0.4.2).
    */
   diagnostics?: TransformDiagnostic[];
+}
+
+/** Materialize a scan result only for a pre-decision output consumer. */
+export async function materializeScannedOutput(file: ScannedFile): Promise<string> {
+  const deferred = file.deferredOutput;
+  if (deferred === undefined) return file.outputText;
+  const outputText = await deferred.text();
+  file.outputText = outputText;
+  delete file.deferredOutput;
+  return outputText;
 }
 
 export interface SessionTree {
@@ -654,6 +678,7 @@ async function collectTreeFiles(
   followSymlinks = false,
   forbiddenSymlinkTarget: string | undefined = undefined,
   nestedTreeClaims: Map<string, NestedTreeClaim> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<{
   files: CandidateFile[];
   directories: Set<string>;
@@ -713,7 +738,15 @@ async function collectTreeFiles(
       },
       canonicalSync: (value) => canonicalRootUri(value, namingOptions),
     };
-    const transformed = await transformFile(physicalPath, mode, resolver, { namingOptions });
+    const scanSide = mode === "inspect-local" ? "local" : "target";
+    onProgress?.(`Parsing ${scanSide} session file`, logicalPath);
+    // Discovery only retains cwd/header/reference metadata; the output bytes
+    // are never used here, so the transform must not render them (v0.5.2).
+    const transformed = await transformFile(physicalPath, mode, resolver, {
+      namingOptions,
+      deferOutput: true,
+    });
+    onProgress?.(`Parsed ${scanSide} session file`, logicalPath);
     for (const warning of transformed.warnings ?? []) {
       warnings.push(fileScopedTransformWarning(logicalPath, warning));
     }
@@ -739,6 +772,8 @@ async function collectTreeFiles(
     physicalDirectory: string,
     isRoot = false,
   ): Promise<"ok" | "repeated" | "empty"> => {
+    const scanSide = mode === "inspect-local" ? "local" : "target";
+    onProgress?.(`Scanning ${scanSide} session directory`, logicalDirectory);
     if (followSymlinks) {
       let identityInfo: Awaited<ReturnType<typeof lstat>> | undefined;
       let realDir: string | undefined;
@@ -1157,6 +1192,7 @@ async function discoverTreesUnsafe(
   state: SessionScopeState | undefined = undefined,
   topLevelIgnoredSymlinks: string[] | undefined = undefined,
   _directoryBaselines: Readonly<Record<string, DirectoryBaseline>> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<CandidateTree[]> {
   let entries: string[];
   try {
@@ -1337,11 +1373,10 @@ async function discoverTreesUnsafe(
         namingOptions,
       );
       if (decoded === null) {
-        // An empty (or hidden-only) target directory is not an unknown entry:
-        // it holds nothing to ignore, so it stays silent (v0.4.1).
-        if (await hasVisibleEntries(path)) {
-          warnings.push(`Ignored unknown target session directory: ${path}`);
-        }
+        // A target sessions root entry that is not a portable session tree is
+        // foreign/unmanaged content: never descend into it, warn about it, or
+        // include it in directory observations/cleanup. It must remain on disk
+        // during target → local recovery (v0.5.2).
         continue;
       }
       // Legacy loose encodeURIComponent spellings of a portable name are
@@ -1367,6 +1402,8 @@ async function discoverTreesUnsafe(
       walkState,
       false,
       forbiddenSymlinkTarget,
+      undefined,
+      onProgress,
     );
     let realPath: string | undefined;
     const tree: CandidateTree = {
@@ -1527,6 +1564,7 @@ async function discoverTreesUnsafe(
         true,
         forbiddenSymlinkTarget,
         nestedTreeClaims,
+        onProgress,
       );
       if (collected.files.length === 0) {
         // An ignored empty/unknown-only tree must not leave a real-directory
@@ -1666,6 +1704,7 @@ async function discoverTreesUnsafe(
         true,
         forbiddenSymlinkTarget,
         nestedTreeClaims,
+        onProgress,
       );
       if (collected.files.length === 0) {
         // A root directory that is empty after dot-prefixed entries are
@@ -1759,6 +1798,7 @@ async function discoverTrees(
   state: SessionScopeState | undefined = undefined,
   topLevelIgnoredSymlinks: string[] | undefined = undefined,
   directoryBaselines: Readonly<Record<string, DirectoryBaseline>> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<CandidateTree[]> {
   try {
     return await discoverTreesUnsafe(
@@ -1772,6 +1812,7 @@ async function discoverTrees(
       state,
       topLevelIgnoredSymlinks,
       directoryBaselines,
+      onProgress,
     );
   } catch (error) {
     if (error instanceof ScanFailure || error instanceof RootUnavailableError) throw error;
@@ -1786,6 +1827,7 @@ async function collectFlatFiles(
   walkState: SymlinkWalkState = newSymlinkWalkState(),
   followSymlinks = false,
   forbiddenSymlinkTarget: string | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<{
   files: CandidateFile[];
   directories: Set<string>;
@@ -1826,9 +1868,15 @@ async function collectFlatFiles(
       },
       canonicalSync: (value) => canonicalRootUri(value, namingOptions),
     };
+    onProgress?.("Parsing local session file", logicalPath);
+    // Flat discovery only retains cwd/header/reference metadata; the output
+    // bytes are never used here, so the transform must not render them
+    // (v0.5.2).
     const transformed = await transformFile(physicalPath, "inspect-local", resolver, {
       namingOptions,
+      deferOutput: true,
     });
+    onProgress?.("Parsed local session file", logicalPath);
     for (const warning of transformed.warnings ?? []) {
       warnings.push(fileScopedTransformWarning(logicalPath, warning));
     }
@@ -1858,6 +1906,7 @@ async function collectFlatFiles(
     physicalDirectory: string,
     isRoot = false,
   ): Promise<"ok" | "repeated" | "empty"> => {
+    onProgress?.("Scanning local session directory", logicalDirectory);
     let identityInfo: Awaited<ReturnType<typeof lstat>> | undefined;
     let realDir: string;
     try {
@@ -2170,6 +2219,7 @@ async function scanFlatLocalUnsafe(
   missionsRoot: string | undefined = undefined,
   forbiddenSymlinkTarget: string | undefined = undefined,
   genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<ScanResult> {
   const collected = await collectFlatFiles(
     rootPath,
@@ -2178,6 +2228,7 @@ async function scanFlatLocalUnsafe(
     newSymlinkWalkState(),
     true,
     forbiddenSymlinkTarget,
+    onProgress,
   );
   // Stale (tombstoned or targetless) exact mappings must never seed directory
   // inference or exact lookup ahead of a current live containing-directory
@@ -2395,10 +2446,13 @@ async function scanFlatLocalUnsafe(
       namingOptions,
       missionsRoot,
     );
+    onProgress?.("Transforming local session file", candidate.absolutePath);
     const transformed = await transformFile(candidate.absolutePath, "to-target", resolver, {
       namingOptions,
       portableName: mapping.portableName,
+      deferOutput: true,
     });
+    onProgress?.("Transformed local session file", candidate.absolutePath);
     // Flat local scans propagate transformed warnings exactly like the nested
     // and missions scans, so preserved/lentient values still reach the caller
     // in SyncSummary.warnings instead of being dropped.
@@ -2428,6 +2482,9 @@ async function scanFlatLocalUnsafe(
       ...(transformed.streamedContent === undefined
         ? {}
         : { streamedContent: transformed.streamedContent }),
+      ...(transformed.deferredOutput === undefined
+        ? {}
+        : { deferredOutput: transformed.deferredOutput }),
       cwdValues: transformed.cwdValues,
       sessionCwdPresent: transformed.sessionCwdPresent ?? false,
       sessionHeaderValid: transformed.sessionHeaderValid ?? false,
@@ -2470,6 +2527,7 @@ async function scanFlatLocal(
   missionsRoot: string | undefined = undefined,
   forbiddenSymlinkTarget: string | undefined = undefined,
   genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<ScanResult> {
   const warnings: string[] = [];
   // A source root symlink that resolves into the physical targetDir tree
@@ -2568,6 +2626,7 @@ async function scanFlatLocal(
       missionsRoot,
       forbiddenSymlinkTarget,
       genericExtraMappings,
+      onProgress,
     );
   } catch (error) {
     // `collectFlatFiles` classified the flat SOURCE ROOT itself as unavailable
@@ -2625,6 +2684,7 @@ async function scanNestedSessions(
   forbiddenSymlinkTarget: string | undefined = undefined,
   genericExtraMappings: ReadonlyMap<string, LocalDirectoryMapping> | undefined = undefined,
   directoryBaselines: Readonly<Record<string, DirectoryBaseline>> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<ScanResult> {
   // A source root symlink that resolves into the physical targetDir tree
   // (including a target child CREATED during root validation, which the
@@ -2731,6 +2791,7 @@ async function scanNestedSessions(
       state,
       topLevelIgnoredSymlinks,
       directoryBaselines,
+      onProgress,
     );
   } catch (error) {
     // `discoverTreesUnsafe` classified the sessions SOURCE ROOT itself as
@@ -2858,9 +2919,14 @@ async function scanNestedSessions(
         // its scanned hash, so an unchanged medium file still matches its
         // old-label recovery hash instead of being presumed changed. A
         // materialized file yields the same canonical text as before.
+        onProgress?.("Probing tombstone recovery for target session file", file.absolutePath);
+        // The probe returns only canonical hash/text, so it must not render
+        // the output bytes it never uses (v0.5.2).
         const probe = await transformFile(file.absolutePath, "to-local", probeResolver, {
           namingOptions,
+          deferOutput: true,
         });
+        onProgress?.("Probed tombstone recovery for target session file", file.absolutePath);
         return {
           hash: probe.streamedContent?.canonicalHash ?? hashText(probe.canonicalText),
           canonicalText: probe.canonicalText,
@@ -3435,6 +3501,7 @@ async function scanNestedSessions(
         : resolver;
     const localTreeFiles: ScannedFile[] = [];
     for (const candidateFile of candidate.files) {
+      onProgress?.(`Transforming ${side} session file`, candidateFile.absolutePath);
       const transformed = await transformFile(
         candidateFile.absolutePath,
         mode,
@@ -3442,8 +3509,10 @@ async function scanNestedSessions(
         {
           namingOptions,
           ...(side === "local" ? { portableName: tree.portableName } : {}),
+          deferOutput: true,
         },
       );
+      onProgress?.(`Transformed ${side} session file`, candidateFile.absolutePath);
       checkFileCwdAttribution(
         transformed.cwdValues,
         tree.cwd,
@@ -3494,6 +3563,9 @@ async function scanNestedSessions(
         ...(transformed.streamedContent === undefined
           ? {}
           : { streamedContent: transformed.streamedContent }),
+        ...(transformed.deferredOutput === undefined
+          ? {}
+          : { deferredOutput: transformed.deferredOutput }),
         cwdValues: transformed.cwdValues,
         sessionCwdPresent: transformed.sessionCwdPresent ?? false,
         sessionHeaderValid: transformed.sessionHeaderValid ?? false,
@@ -3606,6 +3678,8 @@ async function scanNestedSessions(
 }
 
 export interface ScanOptions {
+  /** Live informational scan/transform progress wired to the sync reporter. */
+  onProgress?: ScanProgressReporter | undefined;
   /**
    * Stale flat mapping identities (see `flatMappingIdentityKey`): native
    * relative path plus stale portable label. Only the exact stale identity is
@@ -3691,6 +3765,7 @@ export async function scanSessions(
       ? namingOptions
       : localSessionsRootOrNamingOptions;
   const normalizedNamingOptions = normalizePortableNameOptions(effectiveNamingOptions);
+  options.onProgress?.(`Scanning ${side} sessions tree`, rootPath);
   if (side === "local" && layout === "flat") {
     return scanFlatLocal(
       rootPath,
@@ -3700,6 +3775,7 @@ export async function scanSessions(
       options.missionsRoot,
       options.forbiddenSymlinkTarget,
       options.genericExtraMappings,
+      options.onProgress,
     );
   }
   const warnings: string[] = [];
@@ -3722,6 +3798,7 @@ export async function scanSessions(
       options.forbiddenSymlinkTarget,
       options.genericExtraMappings,
       options.directoryBaselines,
+      options.onProgress,
     );
   } catch (error) {
     if (error instanceof ScanFailure) throw error;

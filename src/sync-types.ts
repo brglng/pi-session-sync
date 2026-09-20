@@ -66,11 +66,11 @@ export interface SyncOptions {
   activeSessionDir?: string;
   now?: number;
   /**
-   * Realtime event sink (v0.4.2). Called for every staged file write, every
-   * committed copy, and every diagnostic as it is discovered, so a host can
-   * report progress while the sync runs instead of only at the end. The
-   * aggregated `SyncSummary.warnings`/`.errors` stay available for callers
-   * that pass no sink.
+   * Realtime event sink. Called for recursive scan, parse, transform, staging,
+   * commit-copy, and diagnostic progress so a host can report the whole sync
+   * while it runs instead of only at the end. The aggregated
+   * `SyncSummary.warnings`/`.errors` stay available for callers that pass no
+   * sink.
    */
   onEvent?: SyncEventSink;
 }

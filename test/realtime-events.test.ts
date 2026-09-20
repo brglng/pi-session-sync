@@ -4,7 +4,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { syncSessions } from "../src/sync.ts";
+import { portableNameKeyIdentity } from "../src/portable-name.ts";
+import { scanSessions } from "../src/scan.ts";
+import { STATE_FILE_NAME, syncSessions } from "../src/sync.ts";
 import { formatSyncEvent, STAGING_EVENT_KEY, type SyncEvent } from "../src/sync-events.ts";
 import { cleanup, makeFixture } from "./sync-fixture.ts";
 
@@ -49,6 +51,16 @@ describe("realtime sync events and located diagnostics", () => {
         onEvent: (event) => events.push(event),
       });
       expect(summary.copied).toBe(1);
+      const firstStaging = events.findIndex((event) => event.message.startsWith("Staging "));
+      const scanEvents = events.filter(
+        (event) =>
+          event.message.startsWith("Scanning ") || event.message.startsWith("Transforming "),
+      );
+      expect(scanEvents.length > 0).toBe(true);
+      expect(
+        events.findIndex((event) => event.message.startsWith("Scanning local sessions tree")),
+      ).toBe(0);
+      expect(firstStaging).toBeGreaterThan(0);
       const targetFile = join(fixture.targetDir, "sessions", fixture.portableName, "session.jsonl");
       const staged = events.filter(
         (event) =>
@@ -166,6 +178,57 @@ describe("realtime sync events and located diagnostics", () => {
       expect(message).toContain("recordPath");
       expect(message).toContain("not a current-format name of a configured portable prefix");
       expect(message).toContain(undecodable);
+    } finally {
+      await cleanup(fixture.root);
+    }
+  });
+
+  it("reports live progress while a tombstone recovery probe re-reads a target file", async () => {
+    const fixture = await makeFixture();
+    const events: SyncEvent[] = [];
+    try {
+      const targetTree = join(fixture.targetDir, "sessions", fixture.portableName);
+      const targetFile = join(targetTree, "session.jsonl");
+      await mkdir(targetTree, { recursive: true });
+      await writeFile(
+        targetFile,
+        `${JSON.stringify({
+          type: "session",
+          id: "s1",
+          cwd: `pi-session-sync://${fixture.portableName}`,
+        })}\n`,
+      );
+      const key = `sessions/${portableNameKeyIdentity(fixture.portableName)}/session.jsonl`;
+      const scan = await scanSessions(
+        join(fixture.targetDir, "sessions"),
+        "target",
+        { directories: {}, flatFiles: {} },
+        STATE_FILE_NAME,
+        "nested",
+        fixture.sessionsRoot,
+        undefined,
+        {
+          // A post-cutoff file with a non-null recovery hash forces the
+          // old-label recovery probe to re-read the target file.
+          tombstonedFiles: new Map([[key, { at: 1, recoveryHash: "0".repeat(64) }]]),
+          onProgress: (message, file) => {
+            events.push({
+              level: "info",
+              message,
+              location: { file, line: 1, key: "<scan>" },
+            });
+          },
+        },
+      );
+      expect(scan.files.size).toBe(1);
+      const probeEvents = events.filter((event) => event.message.includes("tombstone recovery"));
+      // The probe runs once (its result is cached for the whole scan), and both
+      // its start and its completion are reported with the concrete file.
+      expect(probeEvents.map((event) => event.message)).toEqual([
+        "Probing tombstone recovery for target session file",
+        "Probed tombstone recovery for target session file",
+      ]);
+      expect(probeEvents.every((event) => event.location?.file === targetFile)).toBe(true);
     } finally {
       await cleanup(fixture.root);
     }

@@ -62,6 +62,24 @@ export interface TransformDiagnostic {
 export const STAGING_EVENT_KEY = "<staging>";
 
 /**
+ * Marker key for informational scan-progress events (v0.5.2): one event per
+ * recursive directory walk and one start/end pair per file parse/transform,
+ * published while a scan walks a source or target tree and before any staging
+ * write exists. Hosts distinguish the scan phase by the event message; the key
+ * keeps the located-event shape consistent with staging and copy progress.
+ */
+export const SCAN_EVENT_KEY = "<scan>";
+
+/**
+ * Progress callback a scan calls while it walks a tree and transforms files:
+ * one informational message plus the concrete path it concerns. The sync wires
+ * it to the same realtime reporter as staging and copy progress, so scan,
+ * parse, and transform work is visible live instead of only after the scan
+ * finishes.
+ */
+export type ScanProgressReporter = (message: string, file: string) => void;
+
+/**
  * Marker key spelling reserved for informational commit-copy events. Published
  * copy events currently carry the copied file's logical key (the same spelling
  * the post-success staged event uses), so hosts distinguish the copy phase by

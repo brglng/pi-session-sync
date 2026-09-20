@@ -12,6 +12,7 @@ import {
 } from "./portable-name.ts";
 import {
   flatMappingIdentityKey,
+  materializeScannedOutput,
   ScanFailure,
   type ScanResult,
   scanSessions,
@@ -64,6 +65,7 @@ import {
 import {
   FILE_LEVEL_DIAGNOSTIC_KEY,
   RealtimeSyncReporter,
+  SCAN_EVENT_KEY,
   STAGING_EVENT_KEY,
 } from "./sync-events.ts";
 import {
@@ -616,6 +618,10 @@ async function syncSessionsInternal(
   trustedRoots: ValidatedSyncRoots | undefined,
 ): Promise<SyncSummary> {
   const reporter = new RealtimeSyncReporter(options.onEvent);
+  const scanProgress =
+    options.onEvent === undefined
+      ? undefined
+      : (message: string, file: string): void => reporter.info(message, file, SCAN_EVENT_KEY);
   if (options.now !== undefined && !Number.isFinite(options.now)) {
     throw new SyncFailure("Sync timestamp must be a finite number", []);
   }
@@ -864,6 +870,7 @@ async function syncSessionsInternal(
         lookupExclusions: staleFlatExactMappings,
         ...(missionsRoot === undefined ? {} : { missionsRoot }),
         forbiddenSymlinkTarget: ctx.physicalTargetDir,
+        onProgress: scanProgress,
         ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
         ...(initialGenericExtraMappings.size === 0
           ? {}
@@ -897,6 +904,7 @@ async function syncSessionsInternal(
           lookupExclusions: staleFlatExactMappings,
           ...(missionsRoot === undefined ? {} : { missionsRoot }),
           forbiddenSymlinkTarget: ctx.physicalTargetDir,
+          onProgress: scanProgress,
           ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
           ...(initialGenericExtraMappings.size === 0
             ? {}
@@ -937,6 +945,7 @@ async function syncSessionsInternal(
           lookupExclusions: staleFlatExactMappings,
           ...(missionsRoot === undefined ? {} : { missionsRoot }),
           forbiddenSymlinkTarget: ctx.physicalTargetDir,
+          onProgress: scanProgress,
           ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
           ...(initialGenericExtraMappings.size === 0
             ? {}
@@ -1090,6 +1099,7 @@ async function syncSessionsInternal(
         lookupExclusions: staleFlatExactMappings,
         ...(missionsRoot === undefined ? {} : { missionsRoot }),
         forbiddenSymlinkTarget: ctx.physicalTargetDir,
+        onProgress: scanProgress,
         ...(targetLookupExtraMappings === undefined
           ? {}
           : { lookupExtraMappings: targetLookupExtraMappings }),
@@ -1160,13 +1170,14 @@ async function syncSessionsInternal(
           );
         }
       }
-      ctx.staleNestedTargetKeys = staleNestedTargetKeysForReplacement(
+      ctx.staleNestedTargetKeys = await staleNestedTargetKeysForReplacement(
         stateScope,
         targetScan,
         initialLocalScan,
         state,
         hadState,
         ctx,
+        scanProgress,
       );
       if (ctx.nestedTombstoneConflicts.size > 0) {
         // A post-tombstone old-label file with changed content can never be
@@ -1199,6 +1210,7 @@ async function syncSessionsInternal(
         initialLocalScan,
         liveNestedTreeMappings,
         ctx,
+        scanProgress,
       );
       liveTargetTreeMappingsForDecisions = liveNestedTreeMappings;
     }
@@ -1778,6 +1790,7 @@ async function syncSessionsInternal(
             lookupExclusions: staleFlatExactMappings,
             ...(missionsRoot === undefined ? {} : { missionsRoot }),
             forbiddenSymlinkTarget: ctx.physicalTargetDir,
+            onProgress: scanProgress,
             ...(state.directories === undefined ? {} : { directoryBaselines: state.directories }),
             ...(rescanGenericExtraMappings.size === 0
               ? {}
@@ -1794,7 +1807,7 @@ async function syncSessionsInternal(
       }
     }
     if (ctx.layout === "nested") {
-      await reclassifyStaleNestedLocalFiles(localScan, state, ctx);
+      await reclassifyStaleNestedLocalFiles(localScan, state, ctx, scanProgress);
       if (ctx.nestedTombstoneConflicts.size > 0) {
         // A local stale file that reappeared strictly after its tombstone with
         // changed content while label adoption moved its key must never be
@@ -1872,6 +1885,7 @@ async function syncSessionsInternal(
             lookupExclusions: staleFlatExactMappings,
             ...(missionsRoot === undefined ? {} : { missionsRoot }),
             forbiddenSymlinkTarget: ctx.physicalTargetDir,
+            onProgress: scanProgress,
             ...(refreshedLookupExtraMappings === undefined
               ? {}
               : { lookupExtraMappings: refreshedLookupExtraMappings }),
@@ -2012,6 +2026,7 @@ async function syncSessionsInternal(
             lookupExclusions: supersededExclusions,
             ...(missionsRoot === undefined ? {} : { missionsRoot }),
             forbiddenSymlinkTarget: ctx.physicalTargetDir,
+            onProgress: scanProgress,
             ...(supersededLookupExtraMappings === undefined
               ? {}
               : { lookupExtraMappings: supersededLookupExtraMappings }),
@@ -2427,6 +2442,9 @@ async function syncSessionsInternal(
           const directoryMappings = new Map(Object.entries(directories));
           for (const [key, source] of ctx.nestedReplacementSources) {
             const parsed = parseLogicalKey(key, ctx.namingOptions);
+            scanProgress?.("Materializing nested replacement file", source.absolutePath);
+            await materializeScannedOutput(source);
+            scanProgress?.("Materialized nested replacement file", source.absolutePath);
             const replacementDecision = nestedReplacementDecision(
               key,
               source,
@@ -2434,6 +2452,7 @@ async function syncSessionsInternal(
               parsed.portableName,
               directoryMappings,
               ctx,
+              scanProgress,
             );
             const existingIndex = decisions.findIndex((decision) => decision.key === key);
             if (existingIndex < 0) decisions.push(replacementDecision);
@@ -2875,6 +2894,8 @@ async function syncSessionsInternal(
           missionPassOneResolver,
           true,
           ctx.physicalTargetDir,
+          undefined,
+          scanProgress,
         );
         // Preserve the successful local scan's warnings BEFORE the target
         // scan: a target scan failure must still surface the local scan's
@@ -2892,6 +2913,8 @@ async function syncSessionsInternal(
           missionPassOneResolver,
           false,
           ctx.physicalTargetDir,
+          undefined,
+          scanProgress,
         );
         // Derive parent-only session directory mappings from the scanned
         // mission content on BOTH sides and seed them back into the resolver.
@@ -2972,6 +2995,7 @@ async function syncSessionsInternal(
                 true,
                 ctx.physicalTargetDir,
                 missionCwdEvidenceByKey,
+                scanProgress,
               );
         if (missionLocalScan !== firstMissionLocalScan) {
           // The rescan's warnings were not yet surfaced; the first scan's

@@ -6,7 +6,7 @@ import {
   defaultSessionDirName,
   type PortableNameOptions,
 } from "./portable-name.ts";
-import type { ScannedFile, ScanResult } from "./scan.ts";
+import { materializeScannedOutput, type ScannedFile, type ScanResult } from "./scan.ts";
 import { isSyncUri, nativeNameIdentity, syncParentUriToLocalPath } from "./session-paths.ts";
 import type { StateEntry, StateScope, SyncState } from "./state.ts";
 import { isPostTombstoneChangedContent } from "./sync-decision-core.ts";
@@ -57,11 +57,21 @@ function scannedCanonicalContentDiffers(first: ScannedFile, second: ScannedFile)
  * available content identity, and both files are compared in the same target
  * rendering, so the hash comparison stays meaningful.
  */
-function scannedOutputContentDiffers(first: ScannedFile, second: ScannedFile): boolean {
+async function scannedOutputContentDiffers(
+  first: ScannedFile,
+  second: ScannedFile,
+  onProgress: ((message: string, file: string) => void) | undefined,
+): Promise<boolean> {
   if (first.streamedContent !== undefined || second.streamedContent !== undefined) {
     return first.hash !== second.hash;
   }
-  return first.outputText !== second.outputText;
+  onProgress?.("Materializing target session file for comparison", first.absolutePath);
+  const firstOutput = await materializeScannedOutput(first);
+  onProgress?.("Materialized target session file for comparison", first.absolutePath);
+  onProgress?.("Materializing target session file for comparison", second.absolutePath);
+  const secondOutput = await materializeScannedOutput(second);
+  onProgress?.("Materialized target session file for comparison", second.absolutePath);
+  return firstOutput !== secondOutput;
 }
 
 export function nestedFileMatchesMapping(
@@ -521,14 +531,15 @@ export function liveTargetTreeMappings(
 }
 
 /** Retire persisted-label files when target has adopted another label for same CWD. */
-export function staleNestedTargetKeysForReplacement(
+export async function staleNestedTargetKeysForReplacement(
   stateScope: StateScope,
   targetScan: ScanResult,
   localScan: ScanResult | undefined,
   state: SyncState,
   hadState: boolean,
   ctx: DecisionContext,
-): Set<string> {
+  onProgress: ((message: string, file: string) => void) | undefined = undefined,
+): Promise<Set<string>> {
   const stale = new Set<string>();
   const treesByLocalName = new Map<string, ScanResult["trees"]>();
   for (const tree of targetScan.trees) {
@@ -717,13 +728,17 @@ export function staleNestedTargetKeysForReplacement(
           retireOldTargetKey(file.key);
           continue;
         }
-        const equalMtimeContentDiffers = candidates.some(
-          (candidate) =>
-            candidate.mtimeMs === file.mtimeMs &&
-            (candidate.side === "local"
-              ? scannedCanonicalContentDiffers(candidate, file)
-              : scannedOutputContentDiffers(candidate, file)),
-        );
+        const equalMtimeContentDiffers = (
+          await Promise.all(
+            candidates
+              .filter((candidate) => candidate.mtimeMs === file.mtimeMs)
+              .map((candidate) =>
+                candidate.side === "local"
+                  ? scannedCanonicalContentDiffers(candidate, file)
+                  : scannedOutputContentDiffers(candidate, file, onProgress),
+              ),
+          )
+        ).some(Boolean);
         if (equalMtimeContentDiffers) {
           ctx.nestedReplacementConflicts.add(newKey);
           retireOldTargetKey(file.key);
@@ -806,6 +821,7 @@ export function nestedReplacementDecision(
   portableName: string,
   directoryMappings: ReadonlyMap<string, string>,
   ctx: DecisionContext,
+  onProgress?: (message: string, file: string) => void,
 ): FileDecision {
   const mappings = new Map(directoryMappings);
   const decoded = decodePortableSessionDirName(portableName, ctx.namingOptions);
@@ -887,9 +903,11 @@ export function nestedReplacementDecision(
       `Cannot replay a streamed session file during nested label replacement: ${source.absolutePath}`,
     );
   }
+  const sourceOutputText = source.outputText;
+  onProgress?.("Replaying nested replacement session file", source.absolutePath);
   const transformed = transformFileText(
     source.absolutePath,
-    source.outputText,
+    sourceOutputText,
     "to-target",
     resolver,
     {
@@ -897,6 +915,7 @@ export function nestedReplacementDecision(
       portableName,
     },
   );
+  onProgress?.("Replayed nested replacement session file", source.absolutePath);
   // Markdown never rewrites parentSession output bytes, so the replay keeps
   // every referenced URI untouched and never needs resolver.localToSync to
   // consume those references. JSONL output carries the locally rewritten
@@ -939,7 +958,7 @@ export function nestedReplacementDecision(
   };
   const localSource: ScannedFile = {
     ...targetSource,
-    outputText: source.outputText,
+    outputText: sourceOutputText,
     parentSessionReferences: targetSource.parentSessionReferences,
   };
   const stateSnapshot = { hash: transformedHash, mtimeMs: source.mtimeMs };
@@ -985,6 +1004,7 @@ export async function retargetLiveNestedTargetParentEvidence(
   localScan: ScanResult | undefined,
   liveTreeMappings: ReadonlyMap<string, string>,
   ctx: DecisionContext,
+  onProgress?: (message: string, file: string) => void,
 ): Promise<void> {
   const evidence = new Map<string, string>();
   const ambiguous = new Set<string>();
@@ -1048,9 +1068,12 @@ export async function retargetLiveNestedTargetParentEvidence(
     // `transformFile` so a streamed file refreshes its evidence exactly like a
     // materialized one does.
     try {
+      onProgress?.("Retargeting target session file", file.absolutePath);
       const transformed = await transformFile(file.absolutePath, "to-local", resolver, {
         namingOptions: ctx.namingOptions,
+        deferOutput: true,
       });
+      onProgress?.("Retargeted target session file", file.absolutePath);
       file.outputText = transformed.outputText;
       file.canonicalText = transformed.canonicalText;
       file.hash = transformed.streamedContent?.canonicalHash ?? hashText(transformed.canonicalText);
@@ -1058,6 +1081,11 @@ export async function retargetLiveNestedTargetParentEvidence(
         delete file.streamedContent;
       } else {
         file.streamedContent = transformed.streamedContent;
+      }
+      if (transformed.deferredOutput === undefined) {
+        delete file.deferredOutput;
+      } else {
+        file.deferredOutput = transformed.deferredOutput;
       }
       file.cwdValues = transformed.cwdValues;
       file.sessionCwdPresent = transformed.sessionCwdPresent ?? false;

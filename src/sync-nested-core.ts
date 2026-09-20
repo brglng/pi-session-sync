@@ -147,6 +147,7 @@ export async function oldLabelCanonicalTextForLocalFile(
   localName: string,
   ctx: DecisionContext,
   localScan?: ScanResult,
+  onProgress?: (message: string, file: string) => void,
 ): Promise<string | undefined> {
   try {
     // A streamed file has no materialized text to re-canonicalize under the
@@ -182,10 +183,15 @@ export async function oldLabelCanonicalTextForLocalFile(
       undefined,
       ctx.namingOptions,
     );
+    onProgress?.("Recanonicalizing stale local session file", local.absolutePath);
+    // Only the canonical text is returned, so the output bytes are never
+    // rendered here (v0.5.2).
     const transformed = transformFileText(local.absolutePath, text, "to-target", resolver, {
       namingOptions: ctx.namingOptions,
       portableName: oldPortableName,
+      deferOutput: true,
     });
+    onProgress?.("Recanonicalized stale local session file", local.absolutePath);
     return transformed.canonicalText;
   } catch {
     return undefined;
@@ -196,6 +202,7 @@ export async function reclassifyStaleNestedLocalFiles(
   localScan: ScanResult,
   state: SyncState,
   ctx: DecisionContext,
+  onProgress?: (message: string, file: string) => void,
 ): Promise<void> {
   for (const [key, entry] of Object.entries(state.entries)) {
     const tombstone = entry.tombstone;
@@ -294,6 +301,7 @@ export async function reclassifyStaleNestedLocalFiles(
           localName,
           ctx,
           localScan,
+          onProgress,
         );
         if (
           oldLabelCanonicalText === undefined ||

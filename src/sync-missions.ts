@@ -14,6 +14,7 @@ import {
 import type { StateEntry } from "./state.ts";
 import { restoreDecisionState } from "./sync-commit.ts";
 import { resolveExistingEntry, resolveInitialEntry } from "./sync-decision-core.ts";
+import type { ScanProgressReporter } from "./sync-events.ts";
 import { forbiddenSourceRootRealPath, preflightDestination } from "./sync-fs-checks.ts";
 import { mappingForNativeName, nativeCompatiblePortableMappings } from "./sync-native.ts";
 import {
@@ -162,6 +163,7 @@ export async function scanMissionsTree(
   followSymlinks: boolean,
   forbiddenSymlinkTarget: string | undefined = undefined,
   evidenceForKey: ReadonlyMap<string, Readonly<Record<string, string>>> | undefined = undefined,
+  onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<MissionScan> {
   const warnings: string[] = [];
   const files = new Map<string, ScannedFile>();
@@ -172,6 +174,7 @@ export async function scanMissionsTree(
   const ignoredTargetSymlinkPaths = new Set<string>();
   const rootPathResolved = resolve(rootPath);
   const modeForFile = side === "local" ? "to-target" : "to-local";
+  onProgress?.(`Scanning ${side} missions tree`, rootPathResolved);
   // A LOCAL missions root that EXISTS but cannot be resolved or read is
   // UNAVAILABLE (symlink cycle / EACCES): freeze the tree with a root-specific
   // warning instead of aborting the safe sessions sync. Only the root itself is
@@ -333,10 +336,13 @@ export async function scanMissionsTree(
     }
     const key = `${MISSIONS_LOGICAL_KEY_PREFIX}${nativeNameIdentity(relativePath)}`;
     const perFileEvidence = evidenceForKey?.get(key);
+    onProgress?.(`Transforming ${side} missions file`, logicalPath);
     const transformed = await transformFile(physicalPath, modeForFile, resolver, {
       namingOptions,
       ...(perFileEvidence === undefined ? {} : { cwdEvidence: perFileEvidence }),
+      deferOutput: true,
     });
+    onProgress?.(`Transformed ${side} missions file`, logicalPath);
     for (const warning of transformed.warnings ?? []) {
       warnings.push(fileScopedTransformWarning(logicalPath, warning));
     }
@@ -382,6 +388,9 @@ export async function scanMissionsTree(
       ...(transformed.streamedContent === undefined
         ? {}
         : { streamedContent: transformed.streamedContent }),
+      ...(transformed.deferredOutput === undefined
+        ? {}
+        : { deferredOutput: transformed.deferredOutput }),
       cwdValues: transformed.cwdValues,
       sessionCwdPresent: transformed.sessionCwdPresent ?? false,
       sessionHeaderValid: transformed.sessionHeaderValid ?? false,
@@ -403,6 +412,7 @@ export async function scanMissionsTree(
     physicalDirectory: string,
     isRoot = false,
   ): Promise<void> => {
+    onProgress?.(`Scanning ${side} missions directory`, logicalDirectory);
     knownDirectories.add(logicalDirectory);
     if (followSymlinks) {
       let info: Awaited<ReturnType<typeof lstat>> | undefined;
