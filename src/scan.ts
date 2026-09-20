@@ -3410,12 +3410,35 @@ async function scanNestedSessions(
     const mode: TransformMode = side === "local" ? "to-target" : "to-local";
     const candidateIsTombstoneOnlyTree =
       side === "target" && layout === "nested" && (await isTombstoneOnlyTree(candidate));
+    const treeLocalName = side === "target" ? defaultSessionDirName(tree.cwd) : tree.rootName;
+    // A generic field may name this tree's Pi session directory before the
+    // shared mapping table has retained evidence for it. Keep the current
+    // tree's own mapping as a narrow fallback so its `--...--` segment is
+    // converted to the sessions URI instead of falling back to a rootless
+    // HOME/ROOT path or being preserved as an unmapped absolute value.
+    const treeResolver =
+      layout === "nested" && !candidateIsTombstoneOnlyTree
+        ? createParentPathResolver(
+            side === "target" ? localSessionsRoot : rootPath,
+            (localName) => {
+              const existing = mappingLookup(localName);
+              if (existing !== undefined) return { portableName: existing.portableName };
+              return sameNativeName(localName, treeLocalName)
+                ? { portableName: tree.portableName }
+                : undefined;
+            },
+            layout,
+            undefined,
+            namingOptions,
+            missionsRoot,
+          )
+        : resolver;
     const localTreeFiles: ScannedFile[] = [];
     for (const candidateFile of candidate.files) {
       const transformed = await transformFile(
         candidateFile.absolutePath,
         mode,
-        candidateIsTombstoneOnlyTree ? corpseResolver : resolver,
+        candidateIsTombstoneOnlyTree ? corpseResolver : treeResolver,
         {
           namingOptions,
           ...(side === "local" ? { portableName: tree.portableName } : {}),

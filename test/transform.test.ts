@@ -781,6 +781,75 @@ describe("session file transformation", () => {
     );
     expect(messageResult.warnings ?? []).toEqual([]);
 
+    // Worker transcript previews are tool content, not path metadata. Keep the
+    // field byte-identical even when its value happens to name a mapped session
+    // path.
+    const argsPreviewPath = join(sessionsRoot, localName, "preview.jsonl");
+    const workerTranscriptRecord = {
+      version: 1,
+      recordType: "tool_start",
+      source: "async",
+      runId: "run-id",
+      agent: "worker",
+      childIndex: 0,
+      cwd,
+      ts: 1,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      sourceEventType: "tool_execution_start",
+      toolName: argsPreviewPath,
+      text: argsPreviewPath,
+      argsPreview: argsPreviewPath,
+      argsPayload: JSON.stringify({ path: argsPreviewPath }),
+      usage: { path: argsPreviewPath },
+      isError: false,
+      outputTruncated: false,
+    };
+    const argsPreviewInput = `${JSON.stringify(workerTranscriptRecord)}\n`;
+    const argsPreviewResult = transformFileText(
+      "worker-transcript.jsonl",
+      argsPreviewInput,
+      "to-target",
+      resolver,
+    );
+    const workerTranscriptOutput = JSON.parse(
+      argsPreviewResult.outputText,
+    ) as typeof workerTranscriptRecord;
+    expect(workerTranscriptOutput.cwd).toBe(`pi-session-sync://${portableName}`);
+    expect(workerTranscriptOutput.toolName).toBe(argsPreviewPath);
+    expect(workerTranscriptOutput.text).toBe(argsPreviewPath);
+    expect(workerTranscriptOutput.argsPreview).toBe(argsPreviewPath);
+    expect(workerTranscriptOutput.argsPayload).toBe(workerTranscriptRecord.argsPayload);
+    expect(workerTranscriptOutput.usage).toEqual(workerTranscriptRecord.usage);
+    expect(argsPreviewResult.canonicalText).toBe(argsPreviewResult.outputText);
+    expect(argsPreviewResult.warnings ?? []).toEqual([]);
+
+    {
+      const sessionPath = join(sessionsRoot, localName, "subagent-artifacts");
+      const fallbackResolver = createParentPathResolver(
+        sessionsRoot,
+        () => undefined,
+        "nested",
+        { portableName },
+      );
+      const input = `${JSON.stringify({ sessionPath })}\n`;
+      const forward = transformFileText(
+        "session-directory.jsonl",
+        input,
+        "to-target",
+        fallbackResolver,
+      );
+      expect(JSON.parse(forward.outputText).sessionPath).toBe(
+        `pi-session-sync://sessions/${portableName}/subagent-artifacts`,
+      );
+      const backward = transformFileText(
+        "session-directory.jsonl",
+        forward.outputText,
+        "to-local",
+        fallbackResolver,
+      );
+      expect(JSON.parse(backward.outputText).sessionPath).toBe(sessionPath);
+    }
+
     // v0.4.2: a targeting value that begins with the exact candidate prefix but
     // cannot be legally decoded is a located file error from target content and
     // stays silent on local source.

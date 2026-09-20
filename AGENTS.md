@@ -227,3 +227,12 @@
 ### 会话内容与工具内容不参与路径改写
 
 - 已知的对话和工具内容子树，包括 Pi `message` 的内容以及工具参数、结果，属于内容而不是路径元数据；必须原样保留，不进行 URI 或路径检查。上述子树之外的实际路径字段仍需递归检查。
+
+## v0.5.1
+
+### Worker transcript 元数据与 session 目录路径
+
+- JSONL worker transcript 记录中的 `argsPreview` 属于工具参数预览内容，不是路径元数据；local → target、target → local 以及 canonical hash 均必须原样保留该字段，不得进行 URI 或路径改写。
+
+- worker transcript 的 `text`、`argsPayload`、`usage`、`toolName`、`toolCallId`、`runId`、`recordType`、`source`、`agent`、`role`、`model`、`stopReason`、`timestamp`、`sourceEventType`、`thinkingSignature`、`isError` 和 `outputTruncated` 等内容或元数据字段不得参与递归路径改写或 canonical hash 路径归一化。
+- 真实路径形如 `<HOME>/.pi/agent/sessions/--<encoded-dir>--/<relative>` 时，local → target 必须使用 `sessions` 命名空间 URI；target → local 必须根据 portable session name 生成当前机器的 Pi `--...--` session 目录名，而不能只转换前面的 HOME/ROOT prefix。

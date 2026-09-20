@@ -443,6 +443,8 @@ interface VisitContext {
   line: number;
   /** Dotted/indexed field path of the value being visited. */
   keyPath: string;
+  /** Whether this JSONL record uses the worker-transcript envelope. */
+  workerTranscript?: boolean;
   /**
    * Markdown YAML frontmatter source and its 1-based first line, used to
    * locate a diagnostic at the exact line of the node it belongs to. Unset for
@@ -984,6 +986,47 @@ function rewriteRecursivePathValue(value: string, context: VisitContext): string
   }
 }
 
+const WORKER_TRANSCRIPT_NON_PATH_KEYS = new Set([
+  "version",
+  "recordType",
+  "source",
+  "runId",
+  "agent",
+  "childIndex",
+  "ts",
+  "timestamp",
+  "sourceEventType",
+  "role",
+  "text",
+  "message",
+  "thinking",
+  "thinkingSignature",
+  "model",
+  "stopReason",
+  "usage",
+  "toolCallId",
+  "toolName",
+  "toolInput",
+  "toolOutput",
+  "argsPreview",
+  "argsPayload",
+  "isError",
+  "outputTruncated",
+]);
+
+function isWorkerTranscriptRecord(value: StructuredValue): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.version === "number" &&
+    (value.recordType === "message" ||
+      value.recordType === "tool_start" ||
+      value.recordType === "tool_end") &&
+    typeof value.source === "string" &&
+    typeof value.runId === "string" &&
+    typeof value.sourceEventType === "string"
+  );
+}
+
 function visitValue(value: StructuredValue, context: VisitContext, key?: string): StructuredValue {
   const { mode, cwdValues, cwdPortableNames, namingOptions, portableName } = context;
   // Pi conversation records contain arbitrary user text and tool arguments
@@ -995,7 +1038,9 @@ function visitValue(value: StructuredValue, context: VisitContext, key?: string)
     key === "toolCall" ||
     key === "toolResult" ||
     key === "toolInput" ||
-    key === "toolOutput"
+    key === "toolOutput" ||
+    key === "argsPreview" ||
+    (context.workerTranscript && key !== undefined && WORKER_TRANSCRIPT_NON_PATH_KEYS.has(key))
   ) {
     return value;
   }
@@ -1315,6 +1360,7 @@ function transformJsonlRecord(
     // record with no rewritten allowlisted field is detected below and its
     // original line is reused instead of reserializing a large object.
     const structured = parsed as StructuredValue;
+    const workerTranscript = isWorkerTranscriptRecord(structured);
     if (mode === "to-local") {
       const localValues: string[] = [];
       const localPortableNames: string[] = [];
@@ -1335,6 +1381,7 @@ function transformJsonlRecord(
         file: filePath,
         line: recordIndex + 1,
         keyPath: "",
+        workerTranscript,
       });
       const canonicalValues: string[] = [];
       const canonicalPortableNames: string[] = [];
@@ -1354,6 +1401,7 @@ function transformJsonlRecord(
         file: filePath,
         line: recordIndex + 1,
         keyPath: "",
+        workerTranscript,
       });
       // Identity equality with the parsed record means no path value was
       // rewritten: reuse the original line byte-for-byte (diagnostics, if any,
@@ -1395,6 +1443,7 @@ function transformJsonlRecord(
       file: filePath,
       line: recordIndex + 1,
       keyPath: "",
+      workerTranscript,
     });
     const canonicalValue =
       mode === "to-target"
@@ -1414,6 +1463,7 @@ function transformJsonlRecord(
             file: filePath,
             line: recordIndex + 1,
             keyPath: "",
+            workerTranscript,
           })
         : transformed;
     // See the to-local branch: unchanged records keep their original line
