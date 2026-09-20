@@ -17,13 +17,12 @@ import type { SessionLayout } from "./config.ts";
 import { type PortableNameOptions, portableNameKeyIdentity } from "./portable-name.ts";
 import { type LocalDirectoryMapping, nativeNameIdentity } from "./session-paths.ts";
 import type { DirectoryBaseline } from "./state.ts";
-import type { ScanProgressReporter } from "./sync-events.ts";
+import type { ScanProgressReporter, TransformDiagnostic } from "./sync-events.ts";
 import type {
   DeferredFileOutput,
   ParentSessionReference,
   StreamedJsonlContent,
-  TransformDiagnostic,
-} from "./transform.ts";
+} from "./transform-types.ts";
 
 export type ScanSide = "local" | "target";
 
