@@ -6,15 +6,18 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import * as transformModule from "../src/transform.ts";
 import * as yamlModule from "../src/transform-yaml.ts";
+import * as yamlAstModule from "../src/transform-yaml-ast.ts";
 
 /**
  * The YAML frontmatter/Markdown format driver lives in `transform-yaml.ts`
  * while `transform.ts` stays the public import path and keeps the JSONL/JSON
- * drivers plus the format dispatcher. These assertions guard the three
- * invariants of that split: `transformMarkdown` stays internal, the module's
- * dependencies point one way (it must never import `transform.ts`, the
+ * drivers plus the format dispatcher. The driver's pure AST/anchor/alias
+ * mechanics live in `transform-yaml-ast.ts`. These assertions guard the
+ * invariants of that split: `transformMarkdown` stays internal, both modules'
+ * dependencies point one way (neither may import `transform.ts`, the
  * scanners, or the orchestration modules, which would create an import
- * cycle), and the public surface of `transform.ts` is unchanged.
+ * cycle), the AST module stays self-contained and rooted only in `yaml`, and
+ * the public surface of `transform.ts` is unchanged.
  *
  * Markdown/YAML semantics themselves (anchors, aliases, byte preservation,
  * diagnostics) stay covered by the existing transform suites; this file only
@@ -53,6 +56,32 @@ describe("transform YAML driver module boundary", () => {
     expect(typeof yamlModule.transformMarkdown).toBe("function");
   });
 
+  it("keeps the YAML AST mechanics self-contained and internal", async () => {
+    // The alias machinery is reachable only through these helper exports; the
+    // AST module owns no other runtime surface.
+    expect(Object.keys(yamlAstModule).sort()).toEqual(
+      [
+        "isolateSharedYamlCwdAliases",
+        "isolateSharedYamlParentSessionAliases",
+        "rejectUnresolvedYamlAliases",
+        "resolvedYamlScalar",
+        "yamlStringValue",
+      ].sort(),
+    );
+
+    const source = await readFile(
+      fileURLToPath(new URL("../src/transform-yaml-ast.ts", import.meta.url)),
+      "utf8",
+    );
+    const specifiers = [...source.matchAll(/from "([^"]+)"/g)].flatMap((match) =>
+      match[1] === undefined ? [] : [match[1]],
+    );
+    // The AST layer is rooted only in the YAML library: no local import edge
+    // exists, so it can never pull in the visitor, the scanners, or the
+    // orchestration modules.
+    expect(specifiers).toEqual(["yaml"]);
+  });
+
   it("stays out of the package surface", async () => {
     const index = await readFile(
       fileURLToPath(new URL("../src/index.ts", import.meta.url)),
@@ -81,6 +110,7 @@ describe("transform YAML driver module boundary", () => {
       "./transform-diagnostics.ts",
       "./transform-types.ts",
       "./transform-visitor.ts",
+      "./transform-yaml-ast.ts",
     ];
     const forbidden = [
       "./transform.ts",
