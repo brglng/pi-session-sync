@@ -35,7 +35,7 @@ export interface TransformOptions extends Partial<PortableNameOptions> {
   portableName?: string;
   /**
    * Per-file semantic-label evidence for `cwd` values (missions). Maps the
-   * normalized local cwd path (see `cwdEvidenceKey` in `transform.ts`) to the
+   * normalized local cwd path (see `cwdEvidenceKey` in `transform-visitor.ts`) to the
    * portable name that MUST be preserved across round-trips: a target-derived
    * cwd that decodes under the current HOME must re-encode with its original
    * ROOT label instead of being re-derived from naming options. Sessions keep
