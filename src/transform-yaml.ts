@@ -215,6 +215,11 @@ function rewriteYamlCwdValue(
   return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name}`;
 }
 
+function isYamlMappingValue(node: unknown, document: Document): boolean {
+  const resolved = isAlias(node) ? node.resolve(document) : node;
+  return isMap(resolved);
+}
+
 function rewriteYamlCwdNode(
   node: unknown,
   document: Document,
@@ -224,7 +229,12 @@ function rewriteYamlCwdNode(
   visited: Set<object>,
 ): void {
   const resolved = resolvedYamlScalar(node, document);
-  if (resolved === undefined) throw new Error("cwd field must be a string");
+  if (resolved === undefined) {
+    if (isYamlMappingValue(node, document)) {
+      rewriteYamlCwdNodes(node, document, context, cwdValues, cwdPortableNames, visited);
+    }
+    return;
+  }
   if (visited.has(resolved.node)) return;
   visited.add(resolved.node);
   const savedLine = context.line;
@@ -288,49 +298,17 @@ function rewriteYamlCwdNodes(
 }
 
 /**
- * Validate that every YAML mapping value under a `parentSession` key is a
- * string. Non-string parentSession values are hard file errors in both
- * directions (target-to-local leniency covers nonportable string values only).
- */
-function assertYamlParentSessionString(node: unknown, document: Document): void {
-  if (node === null || node === undefined) return;
-  if (isAlias(node)) {
-    const resolved = node.resolve(document);
-    if (resolved !== undefined) assertYamlParentSessionString(resolved, document);
-    return;
-  }
-  if (!isNode(node)) return;
-  if (isMap(node)) {
-    for (const pair of node.items) {
-      const key = yamlStringValue(pair.key, document);
-      if (key === "parentSession") {
-        const resolved = isAlias(pair.value) ? pair.value.resolve(document) : pair.value;
-        if (!isScalar(resolved) || typeof resolved.value !== "string") {
-          throw new Error("parentSession field must be a string");
-        }
-      } else {
-        assertYamlParentSessionString(pair.value, document);
-      }
-    }
-    return;
-  }
-  if (isSeq(node)) {
-    for (const item of node.items) assertYamlParentSessionString(item, document);
-  }
-}
-
-/**
  * Rewrite every generic (non-cwd) path-valued scalar in place. Alias aliasing
  * was resolved before this pass: cwd isolation breaks shared cwd anchors, and
  * every remaining alias of one anchored scalar shares the same string value,
  * so its generic rewrite is identical at every use site.
  *
- * Markdown parentSession output bytes are preserved in every direction: the
- * output pass skips `parentSession` use-sites entirely (type/URI/range
- * validation already ran in the reference-collection pass). Only the
- * canonical-target pass rewrites parentSession so the canonical hash
- * normalizes legal local-absolute and sync-URI spellings to one portable
- * representation.
+ * Markdown string-valued parentSession output bytes are preserved in every
+ * direction: the output pass skips those scalars after URI/range validation.
+ * Object-valued parentSession mappings recurse through child fields as generic
+ * paths. Only the canonical-target pass rewrites parentSession strings so the
+ * canonical hash normalizes legal local-absolute and sync-URI spellings to one
+ * portable representation.
  */
 function rewriteYamlGenericNodes(
   node: unknown,
@@ -370,8 +348,17 @@ function rewriteYamlGenericNodes(
     if (isMap(current)) {
       for (const pair of current.items) {
         const pairKey = yamlStringValue(pair.key, document);
-        if (pairKey === "cwd") continue;
-        if (pairKey === "parentSession" && context.mode !== "canonical-target") continue;
+        if (pairKey === "cwd" && !isYamlMappingValue(pair.value, document)) continue;
+        if (pairKey === "parentSession") {
+          const objectValue = isYamlMappingValue(pair.value, document);
+          if (
+            !objectValue &&
+            (context.mode !== "canonical-target" ||
+              resolvedYamlScalar(pair.value, document) === undefined)
+          ) {
+            continue;
+          }
+        }
         if (!isNode(pair.value)) continue;
         const savedPath = context.keyPath;
         context.keyPath =
@@ -432,8 +419,8 @@ function yamlNodeLine(context: VisitContext, node: Node): number {
  *
  * Validation and reference collection are use-site aware: an anchored scalar
  * referenced by several fields is visited once per use-site with that
- * use-site's key. ParentSession semantics (sessions-only/type/range
- * validation and bytes-unchanged output) must never depend on field order or
+ * use-site's key. ParentSession semantics (sessions-only/range validation and
+ * bytes-unchanged output) must never depend on field order or
  * a shared-scalar visited dedup. Map/sequence nodes keep visited-cycle
  * protection so self-referential structures terminate.
  */
@@ -476,7 +463,14 @@ function collectYamlPathReferences(
         // collection; only values do (P13). Key detection for `cwd` still runs
         // through the key scalar itself.
         const pairKey = yamlStringValue(pair.key, document);
-        if (pairKey === "cwd") continue;
+        if (pairKey === "cwd" && !isYamlMappingValue(pair.value, document)) continue;
+        if (
+          pairKey === "parentSession" &&
+          !isYamlMappingValue(pair.value, document) &&
+          resolvedYamlScalar(pair.value, document) === undefined
+        ) {
+          continue;
+        }
         if (!isNode(pair.value)) continue;
         const savedPath = context.keyPath;
         context.keyPath =
@@ -585,7 +579,6 @@ export function transformMarkdown(
       parentSessionReferences,
       genericPathReferences,
     };
-    assertYamlParentSessionString(document.contents, document);
     collectYamlPathReferences(document.contents, document, collectContext);
     const outputDocument = document.clone();
     isolateSharedYamlCwdAliases(outputDocument);

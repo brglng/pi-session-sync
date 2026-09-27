@@ -114,40 +114,56 @@ describe("session file transformation", () => {
     expect(target.cwdValues).toEqual([cwd, cwd]);
   });
 
-  it("preserves out-of-root Markdown values without error but keeps parentSession strict", () => {
-    const outOfRootInput = [
-      "---",
-      `cwd: pi-session-sync://${portableName}`,
-      "parentSession: /machine-specific/session.jsonl",
-      "---",
-      "body",
-    ].join("\n");
-    expect(transformFileText("note.md", outOfRootInput, "to-local", resolver).outputText).toContain(
-      "parentSession: /machine-specific/session.jsonl",
-    );
-    // parentSession must be a string in every direction: the target-to-local
-    // leniency rules cover nonportable string values only, never non-string
-    // values (missing key value, ~ null, sequences).
-    const nonStringInput = [
-      "---",
-      `cwd: pi-session-sync://${portableName}`,
-      "parentSession:",
-      "---",
-      "body",
-    ].join("\n");
-    expect(() => transformFileText("note.md", nonStringInput, "to-local", resolver)).toThrow(
-      /parentSession field must be a string/,
-    );
-    const nullTildeInput = [
-      "---",
-      `cwd: pi-session-sync://${portableName}`,
-      "parentSession: ~",
-      "---",
-      "body",
-    ].join("\n");
-    expect(() => transformFileText("note.md", nullTildeInput, "to-local", resolver)).toThrow(
-      /parentSession field must be a string/,
-    );
+  it("recurses into object-valued Markdown cwd and parentSession fields", () => {
+    const localPath = join(sessionsRoot, localName, "ignored.json");
+    const targetUri = `pi-session-sync://sessions/${portableName}/ignored.json`;
+    const makeInput = (nestedPath: string): string =>
+      [
+        "---",
+        "cwd:",
+        `  nestedPath: ${nestedPath}`,
+        "parentSession:",
+        `  nestedPath: ${nestedPath}`,
+        "meta:",
+        "  cwd: [one, two]",
+        "  parentSession: ~",
+        "arrays:",
+        "  cwd:",
+        `    - ${localPath}`,
+        "  parentSession:",
+        `    - ${localPath}`,
+        "aliases:",
+        "  cwd: &cwd 42",
+        "  other: *cwd",
+        "  parentSession: &parent 17",
+        "  otherParent: *parent",
+        "---",
+        "body",
+      ].join("\n");
+    const localInput = makeInput(localPath);
+    const targetInput = makeInput(targetUri);
+    const cases = [
+      { mode: "to-target", input: localInput, expectedPath: targetUri },
+      { mode: "to-local", input: targetInput, expectedPath: localPath },
+      { mode: "inspect-local", input: localInput, expectedPath: localPath },
+      { mode: "inspect-target", input: targetInput, expectedPath: targetUri },
+    ] as const;
+
+    for (const { mode, input, expectedPath } of cases) {
+      const transformed = transformFileText("object-fields.md", input, mode, resolver);
+      const references = transformed.genericPathReferences ?? [];
+      expect(transformed.outputText).toContain(expectedPath);
+      expect(transformed.outputText).toContain(localPath);
+      expect(references.length).toBe(2);
+      expect(references.every((reference) => reference.rewritten === expectedPath)).toBe(true);
+      expect(transformed.outputText).toContain("other: *cwd");
+      expect(transformed.outputText).toContain("otherParent: *parent");
+      expect(transformed.warnings ?? []).toEqual([]);
+      expect(transformed.diagnostics ?? []).toEqual([]);
+      expect(transformed.cwdValues).toEqual([]);
+      expect(transformed.parentSessionReferences ?? []).toEqual([]);
+    }
+
     const unresolvedAliasInput = [
       "---",
       `cwd: pi-session-sync://${portableName}`,
@@ -156,7 +172,7 @@ describe("session file transformation", () => {
       "body",
     ].join("\n");
     expect(() => transformFileText("note.md", unresolvedAliasInput, "to-local", resolver)).toThrow(
-      /parentSession|Unresolved YAML alias/,
+      /Unresolved YAML alias/,
     );
     const nestedUnresolvedAliasInput = [
       "---",
@@ -168,17 +184,7 @@ describe("session file transformation", () => {
     ].join("\n");
     expect(() =>
       transformFileText("note.md", nestedUnresolvedAliasInput, "to-target", resolver),
-    ).toThrow(/parentSession|Unresolved YAML alias/);
-    // A YAML sequence value is not a string parentSession even in target
-    // sources: strict in every direction.
-    expect(() =>
-      transformFileText(
-        "note.md",
-        ["---", `cwd: ${cwd}`, "parentSession: [one, two]", "---", "body"].join("\n"),
-        "to-target",
-        resolver,
-      ),
-    ).toThrow(/parentSession field must be a string/);
+    ).toThrow(/Unresolved YAML alias/);
   });
 
   it("normalizes valid Markdown parentSession paths only in canonical hashes", () => {
@@ -685,13 +691,67 @@ describe("session file transformation", () => {
     );
   });
 
+  it("recurses into object-valued JSON and JSONL cwd and parentSession fields", () => {
+    const localPath = join(sessionsRoot, localName, "ignored.json");
+    const targetUri = `pi-session-sync://sessions/${portableName}/ignored.json`;
+    const localRecord = {
+      cwd: { nestedPath: localPath },
+      parentSession: { nestedPath: localPath },
+      nested: [{ cwd: null, parentSession: false }],
+      arrays: {
+        cwd: [{ nestedPath: localPath }],
+        parentSession: [{ nestedPath: localPath }],
+      },
+      systemMessage: {
+        sections: {
+          cwd: ["<cwd>", "/Users/brglng/github/brglng/dotfiles", "</cwd>"].join("\n"),
+        },
+        toolsAdded: [{ parameters: { properties: { cwd: { type: "string" } } } }],
+      },
+    };
+    const targetRecord = {
+      ...localRecord,
+      cwd: { nestedPath: targetUri },
+      parentSession: { nestedPath: targetUri },
+    };
+    const cases = [
+      { mode: "to-target", input: localRecord, expected: targetRecord, expectedPath: targetUri },
+      { mode: "to-local", input: targetRecord, expected: localRecord, expectedPath: localPath },
+      { mode: "inspect-local", input: localRecord, expected: localRecord, expectedPath: localPath },
+      {
+        mode: "inspect-target",
+        input: targetRecord,
+        expected: targetRecord,
+        expectedPath: targetUri,
+      },
+    ] as const;
+
+    for (const { mode, input, expected, expectedPath } of cases) {
+      for (const [file, lineEnding] of [
+        ["object-fields.json", ""],
+        ["object-fields.jsonl", "\n"],
+      ] as const) {
+        const inputText = `${JSON.stringify(input)}${lineEnding}`;
+        const transformed = transformFileText(file, inputText, mode, resolver);
+        expect(JSON.parse(transformed.outputText.trim())).toEqual(expected);
+        expect((transformed.genericPathReferences ?? []).length).toBe(2);
+        expect(
+          (transformed.genericPathReferences ?? []).every(
+            (reference) => reference.rewritten === expectedPath,
+          ),
+        ).toBe(true);
+        expect(transformed.warnings ?? []).toEqual([]);
+        expect(transformed.diagnostics ?? []).toEqual([]);
+        expect(transformed.cwdValues).toEqual([]);
+        expect(transformed.parentSessionReferences ?? []).toEqual([]);
+      }
+    }
+  });
+
   it("rejects malformed structured input", () => {
     expect(() => transformFileText("bad.jsonl", "{bad}\n", "to-target", resolver)).toThrow(
       /invalid JSON/,
     );
-    expect(() =>
-      transformFileText("bad.jsonl", `${JSON.stringify({ cwd: null })}\n`, "to-target", resolver),
-    ).toThrow(/cwd field must be a string/);
     expect(() =>
       transformFileText("bad.md", "---\ncwd: /var/www/project\n", "to-target", resolver),
     ).toThrow(/missing closing/);

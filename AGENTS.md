@@ -245,3 +245,12 @@
 - 在完成归属、路径安全、cwd／parentSession／通用路径证据、canonical hash、tombstone、冲突、preflight 和同步决策所必需的扫描后，普通 `.json`、`.jsonl`、`.md` 文件的目标输出序列化与保留可延后到该文件实际写入 staging 时执行。未被复制的文件不得为此保留完整 output 文本。
 - 延迟物化仍必须在任何本机、target 或 state 正式写入前完成。large JSONL 的流式 staging、mtime 保留、全量 staging 后再提交、诊断及 nested label replacement 的输出语义不得改变；任何必须在决策前比较或重放的输出按需提前物化，不得以 canonical hash 替代输出字节比较。
 - target → local 扫描时，`targetDir/sessions` 直接子目录中无法解码为当前 portable session name 的普通目录属于未受管 target 内容；必须静默忽略，不进入扫描、state、目录观察或 cleanup，永远不得删除或提示。
+
+## v0.5.3
+
+### 非字符串识别字段跳过
+
+- JSON、JSONL 与 Markdown YAML frontmatter 的路径转换中，`cwd` 和 `parentSession` 字段的值不是字符串时，必须原样保留并直接跳过该字段值；不得递归处理其子值，也不得产生 warning 或 error。
+- 上述规则不改变 JSON/YAML 语法错误及未解析 YAML alias 的既有错误处理；字符串值仍按现有路径转换与 URI 校验规则处理。
+- 上述字段跳过规则不放宽活动会话刷新 preflight：若目标文件将写入当前活动 session，仍必须满足有效 session header 与可解码 string `cwd` 等公开 `switchSession` 安全条件；不满足时拒绝刷新。
+- 本版本后续修订：`cwd` 或 `parentSession` 的值若为 JSON object／YAML mapping，仍须递归处理其子值；数组、null、数字与布尔值仍按非字符串值静默跳过，不递归其子值。

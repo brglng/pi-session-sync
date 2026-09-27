@@ -183,6 +183,7 @@ export function isolateSharedYamlCwdAliases(document: Document): void {
     const otherEntries = entries.filter((entry) => entry.directKey !== "cwd");
     if (
       isScalar(anchored) &&
+      typeof anchored.value === "string" &&
       analysis.anchoredKeys.get(source) === "cwd" &&
       otherEntries.length > 0
     ) {
@@ -196,7 +197,7 @@ export function isolateSharedYamlCwdAliases(document: Document): void {
       // aliases that still resolve through that anchor.
       for (const entry of cwdEntries) {
         const resolved = entry.alias.resolve(document);
-        if (resolved !== undefined && isScalar(resolved)) {
+        if (resolved !== undefined && isScalar(resolved) && typeof resolved.value === "string") {
           entry.replace(cloneYamlAliasValue(entry.alias, document));
         }
       }
@@ -217,7 +218,7 @@ export function isolateSharedYamlCwdAliases(document: Document): void {
     // unrelated aliases. Every remaining cwd alias is still isolated below.
     for (const entry of cwdEntries) {
       const resolved = entry.alias.resolve(document);
-      if (resolved !== undefined && isScalar(resolved)) {
+      if (resolved !== undefined && isScalar(resolved) && typeof resolved.value === "string") {
         entry.replace(cloneYamlAliasValue(entry.alias, document));
       }
     }
@@ -238,7 +239,9 @@ export function isolateSharedYamlParentSessionAliases(document: Document): void 
   const analysis = analyzeYamlAliases(document);
   for (const [source, entries] of analysis.uses) {
     const anchored = analysis.anchoredNodes.get(source);
-    if (anchored === undefined || !isScalar(anchored)) continue;
+    if (anchored === undefined || !isScalar(anchored) || typeof anchored.value !== "string") {
+      continue;
+    }
     // An anchor declared directly under a `parentSession` key protects the
     // parentSession scalar itself: every generic/cwd alias of that scalar is
     // a use-site writing through the shared anchor, and each must be isolated

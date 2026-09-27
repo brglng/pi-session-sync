@@ -805,14 +805,10 @@ export function visitValue(
   ) {
     return value;
   }
-  if (key === "cwd" && typeof value !== "string") {
-    throw new Error("cwd field must be a string");
-  }
-  if (key === "parentSession" && typeof value !== "string") {
-    // parentSession must identify a session file path. A non-string value is
-    // a hard file error in every direction (the target-to-local leniency
-    // rules cover nonportable string values only).
-    throw new Error("parentSession field must be a string");
+  if ((key === "cwd" || key === "parentSession") && typeof value !== "string" && !isRecord(value)) {
+    // Preserve non-string scalars and arrays without diagnostics. Object
+    // records fall through so their child fields remain recursively visible.
+    return value;
   }
   if (typeof value === "string") {
     if (key === "cwd") {
@@ -936,9 +932,8 @@ export function visitValue(
     return rewriteRecursivePathValue(value, context);
   }
   if (Array.isArray(value)) {
-    // Array elements inherit no field name: `parentSession` and `cwd` reject
-    // non-string values above, and every other element is an ordinary
-    // recursive candidate whose own key is its index.
+    // Array-valued `cwd` and `parentSession` fields return before this branch;
+    // object records recurse below. Other arrays remain recursive candidates.
     let changed = false;
     const result = value.map((item, index) => {
       const savedKeyPath = context.keyPath;
