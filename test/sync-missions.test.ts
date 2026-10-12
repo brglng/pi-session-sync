@@ -559,7 +559,6 @@ describe("missions and generic JSON path synchronization", () => {
           knownDirectories: [],
           warnings: [],
           rootPresent: true,
-          cwdEvidence: new Map(),
         }) as unknown as MissionScan;
       // The forbidden-root scenario loses all LOCAL evidence: only the target
       // scan carries the reference, which is exactly what the blocked-delete
@@ -569,7 +568,6 @@ describe("missions and generic JSON path synchronization", () => {
         knownDirectories: [],
         warnings: [],
         rootPresent: false,
-        cwdEvidence: new Map(),
       } as unknown as MissionScan;
       const targetScan = scan("target");
       const deleteAction = { side: "target" as const, path: "/t/a.json" };
@@ -682,14 +680,14 @@ describe("missions and generic JSON path synchronization", () => {
     }
   });
 
-  it("preserves local mission references to unmapped sessions paths with a warning", async () => {
+  it("encodes unmapped mission session references with the current rootless prefix silently", async () => {
     const fixture = await makeFixture();
     const unmapped = join(fixture.sessionsRoot, "unknown", "x.jsonl");
     try {
       const missionsRoot = join(fixture.root, "missions");
       // No session file exists to seed a mapping; the referenced path is
-      // inside the sessions root but unmappable. v0.4.2 preserves it verbatim
-      // and silently on local source.
+      // inside the sessions root but unmappable. Use the current-prefix
+      // rootless identity without inventing a session mapping.
       await writeMission(missionsRoot, "index/ref.json", {
         sessionPath: unmapped,
       });
@@ -708,7 +706,7 @@ describe("missions and generic JSON path synchronization", () => {
       const target = JSON.parse(
         await readFile(join(fixture.targetDir, "missions", "index", "ref.json"), "utf8"),
       ) as { sessionPath: string };
-      expect(target.sessionPath).toBe(unmapped);
+      expect(target.sessionPath).toBe(`pi-session-sync://${portableSessionDirName(unmapped)}`);
     } finally {
       await cleanup(fixture.root);
     }

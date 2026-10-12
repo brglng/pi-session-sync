@@ -15,7 +15,7 @@
  * the scanners, or the orchestration modules, so the dependency direction is
  * one-way and no cycle is possible.
  */
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute } from "node:path";
 import {
   decodePortableSessionDirName,
   type PortableNameOptions,
@@ -44,16 +44,6 @@ import type {
   TransformMode,
   TransformOptions,
 } from "./transform-types.ts";
-
-/**
- * Native identity key for a local cwd path used by mission cwd label
- * evidence lookups: resolved, and case-folded on Windows exactly like the
- * path compares elsewhere.
- */
-export function cwdEvidenceKey(value: string): string {
-  const resolved = resolve(value);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-}
 
 export function namingOptionsForTransform(
   options: TransformOptions,
@@ -186,12 +176,9 @@ export interface VisitContext {
   /** Fully normalized naming configuration for URI syntax/decoding checks. */
   namingConfig: PortableNameOptions;
   portableName: string | undefined;
-  /**
-   * Per-file mission cwd label evidence (see `TransformOptions.cwdEvidence`).
-   * Only the user-facing to-target output pass consults it; canonical and
-   * target-source passes pass undefined.
-   */
-  cwdEvidence: Readonly<Record<string, string>> | undefined;
+  /** Successful generic normalization can require canonical serialization even
+   * when its URI bytes are unchanged. This is not session mapping evidence. */
+  canonicalPathPresence?: { present: boolean };
   /**
    * Warnings for values preserved verbatim because they are not valid
    * portable paths/URIs. Collected only by the user-facing output pass of a
@@ -417,19 +404,19 @@ export function rewriteParentSessionValue(value: string, context: VisitContext):
       return value;
     }
     if (mode === "inspect-local" || mode === "to-target") {
-      // Local source: a syntactically valid, current-format URI is validated
-      // and kept. A well-formed URI whose portable name cannot decode under
+      // Local source: a supported URI is decoded and re-encoded using the
+      // current prefix rules. A URI whose portable name cannot decode under
       // this configuration is not an error: it is preserved verbatim with a
       // warning (v0.4.1), so a value written by a target-side pass survives a
       // local→target round trip.
       try {
-        resolver.canonicalSync(value);
+        const rewritten = resolver.canonicalSync(value);
+        parentSessionReferences.push({ value, rewritten });
+        return mode === "inspect-local" ? value : rewritten;
       } catch {
         warnPreservedMalformedCandidateUri(value, context);
         return value;
       }
-      parentSessionReferences.push({ value, rewritten: value });
-      return value;
     }
     // Target source: syntactically valid current-format URIs are rewritten;
     // anything the reader cannot decode under the current configuration is
@@ -509,8 +496,8 @@ export function rewriteParentSessionValue(value: string, context: VisitContext):
     return value;
   }
   if (mode === "canonical-target") {
-    // Markdown parentSession output bytes are preserved, so canonical hashing
-    // must normalize the legal local-absolute and sync-URI spellings to one
+    // Canonical hashing normalizes legal local-absolute and sync-URI spellings
+    // to one
     // portable representation. Unmappable values hash raw.
     try {
       const mappedUri = resolver.localToSync(value);
@@ -553,8 +540,8 @@ export function rewriteParentSessionValue(value: string, context: VisitContext):
  * namespaced sessions/missions file URI, and one that is outside both trees
  * but under a configured portable prefix (HOME, ROOT, or an extra prefix) is
  * encoded as a rootless portable-name URI. Anything else — a foreign
- * Windows-shaped spelling on POSIX, an unmappable in-root path, and every
- * malformed or stale sync URI in local content — is preserved silently and
+ * Windows-shaped spelling on POSIX and every malformed or stale sync URI in
+ * local content — is preserved silently and
  * never produces a diagnostic.
  *
  * target → local: only an exact `pi-session-sync://` value that also has
@@ -581,28 +568,53 @@ export function rewriteRecursivePathValue(value: string, context: VisitContext):
     // exactly as the output pass left it. A rootless portable-name URI names a
     // local path exactly like a namespaced file URI, so it is canonicalized
     // the same way instead of being hashed raw.
+    if (isNativePathCandidate(value)) {
+      const rewritten = rewriteRecursivePathValue(value, { ...context, mode: "to-target" });
+      if (rewritten !== value && context.canonicalPathPresence !== undefined) {
+        context.canonicalPathPresence.present = true;
+      }
+      return rewritten;
+    }
     if (!isSyncUriCandidate(value)) return value;
     try {
-      return resolver.canonicalSync(value);
+      const rewritten = resolver.canonicalSync(value);
+      if (context.canonicalPathPresence !== undefined) context.canonicalPathPresence.present = true;
+      return rewritten;
     } catch {
       return value;
     }
   }
   if (mode === "to-target" || mode === "inspect-local") {
     if (isSyncUri(value)) {
-      // Local content that already carries a portable spelling is never
-      // re-encoded. A syntactically valid sessions URI stays visible as
+      // Supported portable spellings are decoded and re-encoded with current
+      // prefixes. A syntactically valid sessions URI stays visible as
       // generic mapping evidence for the scanner's directory inference; every
       // other spelling is ordinary text here and stays silent.
       if (!isSyncUriPathCandidate(value)) return value;
       try {
-        if (inspectSyncUri(value, namingConfig).namespace === "sessions") {
-          genericPathReferences.push({ value, rewritten: value });
+        const inspected = inspectSyncUri(value, namingConfig);
+        if (inspected.namespace === "cwd" && mode === "inspect-local") {
+          const absolute = syncUriToCwd(value, namingOptions);
+          if (isNativePathCandidate(absolute)) {
+            genericPathReferences.push({ value: absolute, rewritten: absolute });
+          }
+          return value;
         }
+        const rewritten = resolver.canonicalSync(value);
+        if (inspected.namespace === "cwd" && isSessionsFileUri(rewritten)) {
+          genericPathReferences.push({
+            value: syncUriToCwd(value, namingOptions),
+            rewritten,
+            mappedUri: rewritten,
+          });
+        } else if (inspected.namespace === "sessions") {
+          genericPathReferences.push({ value, rewritten });
+        }
+        return mode === "inspect-local" ? value : rewritten;
       } catch {
         // Malformed local content is never a sync-fatal error (v0.4.2).
+        return value;
       }
-      return value;
     }
     if (!isNativePathCandidate(value)) return value;
     if (mode === "inspect-local") {
@@ -614,9 +626,13 @@ export function rewriteRecursivePathValue(value: string, context: VisitContext):
     let rewritten: string;
     try {
       rewritten = resolver.localToSync(value);
-    } catch {
-      // An in-root path without a live mapping is preserved silently.
-      return value;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith("Session path is not mapped:")) {
+        return value;
+      }
+      // No session mapping exists: retain the absolute path's current-prefix
+      // rootless encoding rather than inventing a session portable name.
+      rewritten = value;
     }
     if (rewritten !== value) {
       if (isSessionsFileUri(rewritten)) {
@@ -624,8 +640,8 @@ export function rewriteRecursivePathValue(value: string, context: VisitContext):
       }
       return rewritten;
     }
-    // The value lies outside both synced file trees. When a configured
-    // portable prefix (HOME, ROOT, or an extra prefix) can encode it, the
+    // The value lies outside both synced file trees or lacks a current session
+    // mapping. When a portable prefix (HOME, ROOT, or an extra prefix) can encode it, the
     // generic field carries the rootless portable-name URI, exactly like an
     // out-of-tree `cwd` (v0.4.2). A value no configured prefix can encode (for
     // example a foreign Windows-shaped spelling on POSIX) is preserved
@@ -703,9 +719,19 @@ export function rewriteRecursivePathValue(value: string, context: VisitContext):
       );
     }
     try {
+      if (mode === "inspect-target") {
+        const absolute = syncUriToCwd(value, namingOptions);
+        if (isNativePathCandidate(absolute)) {
+          genericPathReferences.push({ value: absolute, rewritten: absolute });
+        }
+        return resolver.canonicalSync(value);
+      }
       const rewritten = resolver.canonicalSync(value);
-      if (mode === "to-local") return resolver.syncToLocal(value);
-      return rewritten;
+      const local = resolver.syncToLocal(value);
+      if (isSessionsFileUri(rewritten)) {
+        genericPathReferences.push({ value: local, rewritten: local, mappedUri: rewritten });
+      }
+      return local;
     } catch (error) {
       illegalTargetPortableValue(
         context,
@@ -837,7 +863,11 @@ export function visitValue(
           // local→target only diagnoses structural/type failures, not values
           // that are outside the configured portable prefixes.
           if (inspected.namespace !== "cwd" || inspected.nameClass !== "current") return value;
-          return value;
+          const decoded = tryDecodeCwdValue(value, namingOptions);
+          if (decoded === undefined) return value;
+          cwdValues.push(decoded.cwd);
+          cwdPortableNames.push(decoded.name);
+          return mode === "inspect-local" ? value : cwdToSyncUri(decoded.cwd, namingOptions);
         }
         if (mode === "to-local" || mode === "inspect-target") {
           if (inspected.namespace !== "cwd") {
@@ -859,20 +889,14 @@ export function visitValue(
         // process directory: it is preserved verbatim and silently (v0.4.1).
         if (isRelativeCwdValue(value)) return value;
         if (!isEncodableLocalPath(value)) return value;
-        // Missions rewrite cwd through per-file semantic-label evidence when
-        // available (preserves a ROOT label whose decoded path is under the
-        // current HOME); sessions keep the single configured portable name.
+        // Every cwd uses the longest current prefix, not historical labels.
         // v0.4.1: a cwd value the file's portable name cannot be attributed to
         // (for example one of several conflicting `cwd` values in one file) is
         // preserved verbatim with a bounded warning instead of stopping the
         // whole sync; the file's other supported path fields still convert.
         let uri: string;
         try {
-          uri = cwdToSyncUri(
-            value,
-            namingOptions,
-            context.cwdEvidence?.[cwdEvidenceKey(value)] ?? portableName,
-          );
+          uri = cwdToSyncUri(value, namingOptions, portableName);
         } catch {
           // A cwd can be valid and portable even when it does not match the
           // containing session directory. Re-encode it under its own name
@@ -920,8 +944,7 @@ export function visitValue(
       }
       cwdValues.push(decoded.cwd);
       cwdPortableNames.push(decoded.name);
-      // Canonical hashing normalizes legacy loose spellings to the strict
-      // identity so equivalent labels hash identically on every platform.
+      // Canonical hashing uses the longest current prefix, like output.
       return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name}`;
     }
     if (key === "parentSession") {

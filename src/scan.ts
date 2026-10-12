@@ -1199,7 +1199,7 @@ async function discoverTreesUnsafe(
         );
         continue;
       }
-      portableNameFromRoot = entry;
+      portableNameFromRoot = canonicalPortableSessionDirName(entry, namingOptions);
       cwdFromRoot = decoded.cwd;
     }
 
@@ -2611,6 +2611,26 @@ async function scanNestedSessions(
       return emptyScanResult(side, layout, warnings, false, true);
     }
     throw error;
+  }
+  if (side === "target") {
+    // An alternate empty/unknown-only root proves no managed file ownership.
+    // Keep it entirely outside observations and cleanup when a live tree owns
+    // the same current-prefix identity; two live roots remain a collision.
+    const liveIdentities = new Set(
+      candidates
+        .filter(
+          (candidate) => candidate.files.length > 0 && candidate.portableNameFromRoot !== undefined,
+        )
+        .map((candidate) =>
+          portableNameKeyIdentity(candidate.portableNameFromRoot as string, namingOptions),
+        ),
+    );
+    candidates = candidates.filter(
+      (candidate) =>
+        candidate.files.length > 0 ||
+        candidate.portableNameFromRoot === undefined ||
+        !liveIdentities.has(portableNameKeyIdentity(candidate.portableNameFromRoot, namingOptions)),
+    );
   }
   const localMappings = new Map<string, LocalDirectoryMapping>();
   const flatMappings = new Map<string, LocalDirectoryMapping>();

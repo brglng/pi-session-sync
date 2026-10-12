@@ -49,7 +49,6 @@ describe("transform visitor module boundary", () => {
     expect(Object.keys(visitorModule).sort()).toEqual(
       [
         "createTransformedFile",
-        "cwdEvidenceKey",
         "hasSessionHeaderCwd",
         "isEncodableLocalPath",
         "isRelativeCwdValue",

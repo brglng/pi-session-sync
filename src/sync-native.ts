@@ -133,15 +133,14 @@ export function setHasNativeName(values: ReadonlySet<string>, name: string): boo
   return [...values].some((candidate) => sameNativeName(candidate, name));
 }
 
-/** Allow only native Windows CWD casing differences, not POSIX label aliases. */
+/** Compare supported names by their current-prefix identity and native path casing. */
 export function nativeCompatiblePortableMappings(
   first: string,
   second: string,
   namingOptions: PortableNameOptions,
 ): boolean {
-  // Strict identity unifies legacy loose encodeURIComponent spellings with
-  // their strict canonical spelling on every platform: the decoder accepts
-  // both, so they are the same semantic mapping and must never conflict.
+  // Decode supported names and re-encode with the longest current prefix.
+  // Different labels for the same current-machine path are one mapping.
   const firstIdentity = strictPortableNameIdentity(first, namingOptions);
   const secondIdentity = strictPortableNameIdentity(second, namingOptions);
   if (firstIdentity !== null && secondIdentity !== null) return firstIdentity === secondIdentity;

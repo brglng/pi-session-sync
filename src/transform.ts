@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { open, readFile, stat, writeFile } from "node:fs/promises";
 import type { SessionLayout } from "./config.ts";
 import { normalizePortableNameOptions, type PortableNameOptions } from "./portable-name.ts";
+import { SYNC_URI_PREFIX } from "./session-paths.ts";
 import { FILE_LEVEL_DIAGNOSTIC_KEY, type TransformDiagnostic } from "./sync-events.ts";
 import { canonicalRootUri, localPathToRootUri, rootUriToLocalPath } from "./sync-paths.ts";
 import { fileScopedTransformError } from "./transform-diagnostics.ts";
@@ -83,7 +84,6 @@ interface JsonlTransformState {
   namingOptions: Partial<PortableNameOptions> | undefined;
   namingConfig: PortableNameOptions;
   portableName: string | undefined;
-  cwdEvidence: Readonly<Record<string, string>> | undefined;
   cwdValues: string[];
   cwdPortableNames: string[];
   parentSessionReferences: ParentSessionReference[];
@@ -118,7 +118,6 @@ function createJsonlTransformState(
     namingOptions,
     namingConfig: normalizePortableNameOptions(namingOptions),
     portableName: options.portableName,
-    cwdEvidence: options.cwdEvidence,
     cwdValues: [],
     cwdPortableNames: [],
     parentSessionReferences: [],
@@ -176,6 +175,11 @@ function transformJsonlRecord(
     // original line is reused instead of reserializing a large object.
     const structured = parsed as StructuredValue;
     const workerTranscript = isWorkerTranscriptRecord(structured);
+    const canonicalPathPresence = { present: false };
+    // References remain file-wide mapping evidence, but only this record's
+    // additions may force its canonical serialization.
+    const parentReferenceCount = state.parentSessionReferences.length;
+    const genericReferenceCount = state.genericPathReferences.length;
     if (mode === "to-local") {
       const localValues: string[] = [];
       const localPortableNames: string[] = [];
@@ -190,7 +194,6 @@ function transformJsonlRecord(
         namingOptions,
         namingConfig,
         portableName: undefined,
-        cwdEvidence: undefined,
         warnings: state.warnings,
         diagnostics: state.diagnostics,
         file: filePath,
@@ -203,6 +206,7 @@ function transformJsonlRecord(
       const canonicalValue = visitValue(structured, {
         mode: "canonical-target",
         resolver,
+        canonicalPathPresence,
         cwdValues: canonicalValues,
         cwdPortableNames: canonicalPortableNames,
         parentSessionReferences: [],
@@ -210,7 +214,6 @@ function transformJsonlRecord(
         namingOptions,
         namingConfig,
         portableName: undefined,
-        cwdEvidence: undefined,
         warnings: canonicalWarnings,
         diagnostics: [],
         file: filePath,
@@ -228,10 +231,11 @@ function transformJsonlRecord(
       const outputLine = renderOutput ? (local === structured ? line : JSON.stringify(local)) : "";
       const canonicalNeedsSerialization =
         canonicalValue !== structured ||
+        canonicalPathPresence.present ||
         localValues.length > 0 ||
         localPortableNames.length > 0 ||
-        state.parentSessionReferences.length > 0 ||
-        state.genericPathReferences.length > 0;
+        state.parentSessionReferences.length > parentReferenceCount ||
+        state.genericPathReferences.length > genericReferenceCount;
       state.cwdValues.push(...localValues);
       state.cwdPortableNames.push(...localPortableNames);
       return {
@@ -254,7 +258,6 @@ function transformJsonlRecord(
       namingOptions,
       namingConfig,
       portableName: state.portableName,
-      cwdEvidence: state.cwdEvidence,
       warnings: state.warnings,
       diagnostics: state.diagnostics,
       file: filePath,
@@ -267,6 +270,7 @@ function transformJsonlRecord(
         ? visitValue(transformed, {
             mode: "canonical-target",
             resolver,
+            canonicalPathPresence,
             cwdValues: [],
             cwdPortableNames: [],
             parentSessionReferences: [],
@@ -274,7 +278,6 @@ function transformJsonlRecord(
             namingOptions,
             namingConfig,
             portableName: undefined,
-            cwdEvidence: undefined,
             warnings: canonicalWarnings,
             diagnostics: [],
             file: filePath,
@@ -293,10 +296,11 @@ function transformJsonlRecord(
       : "";
     const canonicalNeedsSerialization =
       canonicalValue !== structured ||
+      canonicalPathPresence.present ||
       transformedValues.length > 0 ||
       transformedPortableNames.length > 0 ||
-      state.parentSessionReferences.length > 0 ||
-      state.genericPathReferences.length > 0;
+      state.parentSessionReferences.length > parentReferenceCount ||
+      state.genericPathReferences.length > genericReferenceCount;
     state.cwdValues.push(...transformedValues);
     state.cwdPortableNames.push(...transformedPortableNames);
     return {
@@ -600,7 +604,6 @@ function transformJson(
     namingOptions,
     namingConfig,
     portableName: options.portableName,
-    cwdEvidence: options.cwdEvidence,
     warnings,
     diagnostics,
     file: filePath,
@@ -611,9 +614,11 @@ function transformJson(
   // from local source the transformed (sync-URI) spelling is canonicalized,
   // exactly like JSONL, so equivalent absolute/sync representations of the
   // same file hash identically on both sides.
+  const canonicalPathPresence = { present: false };
   const canonical = visitValue(mode === "to-target" ? output : structured, {
     mode: "canonical-target",
     resolver,
+    canonicalPathPresence,
     cwdValues: [],
     cwdPortableNames: [],
     parentSessionReferences: [],
@@ -621,7 +626,6 @@ function transformJson(
     namingOptions,
     namingConfig,
     portableName: undefined,
-    cwdEvidence: undefined,
     warnings: canonicalWarnings,
     diagnostics: [],
     file: filePath,
@@ -634,6 +638,7 @@ function transformJson(
   // equivalent JSON formatting across local and target copies.
   const canonicalNeedsSerialization =
     canonical !== structured ||
+    canonicalPathPresence.present ||
     cwdValues.length > 0 ||
     cwdPortableNames.length > 0 ||
     parentSessionReferences.length > 0 ||
@@ -820,6 +825,23 @@ export function transformFileText(
   throw new Error(`Unsupported session file extension: ${filePath}`);
 }
 
+function canonicalMappedRootUri(
+  value: string,
+  sessionsRoot: string,
+  missionsRoot: string | undefined,
+  lookup: (localKey: string) => { portableName: string } | undefined,
+  layout: SessionLayout,
+  namingOptions: PortableNameOptions,
+): string {
+  const canonical = canonicalRootUri(value, namingOptions);
+  if (value.slice(SYNC_URI_PREFIX.length).includes("/")) return canonical;
+  const absolute = rootUriToLocalPath(value, sessionsRoot, missionsRoot, layout, namingOptions);
+  // Scan mode leaves unmapped session paths rootless without inventing a
+  // session portable name; mapped paths still enforce relative segment safety.
+  const mapped = localPathToRootUri(absolute, sessionsRoot, missionsRoot, lookup, layout, "scan");
+  return mapped === undefined ? canonical : canonicalRootUri(mapped.uri, namingOptions);
+}
+
 export function createParentPathResolver(
   sessionsRoot: string,
   lookup: (localKey: string) => { portableName: string } | undefined,
@@ -859,7 +881,9 @@ export function createParentPathResolver(
       // byte-identical (out-of-root absolutes, relative values, identifiers).
       // In-root sessions values map through `localPathToRootUri` with the exact
       // nested/flat lookup and error for unmapped paths.
-      return converted === undefined ? value : converted.uri;
+      return converted === undefined
+        ? value
+        : canonicalRootUri(converted.uri, effectiveNamingOptions as PortableNameOptions);
     },
     syncToLocal: (value) =>
       rootUriToLocalPath(
@@ -870,7 +894,14 @@ export function createParentPathResolver(
         effectiveNamingOptions as PortableNameOptions,
       ),
     canonicalSync: (value) =>
-      canonicalRootUri(value, effectiveNamingOptions as PortableNameOptions),
+      canonicalMappedRootUri(
+        value,
+        sessionsRoot,
+        missionsRoot,
+        sessionsLookup,
+        layout,
+        effectiveNamingOptions as PortableNameOptions,
+      ),
   };
 }
 
@@ -906,7 +937,9 @@ export function createGenericPathResolver(
         layout,
         "to-target",
       );
-      return converted === undefined ? value : converted.uri;
+      return converted === undefined
+        ? value
+        : canonicalRootUri(converted.uri, effectiveNamingOptions as PortableNameOptions);
     },
     syncToLocal: (value) =>
       rootUriToLocalPath(
@@ -917,6 +950,13 @@ export function createGenericPathResolver(
         effectiveNamingOptions as PortableNameOptions,
       ),
     canonicalSync: (value) =>
-      canonicalRootUri(value, effectiveNamingOptions as PortableNameOptions),
+      canonicalMappedRootUri(
+        value,
+        sessionsRoot,
+        missionsRoot,
+        resolveLookup,
+        layout,
+        effectiveNamingOptions as PortableNameOptions,
+      ),
   };
 }

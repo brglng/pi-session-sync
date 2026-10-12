@@ -24,7 +24,7 @@ const resolver = createParentPathResolver(sessionsRoot, (name) =>
 );
 
 describe("session file transformation", () => {
-  it("preserves configured and original portable labels in JSONL canonical output", () => {
+  it("re-encodes supported JSONL labels using the longest current prefix", () => {
     const options = {
       homeLabel: "USER",
       rootLabel: "SYSTEM",
@@ -32,6 +32,7 @@ describe("session file transformation", () => {
     };
     const rootCwd = join(homedir(), "root-labeled-transform");
     const rootName = `SYSTEM${encodeURIComponent(toPosixAbsolute(rootCwd))}`;
+    const currentName = portableSessionDirName(rootCwd, options);
     const input = `${JSON.stringify({ cwd: `pi-session-sync://${rootName}` })}\n`;
     const resolver = createParentPathResolver(
       sessionsRoot,
@@ -44,12 +45,12 @@ describe("session file transformation", () => {
       namingOptions: options,
     });
     expect(JSON.parse(local.outputText).cwd).toBe(rootCwd);
-    expect(JSON.parse(local.canonicalText).cwd).toBe(`pi-session-sync://${rootName}`);
+    expect(JSON.parse(local.canonicalText).cwd).toBe(`pi-session-sync://${currentName}`);
     const target = transformFileText("session.jsonl", local.outputText, "to-target", resolver, {
       namingOptions: options,
       portableName: rootName,
     });
-    expect(JSON.parse(target.outputText).cwd).toBe(`pi-session-sync://${rootName}`);
+    expect(JSON.parse(target.outputText).cwd).toBe(`pi-session-sync://${currentName}`);
     expect(target.canonicalText).toBe(local.canonicalText);
   });
 
@@ -80,7 +81,7 @@ describe("session file transformation", () => {
     expect(restoredEntry.parentSession).toBe(`${sessionsRoot}/${localName}/parent.jsonl`);
   });
 
-  it("keeps Markdown parentSession bytes in output while rewriting generic paths", () => {
+  it("rewrites Markdown parentSession alongside generic paths", () => {
     const inRootParent = join(sessionsRoot, localName, "parent.jsonl");
     const inRootRecord = join(sessionsRoot, localName, "record.json");
     const syncParent = `pi-session-sync://sessions/${portableName}/parent.jsonl`;
@@ -96,11 +97,9 @@ describe("session file transformation", () => {
       "body",
     ].join("\n");
     const transformed = transformFileText("note.md", input, "to-local", resolver);
-    // Legal Markdown parentSession bytes remain unchanged in output in both
-    // directions: the local absolute spelling and the sync URI spelling both
-    // survive verbatim, and only canonicalText normalizes them together.
+    // ParentSession URI values decode in output and normalize in the hash.
     expect(transformed.outputText).toContain(`parentSession: ${inRootParent}`);
-    expect(transformed.outputText).toContain(`parentSession: ${syncParent}`);
+    expect(transformed.outputText).not.toContain(`parentSession: ${syncParent}`);
     expect(transformed.canonicalText).toContain(`parentSession: ${syncParent}`);
     // Generic non-parentSession path fields in the same file still rewrite.
     expect(transformed.outputText).toContain(`sessionPath: ${inRootRecord}`);
@@ -108,7 +107,7 @@ describe("session file transformation", () => {
 
     // The same contract holds in the to-target direction.
     const target = transformFileText("note.md", transformed.outputText, "to-target", resolver);
-    expect(target.outputText).toContain(`parentSession: ${inRootParent}`);
+    expect(target.outputText).not.toContain(`parentSession: ${inRootParent}`);
     expect(target.outputText).toContain(`parentSession: ${syncParent}`);
     expect(target.outputText).toContain(`sessionPath: ${syncRecord}`);
     expect(target.cwdValues).toEqual([cwd, cwd]);
@@ -187,7 +186,7 @@ describe("session file transformation", () => {
     ).toThrow(/Unresolved YAML alias/);
   });
 
-  it("normalizes valid Markdown parentSession paths only in canonical hashes", () => {
+  it("normalizes valid Markdown parentSession paths in output and canonical hashes", () => {
     const parentPath = join(sessionsRoot, localName, "parent.jsonl");
     const syncParent = `pi-session-sync://sessions/${portableName}/parent.jsonl`;
     const localInput = [
@@ -209,13 +208,11 @@ describe("session file transformation", () => {
     const local = transformFileText("hash-local.md", localInput, "to-target", resolver);
     const target = transformFileText("hash-target.md", targetInput, "to-local", resolver);
 
-    // Output bytes stay unchanged in both directions: the local absolute
-    // spelling and the sync URI spelling are both preserved verbatim.
-    expect(local.outputText).toContain(`parentSession: ${parentPath}`);
-    expect(local.outputText).not.toContain(`parentSession: ${syncParent}`);
-    expect(target.outputText).toContain(`parentSession: ${syncParent}`);
-    expect(target.outputText).not.toContain(`parentSession: ${parentPath}`);
-    // Only canonicalText normalizes both representations to the same URI.
+    // Output converts in both directions; hashes use one portable spelling.
+    expect(local.outputText).toContain(`parentSession: ${syncParent}`);
+    expect(local.outputText).not.toContain(`parentSession: ${parentPath}`);
+    expect(target.outputText).toContain(`parentSession: ${parentPath}`);
+    expect(target.outputText).not.toContain(`parentSession: ${syncParent}`);
     expect(local.canonicalText).toContain(`parentSession: ${syncParent}`);
     expect(target.canonicalText).toContain(`parentSession: ${syncParent}`);
     expect(local.canonicalText).toBe(
@@ -836,9 +833,7 @@ describe("session file transformation", () => {
       recordPath: string;
     };
     expect(messageOutput.message.content[0]?.arguments.pattern).toBe(literalProbe);
-    expect(messageOutput.recordPath).toBe(
-      `pi-session-sync://sessions/${portableName}/record.json`,
-    );
+    expect(messageOutput.recordPath).toBe(`pi-session-sync://sessions/${portableName}/record.json`);
     expect(messageResult.warnings ?? []).toEqual([]);
 
     // Worker transcript previews are tool content, not path metadata. Keep the
@@ -885,12 +880,9 @@ describe("session file transformation", () => {
 
     {
       const sessionPath = join(sessionsRoot, localName, "subagent-artifacts");
-      const fallbackResolver = createParentPathResolver(
-        sessionsRoot,
-        () => undefined,
-        "nested",
-        { portableName },
-      );
+      const fallbackResolver = createParentPathResolver(sessionsRoot, () => undefined, "nested", {
+        portableName,
+      });
       const input = `${JSON.stringify({ sessionPath })}\n`;
       const forward = transformFileText(
         "session-directory.jsonl",
@@ -925,15 +917,16 @@ describe("session file transformation", () => {
     );
   });
 
-  it("preserves unmappable absolute JSON values silently and rejects undecodable target candidates", () => {
+  it("preserves target absolute JSON bytes but hashes their current-prefix encoding", () => {
     const unmappedInRoot = join(sessionsRoot, "unmapped", "record.json");
     const input = `${JSON.stringify({ sessionPath: unmappedInRoot }, null, 2)}\n`;
     const local = transformFileText("bad.json", input, "to-local", resolver);
     expect(local.outputText).toBe(input);
-    // Canonical hashing keeps the target machine-local absolute spelling
-    // byte-identical so content equality and conflicts compare the original
-    // values, and a non-candidate value produces no diagnostic (v0.4.2).
-    expect(local.canonicalText).toBe(input);
+    // Unmapped session paths use current-prefix rootless encoding for hashes,
+    // exactly like their equivalent supported portable URI.
+    expect(JSON.parse(local.canonicalText).sessionPath).toBe(
+      `pi-session-sync://${portableSessionDirName(unmappedInRoot)}`,
+    );
     expect(local.warnings ?? []).toEqual([]);
     // Two identical values hash to the same canonical text.
     const again = transformFileText("bad.json", input, "to-local", resolver);
@@ -948,21 +941,24 @@ describe("session file transformation", () => {
     }
   });
 
-  it("keeps mappable target absolute generic paths raw in bytes and canonical hash", () => {
-    // Phase 2: a target path field that is NOT a portable path is copied back
-    // to local verbatim, so its canonical hash must use the same raw bytes
-    // (user clarification), silently (v0.4.2).
+  it("keeps target absolute generic bytes raw but normalizes their canonical hash", () => {
+    // Target absolute bytes remain unchanged; hashes share the managed URI
+    // identity of equivalent local absolute and supported portable values.
     const inRootRecord = join(sessionsRoot, localName, "record.json");
     const jsonlInput = `${JSON.stringify({ recordPath: inRootRecord, nested: { owner: inRootRecord } })}\n`;
     const jsonl = transformFileText("raw.jsonl", jsonlInput, "to-local", resolver);
     expect(jsonl.outputText).toBe(jsonlInput);
-    expect(jsonl.canonicalText).toBe(jsonlInput);
+    expect(jsonl.canonicalText).toBe(
+      transformFileText("raw.jsonl", jsonlInput, "to-target", resolver).canonicalText,
+    );
     expect(jsonl.warnings ?? []).toEqual([]);
 
     const jsonInput = `${JSON.stringify({ recordPath: inRootRecord }, null, 2)}\n`;
     const json = transformFileText("raw.json", jsonInput, "to-local", resolver);
     expect(json.outputText).toBe(jsonInput);
-    expect(json.canonicalText).toBe(jsonInput);
+    expect(json.canonicalText).toBe(
+      transformFileText("raw.json", jsonInput, "to-target", resolver).canonicalText,
+    );
 
     const mdInput = [
       "---",
@@ -972,12 +968,13 @@ describe("session file transformation", () => {
       "body",
     ].join("\n");
     const md = transformFileText("raw.md", mdInput, "to-local", resolver);
-    // The portable cwd is rewritten to its local path; the nonportable generic
-    // absolute stays byte-identical and hashes raw.
+    // The portable cwd is rewritten to its local path; the generic absolute
+    // stays byte-identical in output but hashes as a managed sessions URI.
     expect(md.outputText).toContain(`cwd: ${cwd}`);
     expect(md.outputText).toContain(`recordPath: ${inRootRecord}`);
-    expect(md.canonicalText).toContain(`recordPath: ${inRootRecord}`);
-    expect(md.canonicalText).not.toContain(`recordPath: pi-session-sync://sessions/`);
+    expect(md.canonicalText).toContain(
+      `recordPath: pi-session-sync://sessions/${portableName}/record.json`,
+    );
   });
 
   it("round-trips a portable generic URI through target->local->target with one canonical hash", () => {
@@ -1023,9 +1020,12 @@ describe("session file transformation", () => {
         warning.includes(`Invalid target path preserved verbatim: ${unmappedInRoot}`),
       ) ?? false,
     ).toBe(false);
-    // Canonical hashing keeps the preserved values verbatim.
+    // Unsupported cwd hashes raw; generic absolute metadata hashes with its
+    // current-prefix rootless identity when the session mapping is unavailable.
     expect(local.canonicalText).toContain("pi-session-sync://garbage");
-    expect(local.canonicalText).toContain(unmappedInRoot);
+    expect(local.canonicalText).toContain(
+      `pi-session-sync://${portableSessionDirName(unmappedInRoot)}`,
+    );
 
     // v0.4.2: a non-candidate `pi-session-sync:` value is preserved silently in
     // both directions, while an exact-prefix value that cannot be decoded is a
@@ -1187,13 +1187,9 @@ describe("session file transformation", () => {
     expect((genericFirst.genericPathReferences?.length ?? 0) > 0).toBe(true);
   });
 
-  it("protects output bytes when the anchor is declared directly under parentSession", () => {
-    // The anchored scalar itself IS the parentSession value and is aliased by
-    // generic and cwd fields. The parentSession output bytes must stay the
-    // absolute local spelling in to-target even though the shared scalar is
-    // also rewritten through the generic/cwd use-sites: those use-sites are
-    // isolated while the parent anchor declaration is treated as a protected
-    // parentSession use-site.
+  it("converts parentSession-declared anchors with isolated generic and cwd uses", () => {
+    // The parent anchor and isolated generic/cwd uses convert according to
+    // their own field semantics.
     const localParent = join(sessionsRoot, localName, "parent.jsonl");
     const build = (cwdAlias: boolean): string =>
       [
@@ -1207,8 +1203,10 @@ describe("session file transformation", () => {
       ].join("\n");
     for (const withCwd of [false, true]) {
       const out = transformFileText("parent-anchor.md", build(withCwd), "to-target", resolver);
-      // ParentSession bytes are preserved verbatim, anchor declaration intact.
-      expect(out.outputText).toContain(`parentSession: &shared ${localParent}`);
+      // ParentSession converts while its anchor declaration remains intact.
+      expect(out.outputText).toContain(
+        `parentSession: &shared pi-session-sync://sessions/${portableName}/parent.jsonl`,
+      );
       // The generic use-site is isolated and rewritten to the portable URI.
       expect(out.outputText).toContain(
         `sessionPath: pi-session-sync://sessions/${portableName}/parent.jsonl`,
@@ -1224,7 +1222,7 @@ describe("session file transformation", () => {
     }
   });
 
-  it("protects parentSession-declared anchors when the parent key follows unrelated generic fields", () => {
+  it("converts parentSession-declared anchors independently of field order", () => {
     // Both field orders in the document: the parentSession anchor appears
     // after unrelated generic content, and the alias use-sites come after the
     // declaration. Field order of the DECLARATION within the document must
@@ -1241,9 +1239,11 @@ describe("session file transformation", () => {
       "body",
     ].join("\n");
     const out = transformFileText("parent-anchor-order.md", md, "to-target", resolver);
-    expect(out.outputText).toContain(`parentSession: &shared ${localParent}`);
+    expect(out.outputText).toContain(
+      `parentSession: &shared pi-session-sync://sessions/${portableName}/parent.jsonl`,
+    );
     // The unrelated generic field is rewritten as a normal generic path while
-    // the parentSession anchor bytes stay intact.
+    // the parentSession anchor converts with its own semantics.
     expect(out.outputText).toContain(
       `ownerSessionId: pi-session-sync://sessions/${portableName}/parent.jsonl`,
     );

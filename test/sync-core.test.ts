@@ -171,11 +171,11 @@ describe("bidirectional session sync core", () => {
         machineId: "markdown-parent-hash-machine",
         now: 1_000,
       });
-      // Markdown parentSession bytes stay unchanged in output: only cwd is
-      // rewritten, and only the canonical hash normalizes the local absolute
-      // parentSession and the sync URI to one portable representation.
+      // Markdown paths convert together and share the portable canonical hash.
       expect(await readFile(target, "utf8")).toBe(
-        localText.replace(`cwd: ${fixture.cwd}`, `cwd: pi-session-sync://${fixture.portableName}`),
+        localText
+          .replace(`cwd: ${fixture.cwd}`, `cwd: pi-session-sync://${fixture.portableName}`)
+          .replace(parentPath, `pi-session-sync://sessions/${fixture.portableName}/parent.jsonl`),
       );
 
       const unchanged = await syncSessions({
@@ -295,7 +295,7 @@ describe("bidirectional session sync core", () => {
     }
   });
 
-  it("rejects local Markdown parentSession using an alternate label for the same CWD", async () => {
+  it("re-encodes local Markdown parentSession using the current label for the same CWD", async () => {
     const fixture = await makeFixture();
     const cwd = join(homedir(), `pi-sync-md-alt-label-${Date.now()}`);
     const localTree = join(fixture.sessionsRoot, defaultSessionDirName(cwd));
@@ -316,19 +316,17 @@ describe("bidirectional session sync core", () => {
       await mkdir(localTree, { recursive: true });
       await writeFile(source, localText);
       await utimes(source, 1, 1);
-      await expect(
-        syncSessions({
-          missionsRoot: fixture.missionsRoot,
-
-          sessionsRoot: fixture.sessionsRoot,
-          targetDir: fixture.targetDir,
-          now: 1_000,
-        }),
-      ).rejects.toThrow(/label conflicts/);
-      // Markdown stays unchanged and no state or files are written.
+      const summary = await syncSessions({
+        missionsRoot: fixture.missionsRoot,
+        sessionsRoot: fixture.sessionsRoot,
+        targetDir: fixture.targetDir,
+        now: 1_000,
+      });
+      expect(summary.copied).toBe(1);
       expect(await readFile(source, "utf8")).toBe(localText);
-      await expect(readFile(join(fixture.targetDir, STATE_FILE_NAME), "utf8")).rejects.toThrow();
-      expect(await readdir(join(fixture.targetDir, "sessions"))).toEqual([]);
+      expect(
+        await readFile(join(fixture.targetDir, "sessions", treeName, "notes.md"), "utf8"),
+      ).toContain(`parentSession: pi-session-sync://sessions/${treeName}/parent.jsonl`);
     } finally {
       await cleanup(fixture.root);
       await rm(cwd, { recursive: true, force: true });
@@ -534,8 +532,7 @@ describe("bidirectional session sync core", () => {
         now: 2_000,
       });
 
-      // An empty alternate-label tree and an unknown-only alternate tree for
-      // the same CWD must not block an unrelated sync/adoption.
+      // An empty alternate-label tree must not block an unrelated sync.
       await mkdir(join(fixture.targetDir, "sessions", alternateName), { recursive: true });
       await mkdir(join(fixture.targetDir, "sessions", `${alternateName}-unknown`), {
         recursive: true,
@@ -553,22 +550,31 @@ describe("bidirectional session sync core", () => {
         now: 4_000,
       });
 
-      // Deleting a live local session creates a tombstone and triggers the
-      // existing empty-directory cleanup, so the empty alternate tree is
-      // removed while the unchanged live tree stays.
+      // The same alternate root becomes unknown-only; it must still stay
+      // outside mapping and cleanup, including when a live file is deleted.
+      const ignoredAlternateFile = join(
+        fixture.targetDir,
+        "sessions",
+        alternateName,
+        "ignored.txt",
+      );
+      await writeFile(ignoredAlternateFile, "untouched alternate content\n");
       await rm(localMarkdown);
       await syncSessions({
         missionsRoot: fixture.missionsRoot,
         ...options,
         now: 5_000,
       });
-      await expect(lstat(join(fixture.targetDir, "sessions", alternateName))).rejects.toThrow();
+      expect((await lstat(join(fixture.targetDir, "sessions", alternateName))).isDirectory()).toBe(
+        true,
+      );
       expect(
         JSON.parse(
           await readFile(join(fixture.targetDir, "sessions", liveName, "session.jsonl"), "utf8"),
         ).cwd,
       ).toBe(`pi-session-sync://${liveName}`);
-      // The unknown-only alternate tree with content stays ignored.
+      expect(await readFile(ignoredAlternateFile, "utf8")).toBe("untouched alternate content\n");
+      // The unrelated unknown-only tree with content stays ignored too.
       expect(
         await readFile(
           join(fixture.targetDir, "sessions", `${alternateName}-unknown`, "ignored.txt"),
@@ -1094,6 +1100,4 @@ describe("bidirectional session sync core", () => {
       await cleanup(fixture.root);
     }
   });
-
-
 });

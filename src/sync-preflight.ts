@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import { lstat, realpath, stat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { SessionLayout } from "./config.ts";
 import {
@@ -9,12 +9,7 @@ import {
   type PortableNameOptions,
 } from "./portable-name.ts";
 import type { ScannedFile, ScanResult } from "./scan.ts";
-import {
-  isSyncUri,
-  pathIdentity,
-  SESSIONS_FILE_URI_PREFIX,
-  syncParentUriToLocalPath,
-} from "./session-paths.ts";
+import { isSyncUri, pathIdentity, SESSIONS_FILE_URI_PREFIX } from "./session-paths.ts";
 import type { StateEntry, SyncState } from "./state.ts";
 import { restoreDecisionState } from "./sync-commit.ts";
 import { flatLogicalKey, isFlatPathUnderMappingDirectory } from "./sync-flat.ts";
@@ -136,9 +131,8 @@ export async function sourcePathResolves(file: ScannedFile): Promise<boolean> {
  *
  * - A sessions-directory URI (`pi-session-sync://sessions/<portableName>` with
  *   no relative path) names a directory, not a file: file error.
- * - A referenced target that EXISTS but is not a regular file (directory,
- *   symlink, fifo, ...) is a file error. A MISSING target stays valid when the
- *   URI, range, and segment rules already passed during the scan.
+ * - Referenced paths are never probed for existence or filesystem type.
+ *   URI, range, and segment rules are validated during the scan.
  * - Raw absolute references are validated through the sync URI the scan's
  *   local→target conversion produced (`mappedUri`): the converted form must
  *   never bypass the parent-file contract just because the source spelling was
@@ -152,7 +146,6 @@ export async function sourcePathResolves(file: ScannedFile): Promise<boolean> {
  */
 export async function validateParentReferenceTargets(
   files: ReadonlyMap<string, ScannedFile>,
-  ctx: DecisionContext,
 ): Promise<void> {
   for (const file of files.values()) {
     if (file.side !== "local") continue;
@@ -172,31 +165,6 @@ export async function validateParentReferenceTargets(
       if (slash < 0) {
         throw new Error(
           `parentSession must reference a session file, not a session directory: ${reference.value}`,
-        );
-      }
-      // Resolve the referenced local path on a best-effort basis: URI syntax,
-      // range, and segment rules were already validated during the scan. A
-      // path that cannot even be computed (e.g. a decoded cwd whose generated
-      // session directory name is unsafe) can never exist on this machine, so
-      // only the regular-file existence check depends on it.
-      let localTarget: string | undefined;
-      try {
-        localTarget = syncParentUriToLocalPath(
-          effectiveUri,
-          ctx.sessionsRoot,
-          ctx.layout,
-          ctx.namingOptions,
-        );
-      } catch {
-        localTarget = undefined;
-      }
-      if (localTarget === undefined) continue;
-      // stat (follow) semantics match the scanner: a leaf file symlink is a
-      // session file, while a directory (or symlink to one) is not regular.
-      const info = await stat(localTarget).catch(() => undefined);
-      if (info !== undefined && !info.isFile()) {
-        throw new Error(
-          `parentSession references a non-regular file: ${reference.value} -> ${localTarget}`,
         );
       }
     }

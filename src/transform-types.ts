@@ -34,15 +34,6 @@ export interface TransformOptions extends Partial<PortableNameOptions> {
   namingOptions?: Partial<PortableNameOptions>;
   portableName?: string;
   /**
-   * Per-file semantic-label evidence for `cwd` values (missions). Maps the
-   * normalized local cwd path (see `cwdEvidenceKey` in `transform-visitor.ts`) to the
-   * portable name that MUST be preserved across round-trips: a target-derived
-   * cwd that decodes under the current HOME must re-encode with its original
-   * ROOT label instead of being re-derived from naming options. Sessions keep
-   * using `portableName`; missions pass this evidence map instead.
-   */
-  cwdEvidence?: Readonly<Record<string, string>>;
-  /**
    * Defer whole-file output rendering (v0.5.2). A materialized (non-streamed)
    * result then returns an empty `outputText`: `transformFile` attaches a
    * `deferredOutput` handle that re-renders the bytes from the source on

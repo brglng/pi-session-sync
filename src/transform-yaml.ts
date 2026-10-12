@@ -31,22 +31,9 @@ import {
   parseDocument,
   type Scalar,
 } from "yaml";
-import { normalizePortableNameOptions, strictPortableNameIdentity } from "./portable-name.ts";
-import {
-  cwdToSyncUri,
-  isSyncUri,
-  normalizeCwd,
-  SYNC_URI_PREFIX,
-  syncUriToCwd,
-  syncUriToPortableName,
-} from "./session-paths.ts";
+import { normalizePortableNameOptions } from "./portable-name.ts";
 import { FILE_LEVEL_DIAGNOSTIC_KEY, type TransformDiagnostic } from "./sync-events.ts";
-import { type InspectedSyncUri, inspectSyncUri } from "./sync-paths.ts";
-import {
-  boundedValuePreview,
-  fileScopedTransformError,
-  TransformFileError,
-} from "./transform-diagnostics.ts";
+import { fileScopedTransformError, TransformFileError } from "./transform-diagnostics.ts";
 import type {
   ParentPathResolver,
   ParentSessionReference,
@@ -56,17 +43,11 @@ import type {
 } from "./transform-types.ts";
 import {
   createTransformedFile,
-  cwdEvidenceKey,
-  isEncodableLocalPath,
-  isRelativeCwdValue,
-  isSyncUriPathCandidate,
   namingOptionsForTransform,
-  pushWarning,
   rewriteParentSessionValue,
   rewriteRecursivePathValue,
-  tryDecodeCwdValue,
   type VisitContext,
-  warnPreservedMalformedCandidateUri,
+  visitValue,
 } from "./transform-visitor.ts";
 import {
   isolateSharedYamlCwdAliases,
@@ -120,99 +101,7 @@ function rewriteYamlCwdValue(
   cwdValues: string[],
   cwdPortableNames: string[],
 ): string {
-  const { mode, namingOptions } = context;
-  if (isSyncUri(value) && !isSyncUriPathCandidate(value)) {
-    // `pi-session-sync:` without the `//` authority, and any value whose shape
-    // is not a portable candidate, is ordinary content: preserved silently.
-    return value;
-  }
-  if (isSyncUri(value)) {
-    // A `pi-session-sync://` value in `cwd` follows the same syntax contract as
-    // every other field, but only the rootless `cwd` form is legal here.
-    let inspected: InspectedSyncUri;
-    try {
-      inspected = inspectSyncUri(value, context.namingConfig);
-    } catch {
-      warnPreservedMalformedCandidateUri(value, context);
-      return value;
-    }
-    if (mode === "to-target" || mode === "inspect-local") {
-      // A local source may already contain a portable-looking value. Values
-      // outside the currently configured cwd prefix are preserved silently.
-      if (inspected.namespace !== "cwd" || inspected.nameClass !== "current") return value;
-      return value;
-    }
-    if (mode === "to-local" || mode === "inspect-target") {
-      if (inspected.namespace !== "cwd") {
-        warnPreservedMalformedCandidateUri(value, context);
-        return value;
-      }
-      if (inspected.nameClass !== "current") {
-        pushWarning(
-          context,
-          `Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`,
-          value,
-        );
-        return value;
-      }
-    }
-  }
-  if (mode === "to-target") {
-    if (isRelativeCwdValue(value)) return value;
-    if (!isEncodableLocalPath(value)) return value;
-    // Missions rewrite cwd through per-file semantic-label evidence when
-    // available (preserves a ROOT label whose decoded path is under the
-    // current HOME); sessions keep the single configured portable name.
-    // v0.4.1: a cwd value the file's portable name cannot be attributed to
-    // (for example one of several conflicting `cwd` values in one file) is
-    // preserved verbatim with a bounded warning instead of stopping the sync.
-    let uri: string;
-    try {
-      uri = cwdToSyncUri(
-        value,
-        namingOptions,
-        context.cwdEvidence?.[cwdEvidenceKey(value)] ?? context.portableName,
-      );
-    } catch {
-      return value;
-    }
-    cwdValues.push(syncUriToCwd(uri, namingOptions));
-    cwdPortableNames.push(syncUriToPortableName(uri, namingOptions));
-    return uri;
-  }
-  if (mode === "inspect-local") {
-    if (isRelativeCwdValue(value)) return value;
-    if (!isEncodableLocalPath(value)) return value;
-    const cwd = normalizeCwd(value);
-    cwdValues.push(cwd);
-    return value;
-  }
-  if (mode === "to-local" || mode === "inspect-target") {
-    if (isRelativeCwdValue(value)) return value;
-    const decoded = tryDecodeCwdValue(value, namingOptions);
-    if (decoded === undefined) {
-      pushWarning(
-        context,
-        `Invalid target cwd value preserved verbatim: ${boundedValuePreview(value)}`,
-        value,
-      );
-      return value;
-    }
-    cwdValues.push(decoded.cwd);
-    cwdPortableNames.push(decoded.name);
-    return mode === "to-local" ? decoded.cwd : `${SYNC_URI_PREFIX}${decoded.name}`;
-  }
-  const decoded = tryDecodeCwdValue(value, namingOptions);
-  if (decoded === undefined) {
-    // Canonical hashing hashes invalid target values exactly as the output
-    // pass left them so equivalent spellings compare identical.
-    return value;
-  }
-  cwdValues.push(decoded.cwd);
-  cwdPortableNames.push(decoded.name);
-  // Canonical hashing normalizes legacy loose spellings to the strict
-  // identity so equivalent labels hash identically on every platform.
-  return `${SYNC_URI_PREFIX}${strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name}`;
+  return visitValue(value, { ...context, cwdValues, cwdPortableNames }, "cwd") as string;
 }
 
 function isYamlMappingValue(node: unknown, document: Document): boolean {
@@ -303,12 +192,9 @@ function rewriteYamlCwdNodes(
  * every remaining alias of one anchored scalar shares the same string value,
  * so its generic rewrite is identical at every use site.
  *
- * Markdown string-valued parentSession output bytes are preserved in every
- * direction: the output pass skips those scalars after URI/range validation.
+ * String-valued parentSession uses the same conversion as JSON and JSONL.
  * Object-valued parentSession mappings recurse through child fields as generic
- * paths. Only the canonical-target pass rewrites parentSession strings so the
- * canonical hash normalizes legal local-absolute and sync-URI spellings to one
- * portable representation.
+ * paths; non-string scalars and arrays remain untouched.
  */
 function rewriteYamlGenericNodes(
   node: unknown,
@@ -351,11 +237,7 @@ function rewriteYamlGenericNodes(
         if (pairKey === "cwd" && !isYamlMappingValue(pair.value, document)) continue;
         if (pairKey === "parentSession") {
           const objectValue = isYamlMappingValue(pair.value, document);
-          if (
-            !objectValue &&
-            (context.mode !== "canonical-target" ||
-              resolvedYamlScalar(pair.value, document) === undefined)
-          ) {
+          if (!objectValue && resolvedYamlScalar(pair.value, document) === undefined) {
             continue;
           }
         }
@@ -420,7 +302,7 @@ function yamlNodeLine(context: VisitContext, node: Node): number {
  * Validation and reference collection are use-site aware: an anchored scalar
  * referenced by several fields is visited once per use-site with that
  * use-site's key. ParentSession semantics (sessions-only/range validation and
- * bytes-unchanged output) must never depend on field order or
+ * conversion) must never depend on field order or
  * a shared-scalar visited dedup. Map/sequence nodes keep visited-cycle
  * protection so self-referential structures terminate.
  */
@@ -566,7 +448,6 @@ export function transformMarkdown(
       namingOptions,
       namingConfig,
       portableName: options.portableName,
-      cwdEvidence: options.cwdEvidence,
       warnings,
       diagnostics,
       file: filePath,
@@ -596,7 +477,9 @@ export function transformMarkdown(
     rewriteYamlGenericNodes(
       outputDocument.contents,
       outputDocument,
-      baseContext,
+      // Generic/parent diagnostics were already collected per original
+      // use-site. Rendering must not report them a second time.
+      { ...baseContext, warnings: [], diagnostics: [] },
       new Set<object>(),
     );
     const canonicalDocument = mode === "to-local" ? document.clone() : outputDocument.clone();
@@ -613,7 +496,6 @@ export function transformMarkdown(
         namingOptions,
         namingConfig,
         portableName: undefined,
-        cwdEvidence: undefined,
         warnings: [],
         diagnostics: [],
         file: filePath,

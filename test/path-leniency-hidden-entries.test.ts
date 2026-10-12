@@ -135,7 +135,7 @@ describe("v0.4.1 path leniency", () => {
     }
   });
 
-  it("preserves an unmapped in-root local generic path silently", async () => {
+  it("encodes an unmapped in-root generic path with the current rootless prefix silently", async () => {
     const fixture = await makeFixture();
     const unmapped = join(fixture.sessionsRoot, "unmapped-dir", "record.json");
     try {
@@ -155,8 +155,8 @@ describe("v0.4.1 path leniency", () => {
         now: 1_000,
       });
       expect(summary.copied).toBe(2);
-      // v0.4.2: local content that does not lie inside a configured portable
-      // prefix is preserved silently, with no diagnostic.
+      // Missing session mappings use current-prefix rootless encoding
+      // silently instead of inventing a sessions URI.
       expect(
         summary.warnings.some((warning) =>
           warning.includes(`Invalid local path preserved verbatim: ${unmapped}`),
@@ -168,7 +168,7 @@ describe("v0.4.1 path leniency", () => {
           "utf8",
         ),
       ) as Record<string, unknown>;
-      expect(target.recordPath).toBe(unmapped);
+      expect(target.recordPath).toBe(`pi-session-sync://${portableSessionDirName(unmapped)}`);
     } finally {
       await cleanup(fixture.root);
     }

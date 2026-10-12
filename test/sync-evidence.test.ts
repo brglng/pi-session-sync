@@ -302,7 +302,7 @@ describe("cross-machine state evidence helpers", () => {
     );
   });
 
-  it("rebuilds generic resolver input for this layout and rejects label conflicts", () => {
+  it("rebuilds generic resolver input with current-prefix identities", () => {
     const result = persistedGenericExtraMappings(
       scope({ genericDirectories: { "stored-name": portable } }),
       ctx(),
@@ -335,9 +335,7 @@ describe("cross-machine state evidence helpers", () => {
     expect(merged.size).toBe(1);
 
     if (process.platform === "win32") return;
-    // A HOME label and a ROOT label decoding to the same cwd are incompatible
-    // semantic mappings: the sync stops rather than re-encoding generic paths
-    // under the wrong label.
+    // Supported labels decoding to the same cwd share its current identity.
     const conflictingOptions = normalizePortableNameOptions({
       homeLabel: "HOMEDIR",
       rootLabel: "ROOTDIR",
@@ -350,11 +348,11 @@ describe("cross-machine state evidence helpers", () => {
       conflictingOptions,
     );
     expect(homeLabelName).not.toBe(rootLabelName);
-    expect(() =>
-      persistedGenericExtraMappings(
-        scope({ genericDirectories: { a: homeLabelName, b: rootLabelName } }),
-        ctx({ namingOptions: conflictingOptions }),
-      ),
-    ).toThrow(/Conflicting generic session mapping for /);
+    const current = persistedGenericExtraMappings(
+      scope({ genericDirectories: { a: homeLabelName, b: rootLabelName } }),
+      ctx({ namingOptions: conflictingOptions }),
+    );
+    expect(current.size).toBe(1);
+    expect(current.get(defaultSessionDirName(homeCwd))?.portableName).toBe(homeLabelName);
   });
 });

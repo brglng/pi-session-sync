@@ -47,9 +47,7 @@ import {
 import { RealtimeSyncReporter, SCAN_EVENT_KEY } from "./sync-events.ts";
 import {
   addPersistedMissionEvidence,
-  copyCwdEvidence,
   currentMachineEvidenceLocalName,
-  patchMissionEntryEvidence,
   patchMissionSessionMappings,
   persistedGenericExtraMappings,
 } from "./sync-evidence.ts";
@@ -2114,10 +2112,9 @@ async function syncSessionsInternal(
       // Replacement parentSession directory mappings are applied to the state
       // scope only AFTER preflight: a symlink-blocked logical replacement
       // group must leave the state directory mapping bytes untouched.
-      // Local→target parentSession references must name parent session FILES:
-      // a sessions-directory URI or an existing non-regular referenced target
-      // is a file error that stops the sync before any staging or write.
-      await validateParentReferenceTargets(localScan.files, ctx);
+      // Local→target parentSession references retain the sessions file URI
+      // structure; referenced filesystem nodes are not inspected.
+      await validateParentReferenceTargets(localScan.files);
       const { blockedCopies, blockedDeletes, blockedReplacementPortableNames, refreshSessionFile } =
         await preflightDecisions(
           decisions,
@@ -2536,7 +2533,6 @@ async function syncSessionsInternal(
           missionPassOneResolver,
           true,
           ctx.physicalTargetDir,
-          undefined,
           scanProgress,
         );
         // Preserve the successful local scan's warnings BEFORE the target
@@ -2555,7 +2551,6 @@ async function syncSessionsInternal(
           missionPassOneResolver,
           false,
           ctx.physicalTargetDir,
-          undefined,
           scanProgress,
         );
         // Derive parent-only session directory mappings from the scanned
@@ -2579,55 +2574,8 @@ async function syncSessionsInternal(
           missionFallbackMappings.delete(localName);
           addMissionMapping(localName, portableName);
         }
-        // Mission cwd label evidence: the TARGET scan is the authoritative
-        // source of the semantic portable labels mission cwd values must
-        // keep across round-trips. When the current target file carries no
-        // decodable cwd (or is missing), this machine's PERSISTED evidence is
-        // the fallback so a surviving local copy still re-encodes with its
-        // original label. The merged evidence feeds the final local→target
-        // scan below.
-        const missionPersistedCwdEvidence: Record<string, Record<string, string>> = Object.create(
-          null,
-        ) as Record<string, Record<string, string>>;
-        for (const key of Object.keys(state.entries).filter(isMissionsKey)) {
-          const persisted = stateEntryForKey(state, key, ctx.namingOptions)?.cwdEvidence?.[
-            ctx.machineId
-          ];
-          if (persisted === undefined || Object.keys(persisted).length === 0) continue;
-          const record: Record<string, string> = Object.create(null) as Record<string, string>;
-          for (const [cwd, portableName] of Object.entries(persisted)) {
-            Object.defineProperty(record, cwd, {
-              value: portableName,
-              writable: true,
-              enumerable: true,
-              configurable: true,
-            });
-          }
-          Object.defineProperty(missionPersistedCwdEvidence, key, {
-            value: record,
-            writable: true,
-            enumerable: true,
-            configurable: true,
-          });
-        }
-        const missionTargetCwdEvidence = missionTargetScan.cwdEvidence;
-        const missionCwdEvidenceByKey = new Map<string, Readonly<Record<string, string>>>();
-        for (const key of new Set([
-          ...missionTargetCwdEvidence.keys(),
-          ...Object.keys(missionPersistedCwdEvidence),
-        ])) {
-          const targetRecord = missionTargetCwdEvidence.get(key);
-          const persistedRecord = missionPersistedCwdEvidence[key];
-          if (targetRecord !== undefined && Object.keys(targetRecord).length > 0) {
-            missionCwdEvidenceByKey.set(key, targetRecord);
-          } else if (persistedRecord !== undefined) {
-            missionCwdEvidenceByKey.set(key, persistedRecord);
-          }
-        }
         const missionLocalScan =
-          missionSessionMappings.size === 0 &&
-          missionPassOneMappings.size === 0 &&
-          missionCwdEvidenceByKey.size === 0
+          missionSessionMappings.size === 0 && missionPassOneMappings.size === 0
             ? firstMissionLocalScan
             : await scanMissionsTree(
                 ctx.missionsRoot as string,
@@ -2636,7 +2584,6 @@ async function syncSessionsInternal(
                 makeMissionsResolver(),
                 true,
                 ctx.physicalTargetDir,
-                missionCwdEvidenceByKey,
                 scanProgress,
               );
         if (missionLocalScan !== firstMissionLocalScan) {
@@ -2651,12 +2598,9 @@ async function syncSessionsInternal(
           }
         }
         pushUniqueWarnings(missionTargetScan.warnings);
-        // Local mission parentSession values follow the same parent-file
-        // contract as local sessions files: after the scan's to-target
-        // conversion, a raw absolute spelling or a sync URI naming an existing
-        // directory/non-regular target must stop the sync before preflight,
-        // staging, or any write.
-        await validateParentReferenceTargets(missionLocalScan.files, ctx);
+        // ParentSession retains URI/segment safety validation, without
+        // probing the referenced path's existence or filesystem type.
+        await validateParentReferenceTargets(missionLocalScan.files);
         const missionStateKeys = Object.keys(state.entries).filter(isMissionsKey);
         const missionAllKeys = new Set<string>([
           ...missionStateKeys,
@@ -2814,30 +2758,6 @@ async function syncSessionsInternal(
           } else {
             entry = existingEntry;
           }
-          // Carry over every OTHER machine's previously persisted cwd label
-          // evidence so a fresh decision entry never drops another machine's
-          // records before this machine's evidence is merged on top.
-          if (
-            entry.cwdEvidence === undefined &&
-            decision.previousEntry?.cwdEvidence !== undefined
-          ) {
-            entry.cwdEvidence = copyCwdEvidence(decision.previousEntry.cwdEvidence);
-          }
-          // The TARGET file's labels are authoritative when it exists this sync
-          // (an empty record resets stale labels); otherwise this machine's
-          // previously persisted labels keep a surviving local copy
-          // re-encoding with its original semantic label.
-          const targetEvidence = missionTargetCwdEvidence.get(decision.key);
-          const persistedEvidence = decision.previousEntry?.cwdEvidence?.[ctx.machineId];
-          const nextMachineEvidence =
-            targetEvidence !== undefined
-              ? Object.keys(targetEvidence).length > 0
-                ? targetEvidence
-                : undefined
-              : persistedEvidence !== undefined && Object.keys(persistedEvidence).length > 0
-                ? persistedEvidence
-                : undefined;
-          patchMissionEntryEvidence(entry, ctx.machineId, nextMachineEvidence);
           patchMissionSessionMappings(
             entry,
             decision.previousEntry,

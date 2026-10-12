@@ -40,15 +40,17 @@ vi.mock("node:fs/promises", async (importOriginal: <T = unknown>() => Promise<T>
   return { ...actual, stat: statWithInjection, readFile: readFileWithInjection };
 });
 
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { defaultSessionDirName } from "../src/portable-name.ts";
+import { defaultSessionDirName, portableSessionDirName } from "../src/portable-name.ts";
 import { syncSessions } from "../src/sync.ts";
 import {
   createParentPathResolver,
   LARGE_JSONL_STREAM_THRESHOLD_BYTES,
   transformFile,
+  transformFileText,
 } from "../src/transform.ts";
 import { cleanup, makeFixture } from "./sync-fixture.ts";
 
@@ -76,6 +78,133 @@ function recordBlock(): string {
 const resolver = createParentPathResolver(process.cwd(), () => undefined);
 
 describe("large JSONL sessions stream instead of decoding the whole file", () => {
+  for (const field of ["path", "parentSession", "cwd"] as const) {
+    for (const sizeProbe of ["over-threshold", "unknown"] as const) {
+      it(`keeps canonical evidence record-scoped after ${field} with ${sizeProbe} size`, async () => {
+        const fixture = await makeFixture();
+        try {
+          const namingOptions = { extraPrefixes: { [fixture.root]: "AGENT" } };
+          const name = portableSessionDirName(fixture.cwd, namingOptions);
+          const pathResolver = createParentPathResolver(
+            fixture.sessionsRoot,
+            (key) =>
+              key === defaultSessionDirName(fixture.cwd) ? { portableName: name } : undefined,
+            "nested",
+            namingOptions,
+            namingOptions,
+            fixture.missionsRoot,
+          );
+          const reference =
+            field === "cwd"
+              ? `pi-session-sync://${name}`
+              : field === "parentSession"
+                ? `pi-session-sync://sessions/${name}/missing.jsonl`
+                : `pi-session-sync://${portableSessionDirName(join(fixture.localTree, "missing.jsonl"), namingOptions)}`;
+          const contentOnly = '{ "note": "hello" }';
+          const excludedContent = `{ "type": "message", "message": { "content": ${JSON.stringify(reference)} } }`;
+          const excludedTool = `{ "version": 1, "recordType": "tool_start", "source": "worker", "runId": "run", "sourceEventType": "tool_execution_start", "argsPreview": ${JSON.stringify(reference)}, "text": ${JSON.stringify(reference)} }`;
+          const tail = `${contentOnly}\n${excludedContent}\n${excludedTool}\n`;
+          const text = `${JSON.stringify({ [field]: reference })}\n${tail}`;
+          const file = join(fixture.localTree, "record.jsonl");
+          await writeFile(file, text);
+          for (const mode of ["to-target", "to-local"] as const) {
+            const materialized = transformFileText(file, text, mode, pathResolver, {
+              namingOptions,
+            });
+            expect(materialized.canonicalText.endsWith(tail)).toBe(true);
+            expect(materialized.outputText.endsWith(tail)).toBe(true);
+            if (field === "path") expect(materialized.genericPathReferences?.length).toBe(1);
+            if (field === "parentSession")
+              expect(materialized.parentSessionReferences?.length).toBe(1);
+            if (field === "cwd") expect(materialized.cwdPortableNames?.length).toBe(1);
+
+            const deferred = await transformFile(file, mode, pathResolver, {
+              namingOptions,
+              deferOutput: true,
+            });
+            expect(deferred.outputText).toBe("");
+            expect(deferred.canonicalText).toBe(materialized.canonicalText);
+            expect(await deferred.deferredOutput?.text()).toBe(materialized.outputText);
+
+            if (sizeProbe === "over-threshold") {
+              injection.largePath = file;
+              injection.largeSize = LARGE_JSONL_STREAM_THRESHOLD_BYTES + 1;
+            } else {
+              injection.throwStatPath = file;
+            }
+            const streamed = await transformFile(file, mode, pathResolver, {
+              namingOptions,
+              deferOutput: true,
+            });
+            expect(streamed.streamedContent?.canonicalHash).toBe(
+              createHash("sha256").update(materialized.canonicalText).digest("hex"),
+            );
+            expect(streamed.genericPathReferences).toEqual(materialized.genericPathReferences);
+            expect(streamed.parentSessionReferences).toEqual(materialized.parentSessionReferences);
+            expect(streamed.cwdPortableNames).toEqual(materialized.cwdPortableNames);
+            const staged = join(fixture.root, `${mode}.jsonl`);
+            await streamed.streamedContent?.writeTo(staged);
+            expect(await readFile(staged, "utf8")).toBe(materialized.outputText);
+            injection.largePath = "";
+            injection.throwStatPath = "";
+          }
+        } finally {
+          injection.largePath = "";
+          injection.throwStatPath = "";
+          await cleanup(fixture.root);
+        }
+      });
+    }
+  }
+
+  it("shares materialized canonical hashes for unchanged current generic URIs", async () => {
+    const fixture = await makeFixture();
+    try {
+      const options = { extraPrefixes: { [fixture.root]: "AGENT" } };
+      const name = portableSessionDirName(fixture.cwd, options);
+      const pathResolver = createParentPathResolver(
+        fixture.sessionsRoot,
+        (key) => (key === defaultSessionDirName(fixture.cwd) ? { portableName: name } : undefined),
+        "nested",
+        options,
+        options,
+        fixture.missionsRoot,
+      );
+      const paths = [
+        join(fixture.localTree, "missing.jsonl"),
+        join(fixture.sessionsRoot, "unmapped", "missing.jsonl"),
+        join(fixture.root, "external", "missing.json"),
+      ];
+      const localText = `${paths.map((path) => `{ "path": ${JSON.stringify(path)} }`).join("\n")}\n`;
+      const currentText = transformFileText("record.jsonl", localText, "to-target", pathResolver, {
+        namingOptions: options,
+      }).outputText;
+      const file = join(fixture.localTree, "record.jsonl");
+      await writeFile(file, currentText);
+      injection.largePath = file;
+      injection.largeSize = LARGE_JSONL_STREAM_THRESHOLD_BYTES + 1;
+      for (const mode of ["to-target", "to-local"] as const) {
+        const streamed = await transformFile(file, mode, pathResolver, { namingOptions: options });
+        const materialized = transformFileText(file, currentText, mode, pathResolver, {
+          namingOptions: options,
+        });
+        const absolute = transformFileText(file, localText, mode, pathResolver, {
+          namingOptions: options,
+        });
+        expect(streamed.streamedContent?.canonicalHash).toBe(
+          createHash("sha256").update(materialized.canonicalText).digest("hex"),
+        );
+        expect(materialized.canonicalText).toBe(absolute.canonicalText);
+        const staged = join(fixture.root, `${mode}.jsonl`);
+        await streamed.streamedContent?.writeTo(staged);
+        expect(await readFile(staged, "utf8")).toBe(materialized.outputText);
+      }
+    } finally {
+      injection.largePath = "";
+      await cleanup(fixture.root);
+    }
+  });
+
   it("transforms a multi-megabyte JSONL file without a whole-file readFile", async () => {
     const fixture = await makeFixture();
     try {

@@ -58,14 +58,6 @@ export interface MissionScan {
    */
   rootUnavailable: boolean;
   /**
-   * Per-file cwd label evidence observed on the TARGET side: logical key →
-   * map of normalized local cwd path (this machine) → portable name. The
-   * semantic portable label must survive a target→local→target round trip,
-   * so each decoded target cwd records the label it carried on the URI.
-   * Populated for target scans only.
-   */
-  cwdEvidence: Map<string, Record<string, string>>;
-  /**
    * Logical paths of TARGET-side symlink entries the scan skipped (files AND
    * directories). A tracked target mission path replaced by a symlink is
    * UNAVAILABLE, not deleted: the decision loop must preserve the previous
@@ -75,11 +67,6 @@ export interface MissionScan {
    * prefixes, not exact file keys. Populated for target scans only.
    */
   ignoredTargetSymlinkPaths: Set<string>;
-}
-
-function cwdEvidenceKey(value: string): string {
-  const resolved = resolve(value);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
 function nodeIdentity(info: { dev: number; ino: number }): string {
@@ -162,7 +149,6 @@ export async function scanMissionsTree(
   resolver: ParentPathResolver,
   followSymlinks: boolean,
   forbiddenSymlinkTarget: string | undefined = undefined,
-  evidenceForKey: ReadonlyMap<string, Readonly<Record<string, string>>> | undefined = undefined,
   onProgress: ScanProgressReporter | undefined = undefined,
 ): Promise<MissionScan> {
   const warnings: string[] = [];
@@ -170,7 +156,6 @@ export async function scanMissionsTree(
   const knownDirectories = new Set<string>();
   const visitedDirectories = new Set<string>();
   const visitedFiles = new Set<string>();
-  const cwdEvidenceByKey = new Map<string, Record<string, string>>();
   const ignoredTargetSymlinkPaths = new Set<string>();
   const rootPathResolved = resolve(rootPath);
   const modeForFile = side === "local" ? "to-target" : "to-local";
@@ -188,7 +173,6 @@ export async function scanMissionsTree(
       rootPresent: false,
       blockedRoot: false,
       rootUnavailable: true,
-      cwdEvidence: new Map(),
       ignoredTargetSymlinkPaths: new Set(),
     };
   };
@@ -213,7 +197,6 @@ export async function scanMissionsTree(
       rootPresent: false,
       blockedRoot: true,
       rootUnavailable: false,
-      cwdEvidence: new Map(),
       ignoredTargetSymlinkPaths: new Set(),
     };
   }
@@ -230,7 +213,6 @@ export async function scanMissionsTree(
         rootPresent: false,
         blockedRoot: false,
         rootUnavailable: false,
-        cwdEvidence: new Map(),
         ignoredTargetSymlinkPaths: new Set(),
       };
     }
@@ -265,7 +247,6 @@ export async function scanMissionsTree(
           rootPresent: false,
           blockedRoot: false,
           rootUnavailable: false,
-          cwdEvidence: new Map(),
           ignoredTargetSymlinkPaths: new Set(),
         };
       }
@@ -281,7 +262,6 @@ export async function scanMissionsTree(
         rootPresent: false,
         blockedRoot: false,
         rootUnavailable: true,
-        cwdEvidence: new Map(),
         ignoredTargetSymlinkPaths: new Set(),
       };
     }
@@ -311,7 +291,6 @@ export async function scanMissionsTree(
         rootPresent: false,
         blockedRoot: true,
         rootUnavailable: false,
-        cwdEvidence: new Map(),
         ignoredTargetSymlinkPaths: new Set(),
       };
     }
@@ -335,42 +314,14 @@ export async function scanMissionsTree(
       throw new Error(`Unsafe cross-platform missions path: ${logicalPath}`);
     }
     const key = `${MISSIONS_LOGICAL_KEY_PREFIX}${nativeNameIdentity(relativePath)}`;
-    const perFileEvidence = evidenceForKey?.get(key);
     onProgress?.(`Transforming ${side} missions file`, logicalPath);
     const transformed = await transformFile(physicalPath, modeForFile, resolver, {
       namingOptions,
-      ...(perFileEvidence === undefined ? {} : { cwdEvidence: perFileEvidence }),
       deferOutput: true,
     });
     onProgress?.(`Transformed ${side} missions file`, logicalPath);
     for (const warning of transformed.warnings ?? []) {
       warnings.push(fileScopedTransformWarning(logicalPath, warning));
-    }
-    if (side === "target") {
-      // Record per-cwd semantic-label evidence: each decoded target cwd
-      // carries the portable name it MUST keep across a local round trip.
-      const names = transformed.cwdPortableNames ?? [];
-      if (names.length > 0) {
-        const evidence: Record<string, string> = Object.create(null) as Record<string, string>;
-        for (const [index, cwd] of transformed.cwdValues.entries()) {
-          const name = names[index];
-          if (name === undefined) continue;
-          const identityKey = cwdEvidenceKey(cwd);
-          const existing = evidence[identityKey];
-          if (existing !== undefined && existing !== name) {
-            throw new Error(
-              `Conflicting mission cwd label evidence in ${logicalPath}: ${existing} and ${name} for ${cwd}`,
-            );
-          }
-          Object.defineProperty(evidence, identityKey, {
-            value: name,
-            writable: true,
-            enumerable: true,
-            configurable: true,
-          });
-        }
-        cwdEvidenceByKey.set(key, evidence);
-      }
     }
     if (files.has(key)) throw new Error(`Duplicate logical missions file: ${key}`);
     const info = await lstat(physicalPath);
@@ -587,7 +538,6 @@ export async function scanMissionsTree(
       rootPresent: false,
       blockedRoot: false,
       rootUnavailable: false,
-      cwdEvidence: new Map(),
       ignoredTargetSymlinkPaths: new Set(),
     };
   }
@@ -598,7 +548,6 @@ export async function scanMissionsTree(
     rootPresent: true,
     blockedRoot: false,
     rootUnavailable: false,
-    cwdEvidence: cwdEvidenceByKey,
     ignoredTargetSymlinkPaths,
   };
 }

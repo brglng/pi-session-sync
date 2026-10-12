@@ -131,9 +131,9 @@ export function cwdToSyncUri(
   portableName: string | undefined = undefined,
 ): string {
   const normalizedCwd = normalizeCwd(cwd);
-  const name = portableName ?? portableSessionDirName(normalizedCwd, namingOptions);
+  const name = portableSessionDirName(normalizedCwd, namingOptions);
   if (portableName !== undefined) {
-    const decoded = decodePortableSessionDirName(name, namingOptions);
+    const decoded = decodePortableSessionDirName(portableName, namingOptions);
     const decodedCwd = decoded?.cwd;
     const samePath =
       decodedCwd !== undefined &&
@@ -194,7 +194,7 @@ export function syncUriToPortableName(
   if (decoded === null) {
     throw new Error(`Cannot decode pi-session-sync cwd URI: ${value}`);
   }
-  return decoded.name;
+  return portableSessionDirName(decoded.cwd, namingOptions);
 }
 
 function isPathInsideOrEqual(root: string, candidate: string): boolean {
@@ -391,7 +391,11 @@ export function localSessionPathToSyncUri(
     if (decodePortableSessionDirName(mapping.portableName, effectiveNamingOptions) === null) {
       throw new Error(`Invalid portable mapping: ${mapping.portableName}`);
     }
-    return mapping;
+    return {
+      portableName:
+        strictPortableNameIdentity(mapping.portableName, effectiveNamingOptions) ??
+        mapping.portableName,
+    };
   };
   const absolute = resolve(value);
   const relativePath = toPosixRelative(pathRelativeTo(sessionsRoot, absolute));
@@ -503,7 +507,7 @@ export function syncParentUriToPortableName(
     throw new Error(`Cannot decode pi-session-sync file URI: ${value}`);
   }
   if (parts.relativeEncoded.length > 0) decodeRelativeSegments(parts.relativeEncoded);
-  return decoded.name;
+  return portableSessionDirName(decoded.cwd, namingOptions);
 }
 
 export function syncParentUriToCanonical(
@@ -555,7 +559,7 @@ export function ensureLocalDirectoryMapping(
   }
   return {
     localName,
-    portableName,
+    portableName: portableSessionDirName(decoded.cwd, namingOptions),
     cwd: decoded.cwd,
   };
 }

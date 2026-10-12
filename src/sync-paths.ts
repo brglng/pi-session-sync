@@ -432,14 +432,14 @@ export function canonicalRootUri(value: string, namingOptions: PortableNameOptio
   if (sessionSlash <= 0) {
     // Sessions directory URI: canonicalize the portable name only.
     const decoded = decodeStrictSessionPortableName(value, rest, namingOptions);
-    const canonicalName = decoded.name;
-    return `${SESSIONS_FILE_URI_PREFIX}${strictPortableNameIdentity(canonicalName, namingOptions) ?? canonicalName}`;
+    const canonicalName = strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name;
+    return `${SESSIONS_FILE_URI_PREFIX}${canonicalName}`;
   }
   const portableName = rest.slice(0, sessionSlash);
   const decoded = decodeStrictSessionPortableName(value, portableName, namingOptions);
   const encodedRelativePath = rest.slice(sessionSlash + 1);
   const relativePath = decodeRootRelativePath(encodedRelativePath, "session");
-  const canonicalName = decoded.name;
+  const canonicalName = strictPortableNameIdentity(decoded.name, namingOptions) ?? decoded.name;
   // Windows instance identity folds relative segment case exactly like the
   // sessions version so one hash covers both spellings.
   const canonicalRelativePath =

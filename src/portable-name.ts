@@ -436,10 +436,8 @@ interface DecodingMapping {
 }
 
 function decodingMappings(normalizedHome: string, options: PortableNameOptions): DecodingMapping[] {
-  // Keep built-in labels decodable even when an explicit prefix has the same
-  // path. Encoding gives the explicit mapping precedence; retaining both
-  // labels lets existing semantic names remain valid until state mismatch
-  // checks deliberately reject a changed configuration.
+  // Supported labels decode to this machine's absolute paths. Encoding then
+  // selects the longest current prefix, including explicit built-in overrides.
   const mappings: DecodingMapping[] = [
     { kind: "home", label: options.homeLabel, prefix: normalizedHome },
     { kind: "root", label: options.rootLabel, prefix: "" },
@@ -601,8 +599,8 @@ export function decodePortableSessionDirName(
 /**
  * Strict cross-platform identity spelling for a portable name, including the
  * legacy loose `encodeURIComponent` spellings the decoder accepts: decode,
- * keep the semantic label, and re-encode the remainder with the strict
- * encoding (`*` and terminal dots percent-encoded). Windows folds remainder
+ * re-encode the decoded absolute path with the longest current prefix and
+ * strict encoding (`*` and terminal dots percent-encoded). Windows folds path
  * case exactly like `canonicalPortableSessionDirName`; other platforms keep
  * exact case so case-distinct paths never alias. Returns null when the name
  * does not decode under the configured mappings.
@@ -621,15 +619,8 @@ export function strictPortableNameIdentity(
   }
   const selected = selectDecodingMapping(name, normalizedOptions, normalizedHome);
   if (selected === null) return null;
-  const encodedRemainder = name.slice(selected.mapping.label.length);
-  let remainder: string;
-  try {
-    remainder = decodeURIComponent(encodedRemainder);
-  } catch {
-    return null;
-  }
-  const folded = process.platform === "win32" ? remainder.toLowerCase() : remainder;
-  return `${selected.mapping.label}${encodeRemainderStrict(folded)}`;
+  const path = process.platform === "win32" ? selected.cwd.toLowerCase() : selected.cwd;
+  return portableSessionDirName(path, normalizedOptions);
 }
 
 function normalizedPathForDecode(path: string): string {
@@ -641,7 +632,7 @@ function normalizedPathForDecode(path: string): string {
  * (state entry keys, scan file keys, stale-identity keys, and grouping
  * keys). Decodes every accepted spelling — including the legacy loose
  * `encodeURIComponent` spellings the decoder accepts — and re-encodes the
- * remainder strictly while preserving the semantic label, so a legacy loose
+ * decoded path strictly using the longest current prefix, so a legacy loose
  * name and its strict spelling are one logical identity on every platform
  * (Windows additionally folds remainder case). Physical target paths must
  * never be derived from this identity alone: existing target trees keep
@@ -798,79 +789,13 @@ export function isForeignStatePortableName(
   return isStructurallyStrictPortableName(name);
 }
 
-/**
- * Return stable identity spelling for a portable name on native Windows.
- *
- * Windows paths are case-insensitive, but configured labels remain semantic and
- * case-sensitive. Keep label spelling unchanged while folding only the encoded
- * path remainder. POSIX names retain exact spelling so case-distinct paths do
- * not alias.
- */
-function portableNameLabelForCwd(
-  name: string,
-  cwd: string,
-  options: PortableNameOptions,
-): string | undefined {
-  const normalizedPath = toPosixAbsolute(cwd);
-  const normalizedHome = normalizePrefix(homedir(), "home");
-  const candidates: Array<{
-    kind: "home" | "extra" | "root";
-    label: string;
-    prefix?: string;
-  }> = [
-    { kind: "home", label: options.homeLabel, prefix: normalizedHome },
-    ...Object.entries(options.extraPrefixes).map(([prefix, label]) => ({
-      kind: "extra" as const,
-      label,
-      prefix,
-    })),
-    { kind: "root", label: options.rootLabel },
-  ];
-  candidates.sort((first, second) => second.label.length - first.label.length);
-  for (const candidate of candidates) {
-    try {
-      if (
-        encodeMappedName(normalizedPath, {
-          kind: candidate.kind,
-          label: candidate.label,
-          ...(candidate.prefix === undefined ? {} : { prefix: candidate.prefix }),
-        }) === name
-      ) {
-        return candidate.label;
-      }
-    } catch {
-      // Candidate prefix does not contain decoded cwd.
-    }
-  }
-  return undefined;
-}
+/** Re-encode a supported name using this machine's longest configured prefix. */
 
 export function canonicalPortableSessionDirName(
   name: string,
   options: Partial<PortableNameOptions> | undefined = undefined,
 ): string {
-  if (process.platform !== "win32") return name;
-  const decoded = decodePortableSessionDirName(name, options);
-  if (decoded === null) return name;
-  let normalizedOptions: PortableNameOptions;
-  try {
-    normalizedOptions = normalizePortableNameOptions(options);
-  } catch {
-    return name;
-  }
-  const label = portableNameLabelForCwd(name, decoded.cwd, normalizedOptions);
-  if (label === undefined) return name;
-  const encodedRemainder = name.slice(label.length);
-  if (encodedRemainder.length === 0) return name;
-  let remainder: string;
-  try {
-    remainder = decodeURIComponent(encodedRemainder);
-  } catch {
-    return name;
-  }
-  // Re-encode strictly so the canonical Windows spelling is always a
-  // Windows-safe basename (no `*`, no terminal dots).
-  return `${label}${encodeRemainderStrict(remainder.toLowerCase())}`;
+  return strictPortableNameIdentity(name, options) ?? name;
 }
 
 /** Return true only for a name generated by the configured portable-name scheme. */

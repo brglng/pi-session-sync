@@ -885,7 +885,7 @@ export function nestedReplacementDecision(
           );
         }
         sourceParentReferenceIndex += 1;
-        return sourceReference.syncValue;
+        return mappedResolver.canonicalSync(sourceReference.syncValue);
       }
       if (nativePathInsideOrEqual(replacementTreeRoot, value)) {
         return replacementResolver.localToSync(value);
@@ -916,12 +916,9 @@ export function nestedReplacementDecision(
     },
   );
   onProgress?.("Replayed nested replacement session file", source.absolutePath);
-  // Markdown never rewrites parentSession output bytes, so the replay keeps
-  // every referenced URI untouched and never needs resolver.localToSync to
-  // consume those references. JSONL output carries the locally rewritten
-  // absolute spellings and must consume exactly one matched reference each.
-  const isMarkdownSource = source.absolutePath.toLowerCase().endsWith(".md");
-  if (!isMarkdownSource && sourceParentReferenceIndex !== sourceParentReplays.length) {
+  // Every structured format rewrites parentSession values and must consume
+  // its matched replay evidence before a replacement is accepted.
+  if (sourceParentReferenceIndex !== sourceParentReplays.length) {
     throw new Error("Replacement parentSession references were not preserved");
   }
   const replacementGroup = canonicalStatePortableName(portableName, ctx.namingOptions);
