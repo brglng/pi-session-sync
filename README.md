@@ -38,7 +38,7 @@ Important points:
 - Only the global extension configuration is supported.
 - `targetDir` is required and must be an existing real directory that is not a symlink. Its `sessions` and `missions` children are managed by the extension.
 - `homeLabel` defaults to `HOME`; `rootLabel` defaults to `ROOT`; `extraPrefixes` defaults to `{}`.
-- Labels and prefixes determine portable names. Keep the configuration stable on each machine if you want predictable names.
+- Portable names use the longest matching absolute prefix among HOME, ROOT, and all `extraPrefixes`, matching whole path segments. An explicit extra prefix wins when it equals a built-in prefix.
 - The local session root is taken from Pi’s effective `SessionManager` configuration. The extension does not provide a separate session-root setting.
 
 ## Run
@@ -56,8 +56,11 @@ Synchronization is manual. There is no background watcher.
 - Session files: `.json`, `.jsonl`, and `.md`.
 - Mission files: `.json`, `.jsonl`, and `.md`, preserving their relative tree.
 - Absolute paths under the sessions or missions roots are converted to `pi-session-sync://` URIs in the target and restored on reverse sync. Known Pi conversation and tool-content subtrees, such as `message` content and tool arguments/results, are preserved as content and are not inspected for paths.
-- `cwd` uses a rootless URI such as `pi-session-sync://HOME/project`.
-- `parentSession` and other path-valued fields use the namespaced `sessions` or `missions` URI format.
+- `cwd` uses a rootless URI such as `pi-session-sync://HOME%2Fproject`. Generic absolute paths outside the synced trees also use rootless URIs when a configured prefix can encode them.
+- Session and mission references use the namespaced `sessions` or `missions` URI format; `parentSession` uses a sessions file URI. JSON, JSONL, and Markdown frontmatter apply the same conversion.
+- Supported existing URIs decode to the current machine’s absolute path and re-encode with its longest matching prefix, including canonical hashes and session portable names. Original labels are not retained, and paths from another machine are never relocated to the current HOME by inference.
+- Supported rootless URIs in generic fields use the same encoding as equivalent absolute paths: managed missions and mapped sessions references become namespaced URIs. Without a current session mapping, generic references use the current longest-prefix rootless URI instead of inventing a session name; `cwd` and `parentSession` retain their dedicated semantics.
+- Referenced paths need not exist. Their local existence and file type are not checked, including for `parentSession`; URI structure, containment, and safe path segments are still validated.
 - Non-hidden empty descendant directories are synchronized and deletion is propagated. A session root that contains no synchronizable session file is not synchronized as a root.
 - Deleted files and directories are tracked with tombstones so deletion can propagate without immediately resurrecting unchanged content.
 
@@ -79,4 +82,4 @@ This means that mapping continuity across machines is not guaranteed. The extens
 
 ## Safety behavior
 
-The extension validates roots, file types, structured content, portable URIs, parent-session references, and symlink boundaries before writing staged results. Parse, validation, preflight, or staging errors stop the sync before destination writes begin.
+The extension validates actual source/destination roots and file types, structured content, portable URI syntax, containment, and symlink boundaries before writing staged results. Active-session refresh still requires a valid session header and decodable string `cwd` for Pi’s public `switchSession` API. Parse, validation, preflight, or staging errors stop the sync before destination writes begin.

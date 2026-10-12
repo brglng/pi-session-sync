@@ -254,3 +254,21 @@
 - 上述规则不改变 JSON/YAML 语法错误及未解析 YAML alias 的既有错误处理；字符串值仍按现有路径转换与 URI 校验规则处理。
 - 上述字段跳过规则不放宽活动会话刷新 preflight：若目标文件将写入当前活动 session，仍必须满足有效 session header 与可解码 string `cwd` 等公开 `switchSession` 安全条件；不满足时拒绝刷新。
 - 本版本后续修订：`cwd` 或 `parentSession` 的值若为 JSON object／YAML mapping，仍须递归处理其子值；数组、null、数字与布尔值仍按非字符串值静默跳过，不递归其子值。
+
+## 当前需求修订：统一最长 prefix 编码
+
+以下规则覆盖此前关于 semantic label 保留、mission cwd evidence、Markdown `parentSession` 原样输出和引用路径存在性检查的冲突要求；本次不变更包版本，不提供旧格式兼容或迁移。
+
+- JSON、JSONL 和 Markdown YAML frontmatter 中所有允许改写的路径元数据，包括 `cwd`、`parentSession` 和递归发现的通用字段，统一按照当前机器的绝对路径编码。在 HOME、ROOT 和全部 `extraPrefixes` 中按规范化路径段边界选择最长匹配 prefix；显式 extra prefix 与内置 prefix 相同时优先使用显式配置。
+- 当前配置支持的已有 URI 必须先解码为当前机器上的绝对路径，再按上述规则重新编码；输出、canonical hash、当前 session 映射与 portable name 均不得保留原 semantic label。ROOT URI 解码后位于当前 HOME 内时，使用当前最长 prefix；不得推断其它机器的 HOME，也不得将其它机器的绝对路径擅自迁移到当前 HOME。
+- sessions／missions 根内引用继续使用对应命名空间；sessions URI 内的 portable session name 按当前最长 prefix 生成，反向转换继续生成对应的 Pi `--...--` 本机目录名。根外但可编码的通用绝对路径继续使用 rootless portable-name URI。
+- 通用字段中的受支持 rootless URI 解码后，与等价的绝对路径执行相同编码：missions 根内和已映射 sessions 根内使用对应命名空间；sessions 根内缺少当前映射时，使用当前最长 prefix 的 rootless URI，不虚构 session portable name。两种表示的输出、canonical hash 和扫描证据必须一致；`cwd` 仍使用专用 rootless 语义，`parentSession` 仍使用 sessions 文件引用语义。
+- Markdown `parentSession` 与 JSON／JSONL 一致执行实际路径转换，而不再仅在 canonical hash 中归一化。
+- 不检查任何被引用路径在本机是否存在或属于何种文件类型，包括 `parentSession`；不存在的文件和目录引用仍可转换。URI 结构、范围、traversal 和跨平台 segment 安全规则继续适用；`parentSession` 仍须使用 sessions 文件 URI 结构，不能使用无相对路径的 sessions 目录 URI。
+- 实际源／目标扫描、包含性和符号链接边界检查，以及活动会话公开 `switchSession` 刷新 preflight 保持不变。对话、工具内容和 worker transcript 内容排除规则，以及非字符串 `cwd`／`parentSession` 的最新 object 递归／其它值跳过规则保持不变。
+- 两个含受管文件的 target session 树若解码到同一个当前 portable identity，必须在写入前拒绝，不能择一或合并。已有 live 受管树拥有该 identity 时，不含受管文件的 alternate 根目录不得参与映射、目录观察或 cleanup，也不得复制或删除其中未知内容；所选 live 树内的非隐藏空目录继续正常同步。
+
+## v0.6.0
+
+- 将上述「统一最长 prefix 编码」需求作为 v0.6.0 发布；此前「本次不变更包版本」仅描述实现阶段，不再限制本次发布。
+- 本版本不保留原 semantic label，不提供旧行为兼容或自动迁移；路径编码与 canonical hash 统一使用当前机器的最长 prefix 规则。
